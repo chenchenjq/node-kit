@@ -21,4 +21,13 @@ export class PgRateLimitRepository implements RateLimitRepository {
     );
     return rows[0]!.count;
   }
+
+  async countSince(input: Parameters<RateLimitRepository["countSince"]>[0], tx?: SmsTransaction): Promise<number> {
+    const { rows } = await db(this.pool, tx).query<{ count: string }>(
+      `select coalesce(sum(count), 0)::text as count from sms_kit.rate_limit_bucket
+        where tenant_id = $1 and scope = $2 and scope_hash = $3 and window_start > $4`,
+      [input.tenantId, input.scope, input.scopeHash, input.since],
+    );
+    return Number(rows[0]?.count ?? "0");
+  }
 }

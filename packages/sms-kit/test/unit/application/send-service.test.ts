@@ -6,13 +6,13 @@ import type { TenantId } from "../../../src/core/types.js";
 
 const tenantA = "tenant-a" as TenantId;
 const tenantB = "tenant-b" as TenantId;
-const template: Template = {
-  id: "template-1" as Template["id"], signatureId: "signature-1", templateKey: "order.shipped",
-  externalCode: "SMS_ORDER", externalName: "Order", externalStatus: "approved", templateType: "notification",
-  purpose: "notification", variables: [{ name: "orderNo", sensitive: false }], enabled: true, version: 1,
-};
+function template(type: Template["templateType"]): Template {
+  return { id: "template-1" as Template["id"], signatureId: "signature-1", templateKey: type === "verification" ? "otp.login" : "order.shipped",
+    externalCode: "SMS_ORDER", externalName: "Order", externalStatus: "approved", templateType: type,
+    purpose: type === "verification" ? "verification" : "notification", variables: [{ name: type === "verification" ? "code" : "orderNo", sensitive: false }], enabled: true, version: 1 };
+}
 
-function fixture(circuitOpen = false) {
+function fixture(circuitOpen = false, templateType: Template["templateType"] = "notification", configured = true) {
   const messages = new Map<string, any>();
   const attempts: any[] = [];
   const reservations: any[] = [];
@@ -23,10 +23,10 @@ function fixture(circuitOpen = false) {
   const store = {
     transaction: async (work: any) => work({}),
     resources: {
-      findTemplateByKey: async () => template,
+      findTemplateByKey: async () => template(templateType),
       listSignatures: async () => ({ items: [{ id: "signature-1", externalName: "Kit", enabled: true, externalStatus: "approved" }], total: 1 }),
     },
-    config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "id", accessKeySecretRef: "secret", receiptCallbackTokenRef: "token", status: "ready", enabled: true }) },
+    config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "id", accessKeySecretRef: "secret", receiptCallbackTokenRef: "token", status: configured ? "ready" : "untested", enabled: configured }) },
     messages: {
       createWithSendJob: async (input: any) => {
         const key = `${input.tenantId}:${input.idempotencyKey}`;
@@ -89,8 +89,8 @@ describe("SendService", () => {
   });
 
   it("commits direct budget and marker before the OTP provider call", async () => {
-    const { service, attempts, reservations, provider } = fixture();
-    const pending = service.sendOtpNow({ ...input, purpose: "notification", idempotencyKey: "otp-1" });
+    const { service, attempts, reservations, provider } = fixture(false, "verification");
+    const pending = service.sendOtpNow({ tenantId: tenantA, templateKey: "otp.login", phone: "13800138000", variables: { code: "123456" }, purpose: "verification", idempotencyKey: "otp-1" });
     await provider.waitUntilSendCalled();
     expect(attempts[0]).toMatchObject({ dispatchMode: "direct", status: "started" });
     expect(attempts[0]?.leaseToken).toBeUndefined();
@@ -100,8 +100,23 @@ describe("SendService", () => {
   });
 
   it("rejects real direct sends while the circuit is open", async () => {
-    const { service, provider } = fixture(true);
-    await expect(service.sendOtpNow({ ...input, idempotencyKey: "otp-2" })).rejects.toMatchObject({ code: "CIRCUIT_OPEN" });
+    const { service, provider } = fixture(true, "verification");
+    await expect(service.sendOtpNow({ tenantId: tenantA, templateKey: "otp.login", phone: "13800138000", variables: { code: "123456" }, purpose: "verification", idempotencyKey: "otp-2" })).rejects.toMatchObject({ code: "CIRCUIT_OPEN" });
     expect(provider.calls).toBe(0);
+  });
+
+  it("keeps notifications queued and verification templates direct", async () => {
+    const notification = fixture();
+    await expect(notification.service.sendOtpNow(input)).rejects.toMatchObject({ code: "TEMPLATE_UNAVAILABLE" });
+    const verification = fixture(false, "verification");
+    await expect(verification.service.enqueueNotification({ tenantId: tenantA, templateKey: "otp.login", phone: "13800138000", variables: { code: "123456" }, purpose: "verification", idempotencyKey: "queue-otp" })).rejects.toMatchObject({ code: "TEMPLATE_UNAVAILABLE" });
+    expect(notification.messages.size).toBe(0);
+    expect(verification.messages.size).toBe(0);
+  });
+
+  it("rejects invalid local provider configuration before persisting a direct dispatch marker", async () => {
+    const { service, messages, attempts, reservations, provider } = fixture(false, "verification", false);
+    await expect(service.sendOtpNow({ tenantId: tenantA, templateKey: "otp.login", phone: "13800138000", variables: { code: "123456" }, purpose: "verification", idempotencyKey: "bad-config" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(messages.size).toBe(0); expect(attempts).toHaveLength(0); expect(reservations).toHaveLength(0); expect(provider.calls).toBe(0);
   });
 });

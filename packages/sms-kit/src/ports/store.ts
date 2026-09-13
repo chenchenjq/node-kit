@@ -479,6 +479,13 @@ export interface RateLimitRepository {
     windowSeconds: number;
     expiresAt: Date;
   }>, tx?: SmsTransaction): Promise<number>;
+  /** Counts recorded events after a boundary for transactional sliding cooldowns. */
+  countSince(input: Readonly<{
+    tenantId: TenantId;
+    scope: "phone_purpose" | "ip_purpose" | "global";
+    scopeHash: string;
+    since: Date;
+  }>, tx?: SmsTransaction): Promise<number>;
 }
 
 export type AuditEvent = Readonly<{

@@ -53,4 +53,27 @@ describe("queued notification enqueue", () => {
     expect(jobs.rows[0]).toEqual({ count: "1" });
     expect(plaintext.rows[0]).toEqual({ count: "0" });
   });
+
+  it("accepts a same-token late authoritative response after recovery marked it unknown", async () => {
+    const now = new Date("2026-09-13T00:00:00.000Z");
+    const template = await store.resources.findTemplateByKey({ templateKey: "order.shipped" });
+    if (template === undefined) throw new Error("seed template missing");
+    const created = await store.messages.createWithSendJob({
+      id: crypto.randomUUID() as never, tenantId: tenantA, idempotencyKey: "late-response", templateId: template.id,
+      templateKeySnapshot: template.templateKey, externalTemplateCodeSnapshot: template.externalCode, signatureNameSnapshot: "Queued",
+      purpose: "notification", phoneCiphertext: "phone", phoneKeyId: "phone-k1", phoneHash: "hash", phoneLast4: "0000", phoneMasked: "138****0000",
+      variableNames: ["orderNo"], submittedAt: now,
+    });
+    const attempt = await store.attempts.createStarted({ tenantId: tenantA, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: now });
+    await store.transaction(async (tx) => {
+      await store.messages.completeAcceptance({ tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "unknown", evidence: "same-dispatch-response", finalErrorCode: "ACCEPTANCE_UNKNOWN", occurredAt: now }, tx);
+      await store.attempts.completeByDispatchToken({ tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "unknown", errorCode: "ACCEPTANCE_UNKNOWN", occurredAt: now }, tx);
+    });
+    const accepted = await store.transaction(async (tx) => {
+      const message = await store.messages.completeAcceptance({ tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "accepted", evidence: "positive-provider-evidence", providerBizId: "biz-late", occurredAt: now }, tx);
+      await store.attempts.completeByDispatchToken({ tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "accepted", providerRequestId: "req-late", occurredAt: now }, tx);
+      return message;
+    });
+    expect(accepted).toMatchObject({ acceptanceStatus: "accepted", providerBizId: "biz-late" });
+  });
 });
