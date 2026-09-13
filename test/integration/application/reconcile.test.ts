@@ -145,4 +145,15 @@ describe("ReconcileService", () => {
     await expect(store.messages.get({ tenantId, id: targetId as never })).resolves.toMatchObject({ deliveryStatus: "delivered" });
     await expect(store.jobs.trySucceed({ tenantId, id: first.id, leaseToken: first.leaseToken })).resolves.toBe(false);
   });
+
+  it("persists a query receipt correlated by OutId when no BizId survived acceptance", async () => {
+    await clearPendingReconciliation();
+    const targetId = await seedUnknown();
+    const provider = new PagedProvider().withPages([{ kind: "page", hasNextPage: false, items: [{ outId: targetId, status: "delivered", occurredAt: clock.now() }] }]);
+    const reconcile = new ReconcileService({ store, provider, phoneProtector: { unprotect: async () => "13800138000" as never }, clock, events: { emit: () => undefined } });
+
+    await reconcile.runBatch({ limit: 1 });
+
+    await expect(pool.query<{ provider_biz_id: string | null; provider_out_id: string | null; source: string }>("select provider_biz_id, provider_out_id, source from sms_kit.delivery_receipt where message_id = $1 order by received_at desc limit 1", [targetId])).resolves.toMatchObject({ rows: [{ provider_biz_id: null, provider_out_id: targetId, source: "query" }] });
+  });
 });
