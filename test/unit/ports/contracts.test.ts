@@ -21,7 +21,7 @@ describe("public port contracts", () => {
       listSignatures: async () => ({ items: [], nextCursor: undefined }),
       listTemplates: async () => ({ items: [], nextCursor: undefined }),
       send: async () => ({ kind: "accepted", bizId: "biz-1", requestId: "req-1" }),
-      queryDelivery: async () => ({ kind: "waiting" }),
+      queryDelivery: async () => ({ kind: "page", items: [], hasNextPage: false }),
       parseReceipt: () => ({ items: [], acknowledgement: { code: 0, msg: "成功" } }),
     };
     const tenantId = "trusted-tenant" as TenantId;

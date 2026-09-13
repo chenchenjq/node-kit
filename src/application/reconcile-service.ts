@@ -102,11 +102,12 @@ export class ReconcileService {
         ...(message.providerBizId === undefined ? {} : { bizId: message.providerBizId }),
       });
       if (result.kind === "unknown") { await this.reschedule(job, result.code); return; }
-      if (result.kind === "delivered" || result.kind === "failed") {
-        const status = result.kind;
-        const occurredAt = status === "delivered" ? result.deliveredAt ?? now : result.occurredAt ?? now;
-        const bizId = result.bizId ?? message.providerBizId ?? `query:${message.id}`;
-        await this.recordResult(job, message, status, bizId, occurredAt, status === "failed" ? result.code : undefined);
+      // Alibaba may return details for nearby sends; never let a phone/date
+      // match substitute for the persisted opaque OutId of this message.
+      const item = result.items.find((candidate) => candidate.outId === message.id && candidate.status !== "waiting");
+      if (item !== undefined && (item.status === "delivered" || item.status === "failed")) {
+        const occurredAt = item.occurredAt ?? now;
+        await this.recordResult(job, message, item.status, occurredAt, item.providerCode);
         return;
       }
       if (!result.hasNextPage) { await this.reschedule(job, "DELIVERY_UNKNOWN"); return; }
@@ -115,16 +116,20 @@ export class ReconcileService {
     await this.reschedule(job, "DELIVERY_UNKNOWN");
   }
 
-  private async recordResult(job: Job, message: Message, status: "delivered" | "failed", bizId: string, occurredAt: Date, providerCode?: string): Promise<void> {
+  private async recordResult(job: Job, message: Message, status: "delivered" | "failed", occurredAt: Date, providerCode?: string): Promise<void> {
     const leaseToken = job.leaseToken;
     if (leaseToken === undefined) return;
     try {
       await this.dependencies.store.transaction(async (tx) => {
-        const recorded = await this.dependencies.store.receipts.record({
-          tenantId: message.tenantId, messageId: message.id, dedupeKey: receiptKey(message, bizId, status, occurredAt), providerBizId: bizId,
-          deliveryStatus: status, ...(providerCode === undefined ? {} : { providerCode }), occurredAt, receivedAt: this.dependencies.clock.now(), source: "query", redactedPayload: { redactedFields: ["phone"], reportCount: 1 },
-        }, tx);
-        if (recorded.created) await this.dependencies.store.messages.completeDelivery({ tenantId: message.tenantId, id: message.id, status, occurredAt }, tx);
+        // Query endpoints do not echo BizId. A receipt is only valid when the
+        // queried message already has its provider reference; never invent one.
+        if (message.providerBizId !== undefined) {
+          await this.dependencies.store.receipts.record({
+            tenantId: message.tenantId, messageId: message.id, dedupeKey: receiptKey(message, message.providerBizId, status, occurredAt), providerBizId: message.providerBizId,
+            deliveryStatus: status, ...(providerCode === undefined ? {} : { providerCode }), occurredAt, receivedAt: this.dependencies.clock.now(), source: "query", redactedPayload: { redactedFields: ["phone"], reportCount: 1 },
+          }, tx);
+        }
+        await this.dependencies.store.messages.completeQueryDelivery({ tenantId: message.tenantId, id: message.id, status, occurredAt }, tx);
         await this.dependencies.store.jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken }, tx);
       });
     } catch (error) {
