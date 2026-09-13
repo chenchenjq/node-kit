@@ -17,6 +17,7 @@ import type { SecretResolver } from "../ports/security.js";
 import type { AliyunApi, AliyunQueryOutput } from "./api.js";
 import { AliyunSdkClientFactory, type AliyunClientFactory } from "./client.js";
 import { classifyAliyunError } from "./error-map.js";
+import { mapSignature, mapTemplate } from "./resource-map.js";
 
 export type AliyunSmsProviderOptions = Readonly<{
   secretResolver: SecretResolver;
@@ -55,12 +56,7 @@ export class AliyunSmsProvider implements SmsProvider {
     const totalCount = page.totalCount ?? 0;
 
     return {
-      items: (page.smsSignList ?? []).flatMap((sign) => sign.signName === undefined ? [] : [{
-        externalKey: `aliyun:sign:${sign.signName}`,
-        externalName: sign.signName,
-        externalStatus: sign.auditStatus ?? "unknown",
-        externalType: sign.businessType ?? "unknown",
-      }]),
+      items: (page.smsSignList ?? []).map(mapSignature),
       nextCursor: currentPage * input.pageSize < totalCount ? String(currentPage + 1) : undefined,
     };
   }
@@ -75,19 +71,7 @@ export class AliyunSmsProvider implements SmsProvider {
     const totalCount = page.totalCount ?? 0;
 
     return {
-      items: (page.smsTemplateList ?? []).flatMap((template) => {
-        if (template.templateCode === undefined || template.templateName === undefined) {
-          return [];
-        }
-        return [{
-          externalKey: `aliyun:template:${template.templateCode}`,
-          externalCode: template.templateCode,
-          externalName: template.templateName,
-          externalStatus: template.auditStatus ?? "unknown",
-          templateType: template.templateType === 2 ? "verification" : "notification",
-          variableNames: this.templateVariables(template.templateContent),
-        }];
-      }),
+      items: (page.smsTemplateList ?? []).map(mapTemplate),
       nextCursor: currentPage * input.pageSize < totalCount ? String(currentPage + 1) : undefined,
     };
   }
@@ -161,13 +145,6 @@ export class AliyunSmsProvider implements SmsProvider {
     }
     const value = Number(cursor);
     return Number.isSafeInteger(value) && value > 0 ? value : 1;
-  }
-
-  private templateVariables(content: string | undefined): readonly string[] {
-    if (content === undefined) {
-      return [];
-    }
-    return [...content.matchAll(/\$\{([^}]+)\}/g)].flatMap((match) => match[1] === undefined ? [] : [match[1]]);
   }
 
   private toSendResult(error: ReturnType<typeof classifyAliyunError>): ProviderSendResult {

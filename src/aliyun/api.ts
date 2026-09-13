@@ -11,7 +11,7 @@ import type {
 
 export type AliyunSign = Readonly<Pick<
   QuerySmsSignListResponseBodySmsSignList,
-  "auditStatus" | "businessType" | "signName"
+  "auditStatus" | "businessType" | "orderId" | "signName"
 >>;
 
 export type AliyunSignPage = Readonly<Pick<
@@ -21,7 +21,7 @@ export type AliyunSignPage = Readonly<Pick<
 
 export type AliyunTemplate = Readonly<Pick<
   QuerySmsTemplateListResponseBodySmsTemplateList,
-  "auditStatus" | "templateCode" | "templateContent" | "templateName" | "templateType"
+  "auditStatus" | "outerTemplateType" | "templateCode" | "templateContent" | "templateName" | "templateType"
 >>;
 
 export type AliyunTemplatePage = Readonly<Pick<
