@@ -171,7 +171,18 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const store = await factory.createStore();
       const tenantA = factory.tenantId(`tenant-audit-a-${factory.ids.next()}`);
       const tenantB = factory.tenantId(`tenant-audit-b-${factory.ids.next()}`);
-      await store.audits.append({ id: randomUUID(), tenantId: tenantA, actorId: "admin", action: "message.read", targetType: "message", result: "succeeded", metadata: { counts: [{ name: "message", value: 1 }] }, occurredAt: factory.clock.now() });
+      const event = await store.audits.append({
+        id: randomUUID(), tenantId: tenantA, actorId: "admin", action: "message.read", targetType: "message", result: "succeeded",
+        metadata: {
+          redactedFields: ["phone", "not-allowed"],
+          counts: [{ name: "message", value: 1 }, { name: "not-allowed", value: 1 }, { name: "receipt", value: Number.POSITIVE_INFINITY }],
+          phone: "+8613800138000",
+        } as never,
+        occurredAt: factory.clock.now(),
+      });
+      expect(event.metadata).toEqual({ redactedFields: ["phone"], counts: [{ name: "message", value: 1 }] });
+      expect((await store.audits.list({ tenantId: tenantA, page: 1, pageSize: 10 })).items[0]?.metadata)
+        .toEqual({ redactedFields: ["phone"], counts: [{ name: "message", value: 1 }] });
       expect(await store.audits.list({ tenantId: tenantB, page: 1, pageSize: 10 })).toEqual({ items: [], total: 0 });
     });
 
@@ -187,6 +198,18 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const receipt = { tenantId: tenant, messageId: message.id, dedupeKey: `receipt:${factory.ids.next()}`, providerBizId: `biz:${factory.ids.next()}`, deliveryStatus: "delivered" as const, occurredAt: factory.clock.now(), receivedAt: factory.clock.now(), source: "callback" as const };
       expect((await store.receipts.record(receipt)).created).toBe(true);
       expect((await store.receipts.record(receipt)).created).toBe(false);
+
+      const unmatched = {
+        tenantId: factory.tenantId(`tenant-unmatched-a-${factory.ids.next()}`), dedupeKey: `receipt:${factory.ids.next()}`,
+        providerBizId: `unmatched:${factory.ids.next()}`, deliveryStatus: "failed" as const,
+        occurredAt: factory.clock.now(), receivedAt: factory.clock.now(), source: "callback" as const,
+      };
+      const recordedUnmatched = await store.receipts.record(unmatched);
+      expect(recordedUnmatched).toMatchObject({ created: true, receipt: { matchStatus: "unmatched" } });
+      expect(recordedUnmatched.receipt.tenantId).toBeUndefined();
+      expect(recordedUnmatched.receipt.messageId).toBeUndefined();
+      await expect(store.receipts.record({ ...unmatched, tenantId: factory.tenantId(`tenant-unmatched-b-${factory.ids.next()}`) }))
+        .rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
 
       expect(await store.stats.rollupDirtyDates({ tenantId: tenant, limit: 10 })).toBeGreaterThan(0);
       expect(await store.stats.rollupDirtyDates({ tenantId: tenant, limit: 10 })).toBe(0);
