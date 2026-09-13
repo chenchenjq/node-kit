@@ -2,7 +2,7 @@
 
 ## 1. 文档信息
 
-- 状态：已批准，实施计划已生成
+- 状态：方案 A 规范修订待复审
 - 日期：2026-09-13
 - 目标包：`sms-kit`
 - 目标目录：`packages/sms-kit/`
@@ -41,13 +41,13 @@
 | --- | --- |
 | 包形态 | 单包分层，通过子路径导出隔离模块 |
 | 包名 | `sms-kit`，初始设置 `"private": true` |
-| 技术基线 | TypeScript strict、Node.js 20+、ESM、类型声明、server-only |
+| 技术基线 | TypeScript strict、Node.js 20+、ESM、类型声明、敏感入口构建期 server-only |
 | 数据访问 | 核心 ORM 无关；提供 PostgreSQL DDL、迁移、可选 `pg` 适配器及契约测试 |
 | 部署模型 | 单系统实例、单活动短信配置；运行数据租户感知，单租户使用固定默认租户键 |
 | 供应商 | 阿里云国内短信 |
 | 凭据 | 只持久化密钥引用；内置环境变量解析器并允许自定义解析器 |
 | 模板调用 | 管理员录入本地稳定键，业务模块不依赖阿里云 TemplateCode |
-| 发送模式 | OTP 优先直发；普通事务短信异步发送；受理结果未知时禁止自动重发 |
+| 发送模式 | OTP 优先直发；普通事务短信异步发送；派发标记先于网络调用；受理结果未知时禁止自动重发 |
 | 送达状态 | HTTP 回调为主，`QuerySendDetails` 定时补查 |
 | 认证 | Better Auth 为可选适配器；短信验证码免密登录 |
 | 前端 | 资源标签页；Next.js + Tailwind CSS + shadcn/ui 规范 |
@@ -67,7 +67,7 @@
 - `sms-kit/next/types`：可供宿主前端以 `import type` 使用的公开 DTO 类型。
 - `sms-kit/testing`：模拟 Provider、固定时钟、种子工厂和故障注入工具。
 
-核心模块不得依赖 Next.js、Better Auth、阿里云 SDK 或 PostgreSQL 驱动。所有运行时入口必须声明为仅服务端使用，避免凭据解析和数据库代码进入浏览器包。
+核心模块不得依赖 Next.js、Better Auth、阿里云 SDK 或 PostgreSQL 驱动。`application`、`security`、`postgres`、`aliyun`、`better-auth` 和 `next` 等敏感入口必须通过 `package.json` 浏览器条件导出指向拒绝模块；Next.js 专用入口额外使用 `server-only` 构建期标记。`core`、`ports` 和 `next/types` 可以供浏览器执行类型导入，但不得导出 Secret 解析、解密、数据库或供应商实现。兼容测试必须证明 Client Component 导入敏感入口时构建失败，而普通 Node.js 消费不受 Next.js 专用标记影响。
 
 供应商配置、签名和模板属于系统级共享资源；消息、任务、Challenge、限流、审计和统计必须携带宿主可信来源提供的 `tenantId` 并按租户隔离。`tenantId` 不得从未认证的请求体或查询参数直接接受。单租户宿主使用一个固定默认租户键即可，不需要实现租户选择界面。
 
@@ -75,6 +75,7 @@
 
 - `SmsProvider`：测试授权、列出云端资源、发送、查询发送详情、解析回执。
 - `SmsStore`：配置、资源、消息、尝试、回执、任务、Challenge、限流、审计和统计的持久化；运行数据操作显式接收 `TenantId`。
+- `PolicyStore`：版本化保存验证码、限流、每日预算和人工熔断策略，并原子预占或释放发送预算。
 - `SecretResolver`：根据引用按需解析 Secret。
 - `PhoneNumberProtector`：规范化、加密、解密、检索哈希和脱敏。
 - `MessagePayloadProtector`：加密、解密普通异步短信的模板变量，并携带密钥版本用于轮换。
@@ -82,6 +83,7 @@
 - `TenantContext`：由宿主认证边界解析可信租户；单租户实现始终返回固定租户键。
 - `SmsTransaction`：允许 `pg` 适配器加入宿主现有事务，用于原子消费高风险证明。
 - `Clock`、`Sleeper`、`IdGenerator`、`EventSink`：支持确定性时间、响应时延测试和可观测性。
+- `BackgroundTaskScheduler`：接收未启动的任务函数；同步拒绝调度时抛错，异步失败必须送入脱敏事件，宿主负责把任务登记到 `waitUntil` 或等价生命周期机制。
 
 ## 7. 功能需求
 
@@ -92,6 +94,7 @@
 - 初始内置 `env://变量名` 引用解析；允许宿主注册其他 scheme。
 - 配置读取接口不得返回已解析 Secret，只返回引用类型和脱敏引用名称。
 - Secret 只在单次操作中存在，不进入缓存、结构化事件、错误对象或数据库。
+- 验证码、限流、全局每日预算和人工熔断使用独立的版本化策略配置；凭据变化不覆盖安全策略，策略变化也不把供应商授权状态重置为待测试。
 
 ### 7.2 两阶段授权测试
 
@@ -104,6 +107,7 @@
 ### 7.3 签名与模板同步
 
 - 调用阿里云 `QuerySmsSignList` 和 `QuerySmsTemplateList` 获取云端资源，必须完整处理分页；任一页失败时同步批次标记为部分失败，不把不完整结果解释为云端删除。
+- 签名列表只接受 `businessType` 的“验证码类型”和“通用类型”；`orderId` 优先作为外部键，不存在时使用规范化的 `businessType + signName` 摘要。模板以 `templateType` 为主并交叉校验 `outerTemplateType`：国内通知必须为 `(templateType=0, outerTemplateType=1)`，验证码必须为 `(2, 0)`；营销 `(1, 2)`、国际/港澳台 `(6, 3)`、缺失、未知及冲突组合均不能导入。枚举映射必须用锁定版本 SDK fixture 做契约测试，升级 SDK 时显式复审。
 - 同步结果保存为一次资源同步批次，并为每个候选资源保存脱敏快照、供应商稳定键、校验和和过期时间，可展示新增、变更、不可用和错误数量。
 - 只有管理员明确选择的资源才能导入本地系统。
 - 提交导入时必须校验同步批次未过期且候选校验和一致；不一致时要求重新同步，不能静默导入已变化资源。
@@ -130,9 +134,14 @@
 
 - 每次调用只允许一个接收手机号。
 - OTP 走优先直发路径，不进入持久化普通短信队列，也不做自动重复发送。Better Auth 宿主可使用 `waitUntil` 或等价机制在响应外完成这次直接调用，但必须保留发送任务的执行承诺，并统一外部响应时序以降低账号枚举和时序侧信道风险。
+- 所有真实发送（包括 OTP 直发）都必须先在短事务中创建或复用消息、预占预算并提交带唯一 `dispatchToken` 的 `started` Attempt，事务提交后才允许网络调用。直发任务若在派发标记后被遗弃，由定时恢复扫描把 Attempt 和消息推进为受理未知并创建补查任务，不得重新发送；OTP 值不持久化。
 - 普通事务短信先在同一事务中创建消息和任务；手机号密文及模板变量密文随消息保存，由 Worker 在租约期间按需解密后发送。OTP 变量不得进入该异步载荷。
 - 相同业务幂等键不得创建重复短信。
 - 业务幂等键在租户内唯一；同一键可被不同租户独立使用，所有读取、统计和人工补查均限制在当前租户。
+- Worker 租用任务时生成不可复用的 `leaseToken`。调用供应商前必须在短事务中校验租约并提交带唯一 `dispatchToken` 的 `started` Attempt，然后才允许网络调用。
+- 任务租约过期或进程恢复时，只要存在未完成的 `started` Attempt，就不得再次调用供应商；恢复者把该 Attempt 和消息推进为受理未知并创建补查任务。若原调用稍后返回，只能凭相同 `dispatchToken` 完成该 Attempt，不得启动新调用。
+- 若进程在提交派发标记后、实际网络调用前崩溃，也按受理未知处理。这是为避免重复短信而接受的保守漏发；系统不声明端到端恰好一次发送。
+- Worker 的供应商请求超时必须小于租约期限；所有任务状态更新携带 `leaseToken` 或版本条件，旧 Worker 不能覆盖新所有者的状态。
 - 只有供应商明确拒绝受理且明确标识为可重试的限流或暂时不可用响应，才允许指数退避和抖动，默认最多三次供应商调用。
 - 网络超时、连接中断或进程崩溃导致“可能已经提交”的情况必须把 `acceptance_status` 标记为 `unknown`，先等待回执或补查，禁止自动重发。OutId 只用于业务关联，不视为供应商幂等键。
 - 永久失败不重试；每次调用均记录独立 Attempt。
@@ -142,8 +151,9 @@
 - `sms-kit/better-auth` 是可选入口，Better Auth 作为可选 peer dependency。
 - 适配 Better Auth Phone Number 插件的 `sendOTP` 和 `sendPasswordResetOTP`。
 - 登录验证码映射到 `auth.login_otp`，找回密码映射到 `auth.password_reset`；映射允许宿主配置。
-- 首版只允许已有账号登录，宿主不得启用 `signUpOnVerification`；手机号注册不属于本项目范围。
-- 适配器要求宿主提供 `isExistingPhone` 服务端回调。未知手机号不发送真实短信，执行等价的固定成本处理并返回与已存在手机号相同的外部响应；安全审计不得暴露号码是否存在。
+- 首版只允许已有账号登录，宿主必须省略 `signUpOnVerification`（当前类型为配置对象，不得为禁用而传入 `false`）；手机号注册不属于本项目范围。
+- 适配器要求宿主提供租户范围内的 `isExistingPhone` 服务端回调。查询账号存在性前，已知与未知号码都执行相同的手机号/IP/租户限流；未知手机号不预占发送预算、不发送真实短信，执行等价的固定成本处理并返回与已存在手机号相同的外部响应；安全审计不得暴露号码是否存在。
+- 适配器输出必须在编译期满足当前受支持 Better Auth `phoneNumber()` 的 `sendOTP` 与 `sendPasswordResetOTP` 类型。`peerDependencies` 声明支持范围，开发依赖锁定同范围内的已测试版本；升级 Better Auth 时重新运行类型与行为契约。后台发送通过 `BackgroundTaskScheduler` 登记未启动任务，禁止创建无人接管的 Promise；调度拒绝和异步失败进入脱敏事件。
 - Better Auth 自己生成并验证登录/找回密码 OTP，管理用户和会话。
 - `sms-kit` 负责模板选择、发送、限流、脱敏记录、审计和统计。
 - Better Auth 与宿主认证流程必须对不存在的手机号返回一致响应；`sms-kit` 适配器不得通过发送错误泄露账号是否存在。
@@ -155,7 +165,7 @@
 - 默认验证码长度为 6 位、有效期 5 分钟、最多验证 3 次。
 - 验证成功签发随机、短时、单次使用的证明；数据库保存证明哈希。
 - 证明绑定 `subjectId + action + challengeId`，不能跨用户、跨动作或重复使用。
-- 消费请求必须携带宿主生成的业务 `consumptionKey`。同一证明与同一 `consumptionKey` 的重复请求返回首次消费结果；不同 `consumptionKey` 再次消费必须失败。
+- 消费请求必须携带宿主生成的业务 `consumptionKey`。消费事务先按证明哈希和租户执行行锁，再同时校验 `tenantId + subjectId + action + proofHash`；同一证明与同一 `consumptionKey` 的重复请求返回 `replay: true`，不同 `consumptionKey` 再次消费必须失败且不得错误消耗其他动作的证明。
 - 当宿主业务数据与 `sms-kit` 使用同一 PostgreSQL 数据库时，必须通过 `SmsTransaction` 复用同一 `pg` 事务，使用条件更新消费证明并执行实际高风险操作。
 - 不同数据库或无法共享事务时，宿主只能调用带同一 `consumptionKey` 的幂等高风险操作，并采用“幂等消费证明、执行同键业务操作、失败后以同键安全重放”的补偿契约。适配器必须显式声明所选模式，不能声称提供跨数据库原子性。
 
@@ -164,7 +174,8 @@
 - 同手机号、同用途：60 秒最多一次，1 小时最多 5 次，24 小时最多 10 次。
 - 同一验证码最多验证 3 次，成功或超限后失效。
 - IP 限流与手机号限流分离；客户端 IP 必须由宿主从可信代理链解析后传入。
-- 提供可配置的全局每日发送预算和熔断开关。
+- 提供可配置的系统级 UTC 每日发送预算和人工熔断开关；预算未配置表示不启用预算限制，人工熔断开启时所有真实发送拒绝为 `CIRCUIT_OPEN`。
+- 每个消息在首次供应商调用前原子预占一次预算；同一消息重试不重复预占。供应商明确永久未受理时可释放，已受理或受理未知时不得释放。未知手机号的等价处理不占预算。
 - `RateLimitStore` 操作必须原子化，PostgreSQL 为参考实现。
 
 ### 7.9 受理、送达回执与补查
@@ -175,8 +186,10 @@
 - Handler 必须分别限制请求体字节数、批次数量、字段长度和解析时间。需要强确认的部署可以把回调视为状态提示，再通过 `QuerySendDetails` 复核终态。
 - 回执先执行严格结构校验、字段限制、BizId/消息关联和幂等落库，再更新送达状态。
 - 回调可能重复或乱序，状态机不得从终态回退到非终态。
-- 无回执和处理异常的记录进入 `QuerySendDetails` 定时补查。
+- 无回执和处理异常的记录进入 `QuerySendDetails` 定时补查。补查必须解密已保存的国内手机号，并传入 `phoneNumber`、按 `Asia/Shanghai` 计算且格式为 `yyyyMMdd` 的提交日 `sendDate`、可选 BizId、从 1 开始的 `currentPage` 和范围 1-50 的 `pageSize`，直到完整分页结束；只查询阿里云允许的最近 30 天，超过窗口后直接进入最终未知。
 - 超过补查窗口仍无法确认的消息标记为 `unknown_final` 并产生告警事件。
+- 结构合法但无法关联本系统消息的回执按幂等方式计入脱敏 `unmatched` 指标并返回成功确认，避免共享阿里云账号产生无意义重推；回调不得接受租户字段。
+- 回调实现接收可注入的截止时间，在接近 700ms 上限前返回可重试 503；自动测试用固定时钟验证截止逻辑，真实耗时仅作为非阻塞基准，不使用易波动的硬性毫秒断言。
 
 ### 7.10 发送记录与统计
 
@@ -186,12 +199,15 @@
 
 - 提交次数
 - 供应商受理次数与受理率
+- 供应商明确拒绝次数和受理未知次数
 - 最终送达次数与送达率
 - 最终失败次数
 - 等待回执和最终未知次数
 - 暂时失败重试次数
 
-长期日统计不包含手机号或模板变量。
+长期日统计不包含手机号或模板变量，并分别持久化 `submitted`、`accepted`、`acceptance_rejected`、`acceptance_unknown`、`delivery_waiting`、`delivered`、`delivery_failed`、`delivery_unknown_final` 和 `retry`，不得使用含义不明确的通用 `failed/unknown` 字段。
+
+受理状态只允许 `pending → accepted/rejected/unknown`，以及由权威证据触发的 `unknown → accepted/rejected`；其中 `unknown → rejected` 仅允许同一 `dispatchToken` 的原供应商调用迟到返回明确拒绝，补查“无记录”不得触发。`accepted/rejected` 为终态。送达状态允许 `not_applicable → waiting/delivered/failed/unknown_final`、`waiting → delivered/failed/unknown_final`；送达终态冲突保留首个结果并产生事件。权威回执可在同一事务内把受理未知修正为已受理并直接写入送达终态。
 
 ### 7.11 管理权限与审计
 
@@ -211,6 +227,7 @@
 
 - 手机号保存为密文、不可逆检索哈希、末四位和脱敏展示值。
 - `PhoneNumberProtector` 由宿主实现或注入，包不持有固定加密密钥。
+- 内置 AES-GCM 保护器的 AAD 必须绑定密文用途、租户、记录 ID 和字段类型，防止跨租户、跨消息或跨字段替换；手机号密文 envelope 和异步变量记录必须携带 `keyId`，解密时按版本取钥。
 - OTP Challenge 和尝试记录默认 7 天后删除或匿名化。
 - 消息明细和回执默认 90 天后清除手机号密文、检索哈希、末四位、脱敏展示值、可识别业务元数据及供应商原始载荷，仅保留不含个人信息的状态维度或日统计。
 - 脱敏审计事件默认保存 180 天。
@@ -236,12 +253,15 @@
 包提供任务函数和数据库租约，不绑定具体调度器：
 
 - `send-worker`：普通短信发送与退避重试。
+- `dispatch-recovery`：扫描超过调用截止时间的直发 Attempt 和租约已过期的队列 Attempt，只推进受理未知并创建补查，永不调用供应商。
 - `receipt-reconcile`：未知送达状态补查。
 - `data-retention`：执行 7/90/180 天清理策略。
 - `daily-rollup`：生成匿名日统计。
 - `resource-sync`：手动为主，可由宿主选择定时检查云端变化。
 
 所有任务必须支持批次上限、并发租约、重复执行和结构化结果摘要。自动任务使用明确的系统 Actor，例如 `system:send-worker`，不得伪装成管理员操作。
+
+任务租约恢复遵循“安全漏发优先于重复发送”：未产生派发标记的过期任务可以重新租用；已经产生派发标记但没有最终 Attempt 的任务只能进入受理未知与补查。
 
 ## 11. 管理端规范
 
@@ -271,7 +291,7 @@ UI 技术栈和交互规则见 `doc/前端开发规范.md`。可直接用于编�
 | `POST /resources/sync-commit` | `resource.sync` | `ResourceSyncCommitInput`、`ResourceSyncCommitResultDto`；请求必须回传候选 ID 与校验和 |
 | `GET /signatures`、`PATCH /signatures/:id` | `config.read/signature.manage` | `PageDto<SignatureDto>`、`UpdateSignatureInput` |
 | `GET /templates`、`POST /templates/import`、`PATCH /templates/:id` | `config.read/template.manage` | `PageDto<TemplateDto>`、`ImportTemplateInput`、`UpdateTemplateInput` |
-| `GET/PATCH /verification` | `config.read/config.write` | `VerificationSettingsDto` |
+| `GET/PATCH /verification` | `config.read/config.write` | `VerificationSettingsDto`、`UpdateVerificationSettingsInput`，包含版本、Challenge、限流、预算和熔断设置 |
 | `GET /receipt-health` | `message.read` | `ReceiptHealthDto` |
 | `POST /reconcile` | `receipt.reconcile` | `ReconcileInput`、`JobDto` |
 | `GET /messages`、`GET /messages/:id` | `message.read` | `PageDto<MessageDto>`、`MessageDetailDto` |
@@ -340,9 +360,11 @@ type MessageDto = {
 
 - Vitest 单元测试：变量校验、状态机、错误映射、幂等、限流、Challenge、脱敏和清理选择。
 - Provider 契约测试：正常响应、明确拒绝、可安全重试的限流、受理未知的超时、重复/乱序回执和详情补查。
-- Store 契约测试：事务、唯一约束、乐观锁、Worker 租约和原子限流。
-- PostgreSQL 集成测试：Docker/Testcontainers 启动临时实例，执行迁移和种子数据。
-- Better Auth 适配契约测试：确保输入映射和错误边界正确，不创建或修改认证会话。
+- Store 契约测试：事务、唯一约束、乐观锁、派发标记、Worker 租约、证明行锁、原子限流和预算预占。
+- PostgreSQL 集成测试：在可访问 Docker daemon 的宿主或 CI runner 上由 Testcontainers 启动临时实例，执行空库迁移、前一受支持版本升级和种子数据。
+- Better Auth 适配契约测试：使用真实 `phoneNumber()` 类型确保输入映射和错误边界正确，不创建或修改认证会话。
+- Next.js 构建契约：Server Component/Route Handler 可导入敏感入口，Client Component 导入必须在构建期失败；普通 Node.js 20 消费者仍可加载非 Next.js 服务端入口。
+- Node.js 20 容器只运行不需要 Docker-in-Docker 的单元、契约、类型和构建检查；Testcontainers 集成测试不在未挂载 Docker daemon 的容器中执行。
 
 ### 12.2 真实阿里云联调
 
@@ -374,6 +396,11 @@ type MessageDto = {
 15. 同步预览在过期或校验和变化后不能提交。
 16. 同库模式下高风险证明消费与业务操作共享事务；跨库模式只允许幂等补偿契约。
 17. 两个租户可使用相同业务幂等键独立发送，消息、Challenge、任务、手机号查询、审计和统计均不能跨租户读取或消费；固定默认租户实现通过同一契约测试。
+18. Worker 或 OTP 直发在供应商已受理后任意崩溃、任务遗弃或租约过期均不会触发第二次 `SendSms`；存在派发标记的恢复路径进入受理未知和补查。
+19. 验证码、限流、系统级每日预算和人工熔断具有版本化配置；预算并发预占不超限，同一消息重试只计一次。
+20. 阿里云签名/模板枚举映射和 `QuerySendDetails` 必填参数通过锁定 SDK 类型契约测试，营销及国际资源不能导入。
+21. 相同证明的同键并发消费幂等成功，异键、异租户、异用户或异动作消费失败且不会误消耗证明。
+22. Next.js 客户端构建无法导入敏感入口；AES-GCM 密文不能跨租户、消息或字段替换。
 
 ## 15. 缺失功能分析结论
 
@@ -388,5 +415,7 @@ type MessageDto = {
 - 阿里云短信回执配置：<https://help.aliyun.com/zh/sms/developer-reference/configure-delivery-receipts-1/>
 - 阿里云国内短信 HTTP 状态报告：<https://help.aliyun.com/zh/sms/developer-reference/smsreport-http>
 - 阿里云 QuerySendDetails：<https://next.api.aliyun.com/document/dysmsapi/2017-05-25/QuerySendDetails>
+- 阿里云 QuerySmsSignList：<https://api.aliyun.com/document/Dysmsapi/2017-05-25/QuerySmsSignList>
+- 阿里云 QuerySmsTemplateList：<https://api.aliyun.com/document/Dysmsapi/2017-05-25/QuerySmsTemplateList>
 - Better Auth Phone Number：<https://better-auth.com/docs/plugins/phone-number>
 - Better Auth 插件开发：<https://better-auth.com/docs/concepts/plugins>
