@@ -480,16 +480,24 @@ export interface JobRepository {
 export type Challenge = Readonly<{
   id: ChallengeId;
   tenantId: TenantId;
+  idempotencyKey: string;
   subjectId: string;
   action: string;
   purpose: "password_change" | "step_up";
+  policyVersion: number;
+  otpLength: number;
+  otpTtlSeconds: number;
+  proofTtlSeconds: number;
   phoneHash: string;
   codeHash: string;
   attemptCount: number;
   maxAttempts: number;
   expiresAt: Date;
   verifiedAt?: Date;
+  proofHash?: string;
   proofExpiresAt?: Date;
+  invalidatedAt?: Date;
+  terminalErrorCode?: "PROVIDER_REJECTED" | "ACCEPTANCE_UNKNOWN";
 }>;
 export type ConsumeProofResult =
   | { consumed: true; replay: boolean }
@@ -498,15 +506,36 @@ export interface ChallengeRepository {
   create(input: Readonly<{
     id: ChallengeId;
     tenantId: TenantId;
+    idempotencyKey: string;
     subjectId: string;
     action: string;
     purpose: "password_change" | "step_up";
+    policyVersion: number;
+    otpLength: number;
+    otpTtlSeconds: number;
+    proofTtlSeconds: number;
     phoneHash: string;
     codeHash: string;
     maxAttempts: number;
     expiresAt: Date;
   }>, tx?: SmsTransaction): Promise<Challenge>;
   get(input: Readonly<{ tenantId: TenantId; id: ChallengeId }>, tx?: SmsTransaction): Promise<Challenge | undefined>;
+  getByIdempotency(input: Readonly<{ tenantId: TenantId; idempotencyKey: string }>, tx?: SmsTransaction): Promise<Challenge | undefined>;
+  getForUpdate(input: Readonly<{ tenantId: TenantId; id: ChallengeId }>, tx: SmsTransaction): Promise<Challenge | undefined>;
+  incrementAttempts(input: Readonly<{ tenantId: TenantId; id: ChallengeId }>, tx: SmsTransaction): Promise<Challenge>;
+  verify(input: Readonly<{
+    tenantId: TenantId;
+    id: ChallengeId;
+    verifiedAt: Date;
+    proofHash: string;
+    proofExpiresAt: Date;
+  }>, tx: SmsTransaction): Promise<Challenge>;
+  invalidate(input: Readonly<{
+    tenantId: TenantId;
+    id: ChallengeId;
+    invalidatedAt: Date;
+    terminalErrorCode: "PROVIDER_REJECTED" | "ACCEPTANCE_UNKNOWN";
+  }>, tx?: SmsTransaction): Promise<Challenge>;
   consumeProof(input: Readonly<{
     tenantId: TenantId;
     proof: string;
