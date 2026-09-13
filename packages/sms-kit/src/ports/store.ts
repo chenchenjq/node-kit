@@ -1,3 +1,4 @@
+import { SmsKitError } from "../core/errors.js";
 import type { AcceptanceStatus, DeliveryStatus } from "../core/status.js";
 import type { ChallengeId, MessageId, TemplateId, TenantId } from "../core/types.js";
 import type { PolicyStore } from "./policy.js";
@@ -79,6 +80,7 @@ type ResourceSyncCandidateBase = Readonly<{
   changeType: "new" | "changed" | "unavailable" | "unchanged";
   checksum: string;
 }>;
+declare const resourceSyncCandidateBrand: unique symbol;
 export type SignatureResourceSnapshot = Readonly<{
   kind: "signature";
   externalName: string;
@@ -98,11 +100,85 @@ export type ResourceSyncCandidate =
   | (ResourceSyncCandidateBase & Readonly<{
       resourceType: "signature";
       snapshot: SignatureResourceSnapshot;
-    }>)
+    }> & { readonly [resourceSyncCandidateBrand]: true })
   | (ResourceSyncCandidateBase & Readonly<{
       resourceType: "template";
       snapshot: TemplateResourceSnapshot;
-    }>);
+    }> & { readonly [resourceSyncCandidateBrand]: true });
+
+function invalidResourceSyncCandidate(): never {
+  throw new SmsKitError("CONFIG_INVALID", "invalid resource sync preview");
+}
+
+function requireObject(value: unknown): object {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return invalidResourceSyncCandidate();
+  }
+  return value;
+}
+
+function requireString(source: object, key: string): string {
+  const value = Reflect.get(source, key);
+  if (typeof value !== "string") return invalidResourceSyncCandidate();
+  return value;
+}
+
+function requireEnum<T extends string>(source: object, key: string, allowed: readonly T[]): T {
+  const value = Reflect.get(source, key);
+  if (typeof value !== "string" || !allowed.includes(value as T)) return invalidResourceSyncCandidate();
+  return value as T;
+}
+
+function requireStringArray(source: object, key: string): readonly string[] {
+  const value = Reflect.get(source, key);
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    return invalidResourceSyncCandidate();
+  }
+  return Object.freeze([...value]);
+}
+
+/**
+ * Enforces the resource-preview persistence boundary. This copies only the
+ * allowed provider fields, discarding every extra property from an untrusted
+ * SDK response before an adapter can persist it.
+ */
+export function createResourceSyncCandidate(input: unknown): ResourceSyncCandidate {
+  const source = requireObject(input);
+  const base = {
+    id: requireString(source, "id"),
+    externalKey: requireString(source, "externalKey"),
+    changeType: requireEnum(source, "changeType", ["new", "changed", "unavailable", "unchanged"] as const),
+    checksum: requireString(source, "checksum"),
+  };
+  const resourceType = requireEnum(source, "resourceType", ["signature", "template"] as const);
+  const sourceSnapshot = requireObject(Reflect.get(source, "snapshot"));
+
+  if (resourceType === "signature") {
+    if (requireEnum(sourceSnapshot, "kind", ["signature"] as const) !== "signature") {
+      return invalidResourceSyncCandidate();
+    }
+    const snapshot: SignatureResourceSnapshot = Object.freeze({
+      kind: "signature",
+      externalName: requireString(sourceSnapshot, "externalName"),
+      externalStatus: requireString(sourceSnapshot, "externalStatus"),
+      externalType: requireString(sourceSnapshot, "externalType"),
+    });
+    return Object.freeze({ ...base, resourceType, snapshot }) as ResourceSyncCandidate;
+  }
+
+  if (requireEnum(sourceSnapshot, "kind", ["template"] as const) !== "template") {
+    return invalidResourceSyncCandidate();
+  }
+  const snapshot: TemplateResourceSnapshot = Object.freeze({
+    kind: "template",
+    externalCode: requireString(sourceSnapshot, "externalCode"),
+    externalName: requireString(sourceSnapshot, "externalName"),
+    externalStatus: requireString(sourceSnapshot, "externalStatus"),
+    templateType: requireEnum(sourceSnapshot, "templateType", ["verification", "notification"] as const),
+    variableNames: requireStringArray(sourceSnapshot, "variableNames"),
+  });
+  return Object.freeze({ ...base, resourceType, snapshot }) as ResourceSyncCandidate;
+}
 export type ResourceSyncPreview = Readonly<{
   id: string;
   status: "running" | "succeeded" | "partial" | "failed";
