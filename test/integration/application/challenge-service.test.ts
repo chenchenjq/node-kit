@@ -15,10 +15,13 @@ const tenantB = "tenant-b" as TenantId;
 
 describe("ChallengeService", () => {
   let pool: Pool;
+  let store: PgSmsStore;
   let service: ChallengeService;
   let stop: (() => Promise<void>) | undefined;
   let now = new Date("2026-09-13T02:00:00.000Z");
-  let providerOutcome: "accepted" | "rejected" | "unknown" = "accepted";
+  let providerOutcome: "accepted" | "rejected" | "throttled" | "unknown" | "deferred" = "accepted";
+  let deferredStarted: (() => void) | undefined;
+  let resolveDeferred: ((result: { kind: "accepted"; bizId: string; requestId: string }) => void) | undefined;
   let sends = 0;
 
   beforeAll(async () => {
@@ -26,7 +29,7 @@ describe("ChallengeService", () => {
     pool = postgres.pool;
     stop = postgres.stop;
     await migrateSmsKit(pool);
-    const store = new PgSmsStore(pool);
+    store = new PgSmsStore(pool);
     const signature = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "sign-challenge", changeType: "new", checksum: "challenge-signature", resourceType: "signature", snapshot: { kind: "signature", externalName: "Challenge", externalStatus: "approved", externalType: "text" } });
     const template = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "template-challenge", changeType: "new", checksum: "challenge-template", resourceType: "template", signatureExternalKey: "sign-challenge", templateKey: "auth.password_change", purpose: "auth.password_change", snapshot: { kind: "template", externalCode: "SMS_CHALLENGE", externalName: "Challenge", externalStatus: "approved", templateType: "verification", variableNames: ["code"] } });
     const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
@@ -44,7 +47,14 @@ describe("ChallengeService", () => {
           ? { kind: "accepted" as const, bizId: `biz-${sends}`, requestId: `req-${sends}` }
           : providerOutcome === "rejected"
             ? { kind: "rejected" as const, code: "isv.BUSINESS_LIMIT_CONTROL", retryable: false }
-            : { kind: "unknown" as const, code: "ACCEPTANCE_UNKNOWN" as const };
+            : providerOutcome === "throttled"
+              ? { kind: "rejected" as const, code: "isv.BUSINESS_LIMIT_CONTROL", retryable: true }
+            : providerOutcome === "unknown"
+              ? { kind: "unknown" as const, code: "ACCEPTANCE_UNKNOWN" as const }
+              : new Promise<{ kind: "accepted"; bizId: string; requestId: string }>((resolve) => {
+                resolveDeferred = resolve;
+                deferredStarted?.();
+              });
       } } as never,
       phoneProtector: phoneProtector as never,
       payloadProtector: { seal: async () => ({ ciphertext: "params", keyId: "params-k1" }) } as never,
@@ -143,5 +153,95 @@ describe("ChallengeService", () => {
     }
     expect(sends).toBe(sentBefore + 1);
     expect((await pool.query("select terminal_error_code from sms_kit.otp_challenge where subject_id = 'user-7'")).rows).toEqual([{ terminal_error_code: "ACCEPTANCE_UNKNOWN" }]);
+  });
+
+  it("does not expose a deferred direct-delivery replay for verification before acceptance", async () => {
+    providerOutcome = "deferred";
+    const input = { tenantId: tenantA, subjectId: "user-8", action: "password.change" as const, phone: "13800138007", idempotencyKey: "user-8:password.change:1" };
+    const started = new Promise<void>((resolve) => { deferredStarted = resolve; });
+    const first = service.issue(input);
+    await started;
+    const replay = await service.issue(input);
+
+    await expect(service.verify({ tenantId: tenantA, challengeId: replay.id, code: "123456" })).rejects.toMatchObject({ code: "ACCEPTANCE_UNKNOWN" });
+    resolveDeferred?.({ kind: "accepted", bizId: "biz-deferred", requestId: "req-deferred" });
+    await expect(first).resolves.toEqual(replay);
+    await expect(service.verify({ tenantId: tenantA, challengeId: replay.id, code: "123456" })).resolves.toMatchObject({ proof: expect.any(String) });
+    providerOutcome = "accepted";
+    deferredStarted = undefined;
+    resolveDeferred = undefined;
+  });
+
+  it("serializes concurrent tenant idempotency requests to one challenge outcome", async () => {
+    const input = { tenantId: tenantA, subjectId: "user-9", action: "password.change" as const, phone: "13800138008", idempotencyKey: "user-9:password.change:1" };
+    const results = await Promise.all([service.issue(input), service.issue(input)]);
+
+    expect(results[0]).toEqual(results[1]);
+  });
+
+  it("replays the same safe terminal error after a throttled direct delivery", async () => {
+    providerOutcome = "throttled";
+    const input = { tenantId: tenantA, subjectId: "user-10", action: "password.change" as const, phone: "13800138009", idempotencyKey: "user-10:password.change:1" };
+    try {
+      const sendsBefore = sends;
+      const first = await service.issue(input).then(
+        () => { throw new Error("expected direct delivery to be rejected"); },
+        (error: unknown) => error as { toJSON(): unknown },
+      );
+      expect(sends).toBe(sendsBefore + 1);
+      expect(first.toJSON()).toMatchObject({ code: "PROVIDER_THROTTLED" });
+      expect(await pool.query("select invalidated_at, terminal_error_code, delivery_acceptance_status from sms_kit.otp_challenge where subject_id = 'user-10'")).toMatchObject({ rows: [{ terminal_error_code: "PROVIDER_THROTTLED", delivery_acceptance_status: "rejected" }] });
+      const replay = await service.issue(input).then(
+        () => { throw new Error("expected terminal outcome to replay"); },
+        (error: unknown) => error as { toJSON(): unknown },
+      );
+
+      expect(first.toJSON()).toEqual(replay.toJSON());
+      expect(first.toJSON()).toMatchObject({ code: "PROVIDER_THROTTLED" });
+    } finally {
+      providerOutcome = "accepted";
+    }
+  });
+
+  it("persists and replays a rate-limited terminal outcome without another dispatch", async () => {
+    const firstInput = { tenantId: tenantA, subjectId: "user-11", action: "password.change" as const, phone: "13800138010", idempotencyKey: "user-11:password.change:first" };
+    const limitedInput = { ...firstInput, idempotencyKey: "user-11:password.change:limited" };
+    await service.issue(firstInput);
+    const sendsBefore = sends;
+    const first = await service.issue(limitedInput).then(
+      () => { throw new Error("expected rate limiting"); },
+      (error: unknown) => error as { toJSON(): unknown },
+    );
+    now = new Date("2026-09-13T03:00:00.000Z");
+    const replay = await service.issue(limitedInput).then(
+      () => { throw new Error("expected terminal outcome to replay"); },
+      (error: unknown) => error as { toJSON(): unknown },
+    );
+    now = new Date("2026-09-13T02:00:00.000Z");
+
+    expect(first.toJSON()).toEqual(replay.toJSON());
+    expect(first.toJSON()).toMatchObject({ code: "RATE_LIMITED" });
+    expect(sends).toBe(sendsBefore);
+    expect((await pool.query("select terminal_error_code from sms_kit.otp_challenge where idempotency_key = $1", [limitedInput.idempotencyKey])).rows).toEqual([{ terminal_error_code: "RATE_LIMITED" }]);
+  });
+
+  it("uses one selected policy snapshot for challenge rate enforcement and recording", async () => {
+    const originalGet = store.policy.get.bind(store.policy);
+    let reads = 0;
+    store.policy.get = async (tx) => {
+      const policy = await originalGet(tx);
+      reads += 1;
+      return reads === 2 ? { ...policy, phoneMinIntervalSeconds: 10 } : policy;
+    };
+    try {
+      const issued = await service.issue({ tenantId: tenantA, subjectId: "user-12", action: "password.change", phone: "13800138011", idempotencyKey: "user-12:password.change:1" });
+      const cooldown = await pool.query<{ seconds: string }>("select extract(epoch from expires_at - window_start)::text as seconds from sms_kit.rate_limit_bucket where scope_hash like '%challenge:auth.password_change'");
+
+      expect(reads).toBe(2);
+      expect(cooldown.rows).toContainEqual({ seconds: "60.000000" });
+      expect((await pool.query("select policy_version, otp_ttl_seconds from sms_kit.otp_challenge where id = $1", [issued.id])).rows).toEqual([{ policy_version: "1", otp_ttl_seconds: 300 }]);
+    } finally {
+      store.policy.get = originalGet;
+    }
   });
 });

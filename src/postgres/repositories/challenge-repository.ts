@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { SmsKitError } from "../../core/errors.js";
+import type { SmsErrorCode } from "../../core/errors.js";
 import type { Challenge, ChallengeRepository, ConsumeProofResult, SmsTransaction } from "../../ports/store.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
@@ -10,9 +11,10 @@ type ChallengeRow = {
   policy_version: string; otp_length: number; otp_ttl_seconds: number; proof_ttl_seconds: number;
   phone_hash: string; code_hash: string; attempt_count: number; max_attempts: number; expires_at: Date;
   verified_at: Date | null; proof_hash: string | null; proof_expires_at: Date | null; invalidated_at: Date | null;
-  terminal_error_code: "PROVIDER_REJECTED" | "ACCEPTANCE_UNKNOWN" | null; consumed_at: Date | null; consumed_by_key: string | null;
+  delivery_acceptance_status: Challenge["deliveryAcceptanceStatus"];
+  terminal_error_code: SmsErrorCode | null; consumed_at: Date | null; consumed_by_key: string | null;
 };
-const fields = "id, tenant_id, idempotency_key, subject_id, action, purpose, policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds, phone_hash, code_hash, attempt_count, max_attempts, expires_at, verified_at, proof_hash, proof_expires_at, invalidated_at, terminal_error_code, consumed_at, consumed_by_key";
+const fields = "id, tenant_id, idempotency_key, subject_id, action, purpose, policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds, phone_hash, code_hash, attempt_count, max_attempts, expires_at, verified_at, proof_hash, proof_expires_at, delivery_acceptance_status, invalidated_at, terminal_error_code, consumed_at, consumed_by_key";
 
 function db(pool: Pool, tx?: SmsTransaction): Queryable {
   return tx === undefined ? pool : (tx as PgSmsTransaction).client;
@@ -27,6 +29,7 @@ function challenge(row: ChallengeRow): Challenge {
     ...(row.verified_at === null ? {} : { verifiedAt: row.verified_at }),
     ...(row.proof_hash === null ? {} : { proofHash: row.proof_hash }),
     ...(row.proof_expires_at === null ? {} : { proofExpiresAt: row.proof_expires_at }),
+    deliveryAcceptanceStatus: row.delivery_acceptance_status,
     ...(row.invalidated_at === null ? {} : { invalidatedAt: row.invalidated_at }),
     ...(row.terminal_error_code === null ? {} : { terminalErrorCode: row.terminal_error_code }),
   };
@@ -72,8 +75,16 @@ export class PgChallengeRepository implements ChallengeRepository {
     return challenge(rows[0]);
   }
 
+  async markDeliveryAcceptance(input: Parameters<ChallengeRepository["markDeliveryAcceptance"]>[0], tx?: SmsTransaction): Promise<Challenge> {
+    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`update sms_kit.otp_challenge set delivery_acceptance_status = $3 where tenant_id = $1 and id = $2 and delivery_acceptance_status = 'pending' returning ${fields}`, [input.tenantId, input.id, input.status]);
+    if (rows[0] !== undefined) return challenge(rows[0]);
+    const existing = await this.get({ tenantId: input.tenantId, id: input.id }, tx);
+    if (existing === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "challenge is outside the trusted tenant");
+    return existing;
+  }
+
   async invalidate(input: Parameters<ChallengeRepository["invalidate"]>[0], tx?: SmsTransaction): Promise<Challenge> {
-    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`update sms_kit.otp_challenge set invalidated_at = $3, terminal_error_code = $4 where tenant_id = $1 and id = $2 and invalidated_at is null returning ${fields}`, [input.tenantId, input.id, input.invalidatedAt, input.terminalErrorCode]);
+    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`update sms_kit.otp_challenge set invalidated_at = $3, terminal_error_code = $4, delivery_acceptance_status = $5 where tenant_id = $1 and id = $2 and invalidated_at is null returning ${fields}`, [input.tenantId, input.id, input.invalidatedAt, input.terminalErrorCode, input.deliveryAcceptanceStatus]);
     if (rows[0] === undefined) {
       const existing = await this.get({ tenantId: input.tenantId, id: input.id }, tx);
       if (existing === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "challenge is outside the trusted tenant");
@@ -91,7 +102,7 @@ export class PgChallengeRepository implements ChallengeRepository {
       [input.tenantId, input.proof],
     );
     const current = rows[0];
-    if (current === undefined || current.subject_id !== input.subjectId || current.action !== input.action || current.verified_at === null) {
+    if (current === undefined || current.subject_id !== input.subjectId || current.action !== input.action || current.verified_at === null || current.invalidated_at !== null || current.delivery_acceptance_status !== "accepted") {
       throw new SmsKitError("PROOF_INVALID", "proof is not valid for this subject and action");
     }
     if (current.proof_expires_at === null || current.proof_expires_at <= input.now) return { consumed: false, reason: "expired" };

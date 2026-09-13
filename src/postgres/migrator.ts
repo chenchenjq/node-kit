@@ -13,6 +13,7 @@ const migrationFiles: readonly MigrationFile[] = [
   { version: 3, name: "0003_receipt_ownership.sql", url: new URL("./migrations/0003_receipt_ownership.sql", import.meta.url) },
   { version: 4, name: "0004_query_receipt_out_id.sql", url: new URL("./migrations/0004_query_receipt_out_id.sql", import.meta.url) },
   { version: 5, name: "0005_challenge_security.sql", url: new URL("./migrations/0005_challenge_security.sql", import.meta.url) },
+  { version: 6, name: "0006_challenge_delivery_acceptance.sql", url: new URL("./migrations/0006_challenge_delivery_acceptance.sql", import.meta.url) },
 ];
 
 const bootstrapDdl = `
