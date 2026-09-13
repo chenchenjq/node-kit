@@ -95,6 +95,14 @@ export type TemplateResourceSnapshot = Readonly<{
   templateType: "verification" | "notification";
   variableNames: readonly string[];
 }>;
+export type TemplateResourceSelection = Readonly<{
+  /** Stable local key selected by an administrator; never derived from provider identifiers. */
+  templateKey: string;
+  /** Local purpose selected by an administrator and preserved on later provider refreshes. */
+  purpose: string;
+  /** Provider signature identity used to resolve the template foreign key. */
+  signatureExternalKey: string;
+}>;
 /** A finite provider-resource preview; it intentionally cannot carry arbitrary payload fields. */
 export type ResourceSyncCandidate =
   | (ResourceSyncCandidateBase & Readonly<{
@@ -104,7 +112,7 @@ export type ResourceSyncCandidate =
   | (ResourceSyncCandidateBase & Readonly<{
       resourceType: "template";
       snapshot: TemplateResourceSnapshot;
-    }> & { readonly [resourceSyncCandidateBrand]: true });
+    }> & TemplateResourceSelection & { readonly [resourceSyncCandidateBrand]: true });
 
 function invalidResourceSyncCandidate(): never {
   throw new SmsKitError("CONFIG_INVALID", "invalid resource sync preview");
@@ -135,6 +143,12 @@ function requireStringArray(source: object, key: string): readonly string[] {
     return invalidResourceSyncCandidate();
   }
   return Object.freeze([...value]);
+}
+
+function requireTemplateKey(source: object): string {
+  const value = requireString(source, "templateKey");
+  if (!/^[a-z0-9._-]+$/.test(value)) return invalidResourceSyncCandidate();
+  return value;
 }
 
 /**
@@ -177,7 +191,14 @@ export function createResourceSyncCandidate(input: unknown): ResourceSyncCandida
     templateType: requireEnum(sourceSnapshot, "templateType", ["verification", "notification"] as const),
     variableNames: requireStringArray(sourceSnapshot, "variableNames"),
   });
-  return Object.freeze({ ...base, resourceType, snapshot }) as ResourceSyncCandidate;
+  return Object.freeze({
+    ...base,
+    resourceType,
+    snapshot,
+    signatureExternalKey: requireString(source, "signatureExternalKey"),
+    templateKey: requireTemplateKey(source),
+    purpose: requireString(source, "purpose"),
+  }) as ResourceSyncCandidate;
 }
 export type ResourceSyncPreview = Readonly<{
   id: string;
@@ -331,7 +352,8 @@ export interface AttemptRepository {
 
 export type DeliveryReceipt = Readonly<{
   id: string;
-  tenantId: TenantId;
+  /** Unmatched receipts are system-owned and therefore intentionally unscoped. */
+  tenantId?: TenantId;
   messageId?: MessageId;
   matchStatus: "matched" | "unmatched";
   dedupeKey: string;
