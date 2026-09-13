@@ -58,17 +58,17 @@ export class PgStatsRepository implements StatsRepository {
 
   async rollupDirtyDates(input: Parameters<StatsRepository["rollupDirtyDates"]>[0], tx?: SmsTransaction): Promise<number> {
     return transaction(this.pool, tx, async (client) => {
-      const dirty = await client.query<{ stat_date: string; version: string }>(
-        `select stat_date::text, version::text
+      const dirty = await client.query<{ tenant_id: string; stat_date: string; version: string }>(
+        `select tenant_id, stat_date::text, version::text
            from sms_kit.stat_dirty_date
-          where tenant_id = $1
-          order by stat_date
+          where ($1::text is null or tenant_id = $1)
+          order by tenant_id, stat_date
           limit $2
           for update skip locked`,
-        [input.tenantId, input.limit],
+        [input.tenantId ?? null, input.limit],
       );
       for (const date of dirty.rows) {
-        await client.query("delete from sms_kit.daily_stat where tenant_id = $1 and stat_date = $2::date", [input.tenantId, date.stat_date]);
+        await client.query("delete from sms_kit.daily_stat where tenant_id = $1 and stat_date = $2::date", [date.tenant_id, date.stat_date]);
         await client.query(
           `insert into sms_kit.daily_stat (
              tenant_id, stat_date, template_id, template_key, purpose,
@@ -90,11 +90,11 @@ export class PgStatsRepository implements StatsRepository {
              from sms_kit.send_message m
             where m.tenant_id = $1 and (m.submitted_at at time zone 'UTC')::date = $2::date
             group by m.tenant_id, (m.submitted_at at time zone 'UTC')::date, m.template_key_snapshot, m.purpose`,
-          [input.tenantId, date.stat_date],
+          [date.tenant_id, date.stat_date],
         );
         await client.query(
           "delete from sms_kit.stat_dirty_date where tenant_id = $1 and stat_date = $2::date and version = $3::bigint",
-          [input.tenantId, date.stat_date, date.version],
+          [date.tenant_id, date.stat_date, date.version],
         );
       }
       return dirty.rows.length;
