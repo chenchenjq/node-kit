@@ -73,14 +73,36 @@ export type Template = Readonly<{
   enabled: boolean;
   version: number;
 }>;
-export type ResourceSyncCandidate = Readonly<{
+type ResourceSyncCandidateBase = Readonly<{
   id: string;
-  resourceType: "signature" | "template";
   externalKey: string;
   changeType: "new" | "changed" | "unavailable" | "unchanged";
   checksum: string;
-  snapshot: Readonly<Record<string, unknown>>;
 }>;
+export type SignatureResourceSnapshot = Readonly<{
+  kind: "signature";
+  externalName: string;
+  externalStatus: string;
+  externalType: string;
+}>;
+export type TemplateResourceSnapshot = Readonly<{
+  kind: "template";
+  externalCode: string;
+  externalName: string;
+  externalStatus: string;
+  templateType: "verification" | "notification";
+  variableNames: readonly string[];
+}>;
+/** A finite provider-resource preview; it intentionally cannot carry arbitrary payload fields. */
+export type ResourceSyncCandidate =
+  | (ResourceSyncCandidateBase & Readonly<{
+      resourceType: "signature";
+      snapshot: SignatureResourceSnapshot;
+    }>)
+  | (ResourceSyncCandidateBase & Readonly<{
+      resourceType: "template";
+      snapshot: TemplateResourceSnapshot;
+    }>);
 export type ResourceSyncPreview = Readonly<{
   id: string;
   status: "running" | "succeeded" | "partial" | "failed";
