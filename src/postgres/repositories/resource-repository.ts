@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { SmsKitError } from "../../core/errors.js";
+import { isCloudApproved, isUsableSignature } from "../../core/resource-usability.js";
 import type {
   ResourceRepository, ResourceSyncCandidate, ResourceSyncPreview, Signature, SmsTransaction, Template,
 } from "../../ports/store.js";
@@ -46,10 +47,6 @@ function safeSnapshot(candidate: ResourceSyncCandidate): object {
     return { kind: "signature", externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, externalType: candidate.snapshot.externalType };
   }
   return { kind: "template", externalCode: candidate.snapshot.externalCode, externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, templateType: candidate.snapshot.templateType, variableNames: [...candidate.snapshot.variableNames], signatureExternalKey: candidate.signatureExternalKey, templateKey: candidate.templateKey, purpose: candidate.purpose };
-}
-
-function isCloudApproved(status: string): boolean {
-  return status.toLowerCase() === "approved" || status.toUpperCase() === "AUDIT_STATE_PASS";
 }
 
 export class PgResourceRepository implements ResourceRepository {
@@ -141,7 +138,9 @@ export class PgResourceRepository implements ResourceRepository {
             throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
           }
           const signature = await db.query<{ id: string; enabled: boolean; external_status: string }>("select id, enabled, external_status from sms_kit.signature where external_key = $1", [snapshot.signatureExternalKey]);
-          if (signature.rows[0] === undefined || !signature.rows[0].enabled || !isCloudApproved(signature.rows[0].external_status)) {
+          if (signature.rows[0] === undefined || !isUsableSignature({
+            enabled: signature.rows[0].enabled, externalStatus: signature.rows[0].external_status,
+          })) {
             throw new SmsKitError("CONFIG_INVALID", "template preview has no usable signature");
           }
           await db.query(
