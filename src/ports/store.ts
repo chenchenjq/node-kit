@@ -1,6 +1,7 @@
 import type { AcceptanceStatus, DeliveryStatus } from "../core/status.js";
 import type { ChallengeId, MessageId, TemplateId, TenantId } from "../core/types.js";
 import type { PolicyStore } from "./policy.js";
+import type { RedactedField, SafeEventMetadata } from "./runtime.js";
 
 /** Opaque transaction capability. Infrastructure adapters own external-client conversion. */
 export interface SmsTransaction {
@@ -19,7 +20,7 @@ export type ProviderConfig = Readonly<{
   status: ProviderConfigStatus;
   enabled: boolean;
   lastTestStatus: "never" | "succeeded" | "failed";
-  lastTestSummary?: Readonly<Record<string, string | number | boolean | null>>;
+  lastTestSummary?: SafeEventMetadata;
   lastTestedAt?: Date;
   version: number;
 }>;
@@ -41,7 +42,7 @@ export interface ConfigRepository {
   recordConnectionTest(
     input: Readonly<{
       status: "succeeded" | "failed";
-      summary: Readonly<Record<string, string | number | boolean | null>>;
+      summary: SafeEventMetadata;
       testedAt: Date;
       expectedVersion: number;
     }>,
@@ -126,7 +127,7 @@ export type Message = Readonly<{
   variableNames: readonly string[];
   renderParamsCiphertext?: string;
   renderParamsKeyId?: string;
-  metadata: Readonly<Record<string, string | number | boolean | null>>;
+  metadata: SafeEventMetadata;
   acceptanceStatus: AcceptanceStatus;
   deliveryStatus: DeliveryStatus;
   providerBizId?: string;
@@ -155,7 +156,7 @@ export type CreateMessageInput = Readonly<{
   variableNames: readonly string[];
   renderParamsCiphertext?: string;
   renderParamsKeyId?: string;
-  metadata?: Readonly<Record<string, string | number | boolean | null>>;
+  metadata?: SafeEventMetadata;
   submittedAt: Date;
   sendJob?: Readonly<{ id: string; dedupeKey: string; availableAt: Date; maxAttempts: number }>;
 }>;
@@ -173,7 +174,7 @@ export interface MessageRepository {
   createWithSendJob(input: CreateMessageInput, tx?: SmsTransaction): Promise<{ message: Message; created: boolean }>;
   get(input: Readonly<{ tenantId: TenantId; id: MessageId }>, tx?: SmsTransaction): Promise<Message | undefined>;
   list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number }>;
-  findByProviderBizId(input: Readonly<{ bizId: string }>, tx?: SmsTransaction): Promise<Message | undefined>;
+  findByProviderBizId(input: Readonly<{ tenantId: TenantId; bizId: string }>, tx?: SmsTransaction): Promise<Message | undefined>;
   completeAcceptance(input: Readonly<{
     tenantId: TenantId;
     dispatchToken: string;
@@ -256,7 +257,10 @@ export interface ReceiptRepository {
     occurredAt: Date;
     receivedAt: Date;
     source: "callback" | "query";
-    redactedPayload?: Readonly<Record<string, unknown>>;
+    redactedPayload?: Readonly<{
+      redactedFields: readonly RedactedField[];
+      reportCount?: number;
+    }>;
   }>, tx?: SmsTransaction): Promise<{ receipt: DeliveryReceipt; created: boolean }>;
 }
 
@@ -275,8 +279,13 @@ export type Job = Readonly<{
   attemptCount: number;
   maxAttempts: number;
   lastErrorCode?: string;
-  payload: Readonly<Record<string, string | number | boolean | null>>;
+  payload: JobPayload;
 }>;
+export type JobPayload =
+  | Readonly<{ kind: "none" }>
+  | Readonly<{ kind: "reconcile"; providerBizId?: string }>
+  | Readonly<{ kind: "retention"; before: Date }>
+  | Readonly<{ kind: "rollup"; statDate?: string }>;
 export interface JobRepository {
   get(input: Readonly<{ tenantId: TenantId; id: string }>, tx?: SmsTransaction): Promise<Job | undefined>;
   lease(input: Readonly<{ tenantId: TenantId; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
@@ -346,7 +355,7 @@ export type AuditEvent = Readonly<{
   targetId?: string;
   result: "succeeded" | "failed" | "denied";
   errorCode?: string;
-  metadata?: Readonly<Record<string, string | number | boolean | null>>;
+  metadata?: SafeEventMetadata;
   occurredAt: Date;
 }>;
 export interface AuditRepository {
@@ -374,7 +383,7 @@ export type DailyStats = Readonly<{
 }>;
 export interface StatsRepository {
   query(input: Readonly<{ tenantId: TenantId; from: Date; to: Date }>, tx?: SmsTransaction): Promise<readonly DailyStats[]>;
-  rollupDirtyDates(input: Readonly<{ limit: number }>, tx?: SmsTransaction): Promise<number>;
+  rollupDirtyDates(input: Readonly<{ tenantId: TenantId; limit: number }>, tx?: SmsTransaction): Promise<number>;
 }
 
 export interface SmsStore {

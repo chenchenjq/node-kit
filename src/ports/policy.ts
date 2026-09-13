@@ -1,4 +1,4 @@
-import type { MessageId } from "../core/types.js";
+import type { MessageId, TenantId } from "../core/types.js";
 import type { SmsTransaction } from "./store.js";
 
 export type VerificationPolicy = {
@@ -30,6 +30,6 @@ export type BudgetReservation = {
 export interface PolicyStore {
   get(tx?: SmsTransaction): Promise<VerificationPolicy>;
   update(input: VerificationPolicyUpdate, tx?: SmsTransaction): Promise<VerificationPolicy>;
-  holdBudget(messageId: MessageId, now: Date, tx: SmsTransaction): Promise<BudgetReservation>;
-  releaseBudget(messageId: MessageId, tx: SmsTransaction): Promise<boolean>;
+  holdBudget(input: Readonly<{ tenantId: TenantId; messageId: MessageId; now: Date }>, tx: SmsTransaction): Promise<BudgetReservation>;
+  releaseBudget(input: Readonly<{ tenantId: TenantId; messageId: MessageId }>, tx: SmsTransaction): Promise<boolean>;
 }
