@@ -14,7 +14,7 @@
 
 - Package name is exactly `sms-kit`; directory is exactly `packages/sms-kit/`; `package.json` must set `"private": true`.
 - Runtime floor is Node.js 20; source is TypeScript strict; output is ESM with `.d.ts` declarations.
-- Package is server-only. Browser bundles must never receive Secret resolution, plaintext phone data, OTPs, or decrypted render parameters.
+- `core`, `ports` and `next/types` remain browser-safe; `application`, `security`, `postgres`, `aliyun`, `better-auth` and `next` use browser-conditional refusal exports, and the Next-specific runtime entry imports `server-only`.
 - Core must not import Alibaba Cloud SDK, Better Auth, Next.js, `pg`, or Testcontainers.
 - Core storage contracts are ORM-independent; PostgreSQL and `pg` are optional implementation exports.
 - Provider configuration and resources are system-global; operational records are scoped by a required trusted `TenantId`. Single-tenant hosts inject one fixed default ID.
@@ -40,7 +40,8 @@
 - `packages/sms-kit/tsconfig.json`: editor/typecheck configuration.
 - `packages/sms-kit/tsconfig.build.json`: declaration-emitting build configuration.
 - `packages/sms-kit/vitest.config.ts`: unit and integration test configuration.
-- `packages/sms-kit/src/assert-server-only.ts`: runtime guard imported by infrastructure-facing subpaths.
+- `packages/sms-kit/src/browser-forbidden.ts`: browser-condition poison module that imports `server-only` and exports nothing.
+- `packages/sms-kit/src/next/server-only.ts`: Next-specific build-time poison import used by the `next` runtime entry.
 
 ### Domain and ports
 
@@ -55,6 +56,7 @@
 - `packages/sms-kit/src/ports/security.ts`: Secret, phone, payload and OTP protection ports.
 - `packages/sms-kit/src/ports/store.ts`: repository, transaction and `SmsStore` contracts.
 - `packages/sms-kit/src/ports/runtime.ts`: clock, ID, authorization and event ports.
+- `packages/sms-kit/src/ports/policy.ts`: versioned verification policy, budget reservation and circuit-breaker contracts.
 - `packages/sms-kit/src/ports/index.ts`: public port exports.
 
 ### Security and PostgreSQL
@@ -63,8 +65,9 @@
 - `packages/sms-kit/src/security/aes-gcm-protector.ts`: versioned AES-256-GCM phone/payload protection.
 - `packages/sms-kit/src/security/hmac-hasher.ts`: HMAC-SHA-256 lookup and OTP hashes.
 - `packages/sms-kit/src/security/index.ts`: public security exports.
-- `packages/sms-kit/src/postgres/migrations/0001_initial.sql`: complete `sms_kit` schema.
-- `packages/sms-kit/src/postgres/migrator.ts`: checksums and applies forward migrations.
+- `packages/sms-kit/src/postgres/migrations/0001_initial.sql`: version-1 base schema used by the fixed upgrade fixture.
+- `packages/sms-kit/src/postgres/migrations/0002_reliability_policy.sql`: current dispatch fencing, policy/budget, explicit statistics, key IDs and unmatched-receipt schema.
+- `packages/sms-kit/src/postgres/migrator.ts`: bootstraps the migration ledger, verifies checksums and applies forward migrations.
 - `packages/sms-kit/src/postgres/transaction.ts`: `pg.PoolClient` transaction adapter.
 - `packages/sms-kit/src/postgres/repositories/*.ts`: focused repository implementations.
 - `packages/sms-kit/src/postgres/store.ts`: repository aggregation.
@@ -72,6 +75,7 @@
 - `packages/sms-kit/src/testing/fakes.ts`: deterministic fakes.
 - `packages/sms-kit/src/testing/store-contract.ts`: reusable `SmsStore` contract suite.
 - `packages/sms-kit/src/testing/index.ts`: public testing exports.
+- `packages/sms-kit/test/fixtures/postgres/0000_previous.sql`: fixed previous-version schema used to prove upgrade compatibility.
 
 ---
 
@@ -86,12 +90,13 @@
 - Create: `packages/sms-kit/tsconfig.json`
 - Create: `packages/sms-kit/tsconfig.build.json`
 - Create: `packages/sms-kit/vitest.config.ts`
-- Create: `packages/sms-kit/src/assert-server-only.ts`
+- Create: `packages/sms-kit/src/browser-forbidden.ts`
+- Create: `packages/sms-kit/src/next/server-only.ts`
 - Test: `packages/sms-kit/test/package-metadata.test.ts`
 
 **Interfaces:**
 - Consumes: repository rules from `AGENTS.md`.
-- Produces: npm workspace `sms-kit`; scripts `build`, `typecheck`, `test`, `test:unit`, `test:integration`; subpath export skeletons used by all later tasks.
+- Produces: npm workspace `sms-kit`; scripts `build`, `typecheck`, `test`, `test:unit`, `test:contract`, `test:integration`; subpath export skeletons used by all later tasks. `test:integration` is the only default script allowed to require a Docker daemon.
 
 - [ ] **Step 1: Write the package metadata test**
 
@@ -115,6 +120,8 @@ describe("sms-kit package metadata", () => {
       "postgres/index", "aliyun/index", "better-auth/index", "next/index",
       "next/types/index", "testing/index",
     ].map((entry) => access(new URL(`../src/${entry}.ts`, import.meta.url))));
+    expect(pkg.exports["./security"].browser).toBe("./dist/browser-forbidden.js");
+    expect(pkg.exports["./core"].browser).toBeUndefined();
   });
 });
 ```
@@ -144,6 +151,7 @@ Use these package dependencies and dev dependencies:
     "@alicloud/tea-util": "1.4.11",
     "libphonenumber-js": "1.13.13",
     "pg": "8.23.0",
+    "server-only": "0.0.1",
     "zod": "4.6.4"
   },
   "peerDependencies": { "better-auth": ">=1.7.0 <2" },
@@ -160,13 +168,13 @@ Use these package dependencies and dev dependencies:
 }
 ```
 
-Set each export to `types` and `import` files under `dist`; create source `index.ts` entry files containing `export {};`, replacing those exports in their owning tasks. Add `assert-server-only.ts` with a deterministic browser-runtime check and import it from `postgres`, `aliyun`, `better-auth`, and `next` entries. `tsconfig.base.json` must use `target: ES2022`, `module/moduleResolution: NodeNext`, `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, and `skipLibCheck: false`.
+Set each export to `types` and `import` files under `dist`; create source `index.ts` entry files containing `export {};`, replacing those exports in their owning tasks. For `application`, `security`, `postgres`, `aliyun`, `better-auth` and `next`, add a `browser` condition before `import` that resolves to `dist/browser-forbidden.js`; the poison module contains only `import "server-only"; export {};`. Keep `core`, `ports` and `next/types` free of the poison module. The `next` runtime entry also imports `./server-only.js`, whose only side effect is `import "server-only"`. `tsconfig.base.json` must use `target: ES2022`, `module/moduleResolution: NodeNext`, `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, and `skipLibCheck: false`.
 
 - [ ] **Step 4: Run package checks**
 
 Run: `npm run typecheck --workspace sms-kit && npm test --workspace sms-kit -- package-metadata.test.ts && npm run build --workspace sms-kit`
 
-Expected: PASS; `dist` contains ESM output and declarations for every entry skeleton.
+Expected: PASS; `dist` contains ESM output and declarations for every entry skeleton, export metadata places `browser` before `import` on every sensitive subpath, and a plain Node.js import resolves default implementations for non-Next server entries. The `next` entry is tested only inside a React Server graph; actual Next.js Server/Client build contracts are added in the Next Admin API plan.
 
 - [ ] **Step 5: Commit the workspace foundation**
 
@@ -187,7 +195,7 @@ git commit -m "chore: bootstrap private sms-kit package"
 
 **Interfaces:**
 - Consumes: TypeScript configuration from Task 1.
-- Produces: `MessageId`, `TemplateId`, `ChallengeId`, `SmsErrorCode`, `SmsKitError`, `AcceptanceStatus`, `DeliveryStatus`, `assertDeliveryTransition()`.
+- Produces: `MessageId`, `TemplateId`, `ChallengeId`, `SmsErrorCode`, `SmsKitError`, `AcceptanceStatus`, `AcceptanceEvidence`, `DeliveryStatus`, `assertAcceptanceTransition()`, `assertDeliveryTransition()`.
 
 - [ ] **Step 1: Write failing tests for stable errors and terminal delivery states**
 
@@ -205,6 +213,13 @@ it("marks acceptance uncertainty separately from delivery", () => {
   const error = new SmsKitError("ACCEPTANCE_UNKNOWN", "provider result is unknown", false);
   expect(error.retryable).toBe(false);
   expect(error.code).toBe("ACCEPTANCE_UNKNOWN");
+});
+
+it("allows unknown to rejected only for the original dispatch response", () => {
+  expect(() => assertAcceptanceTransition("unknown", "rejected", "query-no-record"))
+    .toThrowError(/authoritative/);
+  expect(() => assertAcceptanceTransition("unknown", "rejected", "same-dispatch-response"))
+    .not.toThrow();
 });
 ```
 
@@ -224,15 +239,29 @@ export type TemplateId = Brand<string, "TemplateId">;
 export type ChallengeId = Brand<string, "ChallengeId">;
 
 export type AcceptanceStatus = "pending" | "accepted" | "rejected" | "unknown";
+export type AcceptanceEvidence = "same-dispatch-response" | "positive-provider-evidence" | "query-no-record";
 export type DeliveryStatus = "not_applicable" | "waiting" | "delivered" | "failed" | "unknown_final";
 
 const deliveryTransitions: Record<DeliveryStatus, readonly DeliveryStatus[]> = {
-  not_applicable: ["waiting"],
+  not_applicable: ["waiting", "delivered", "failed", "unknown_final"],
   waiting: ["delivered", "failed", "unknown_final"],
   delivered: [],
   failed: [],
   unknown_final: [],
 };
+
+export function assertAcceptanceTransition(
+  from: AcceptanceStatus,
+  to: AcceptanceStatus,
+  evidence: AcceptanceEvidence,
+): void {
+  const initial = from === "pending" && ["accepted", "rejected", "unknown"].includes(to);
+  const recoveredAccepted = from === "unknown" && to === "accepted" && evidence !== "query-no-record";
+  const lateRejected = from === "unknown" && to === "rejected" && evidence === "same-dispatch-response";
+  if (!(initial || recoveredAccepted || lateRejected)) {
+    throw new SmsKitError("CONCURRENT_MODIFICATION", "authoritative acceptance transition required");
+  }
+}
 
 export function assertDeliveryTransition(from: DeliveryStatus, to: DeliveryStatus): void {
   if (!deliveryTransitions[from].includes(to)) {
@@ -247,7 +276,7 @@ Define every PRD section 9 error code as a string union. `SmsKitError` must expo
 
 Run: `npm test --workspace sms-kit -- test/unit/core && npm run typecheck --workspace sms-kit`
 
-Expected: PASS with terminal states rejecting backward transitions and all error codes typechecked.
+Expected: PASS with terminal states rejecting backward transitions, direct receipts allowing `not_applicable` to reach a delivery terminal, query-no-record unable to reject acceptance, and all error codes typechecked.
 
 - [ ] **Step 5: Commit the domain foundation**
 
@@ -332,13 +361,14 @@ git commit -m "feat: validate mainland phones and sms templates"
 - Create: `packages/sms-kit/src/ports/provider.ts`
 - Create: `packages/sms-kit/src/ports/security.ts`
 - Create: `packages/sms-kit/src/ports/runtime.ts`
+- Create: `packages/sms-kit/src/ports/policy.ts`
 - Create: `packages/sms-kit/src/ports/store.ts`
 - Modify: `packages/sms-kit/src/ports/index.ts`
 - Test: `packages/sms-kit/test/unit/ports/contracts.test.ts`
 
 **Interfaces:**
 - Consumes: branded IDs, states and error codes from Tasks 2-3.
-- Produces: all interfaces named in PRD section 6.1, including `SmsProvider`, `SmsStore`, `SmsTransaction`, `SecretResolver`, `PhoneNumberProtector`, `MessagePayloadProtector`, `OtpHasher`, `Authorizer`, `TenantContext`, `Clock`, `Sleeper`, `IdGenerator`, and `EventSink`.
+- Produces: all interfaces named in PRD section 6.1, including `SmsProvider`, `SmsStore`, `PolicyStore`, `SmsTransaction`, `SecretResolver`, `PhoneNumberProtector`, `MessagePayloadProtector`, `OtpHasher`, `Authorizer`, `TenantContext`, `BackgroundTaskScheduler`, `Clock`, `Sleeper`, `IdGenerator`, and `EventSink`.
 
 - [ ] **Step 1: Write compile-time contract tests using concrete fakes**
 
@@ -378,8 +408,57 @@ export interface SmsProvider {
 }
 
 export interface MessagePayloadProtector {
-  seal(value: Readonly<Record<string, string>>): Promise<{ ciphertext: string; keyId: string }>;
-  open(input: { ciphertext: string; keyId: string }): Promise<Readonly<Record<string, string>>>;
+  seal(value: Readonly<Record<string, string>>, context: ProtectionContext): Promise<{ ciphertext: string; keyId: string }>;
+  open(input: { ciphertext: string; keyId: string }, context: ProtectionContext): Promise<Readonly<Record<string, string>>>;
+}
+
+export type ProtectionContext = {
+  envelopeVersion: 1;
+  purpose: "phone" | "render-params";
+  tenantId: TenantId;
+  recordId: MessageId;
+  fieldName: "phone_ciphertext" | "render_params_ciphertext";
+};
+
+export interface PhoneNumberProtector {
+  protect(phone: MainlandPhone, context: ProtectionContext): Promise<{
+    ciphertext: string; keyId: string; lookupHash: string; masked: string; last4: string;
+  }>;
+  unprotect(input: { ciphertext: string; keyId: string }, context: ProtectionContext): Promise<MainlandPhone>;
+}
+
+export interface BackgroundTaskScheduler<Context = unknown> {
+  schedule(task: () => Promise<void>, context: Context): void | Promise<void>;
+}
+
+export type VerificationPolicy = {
+  version: number;
+  otpLength: number;
+  otpTtlSeconds: number;
+  otpMaxAttempts: number;
+  proofTtlSeconds: number;
+  phoneMinIntervalSeconds: number;
+  phoneHourlyLimit: number;
+  phoneDailyLimit: number;
+  ipWindowSeconds: number;
+  ipWindowLimit: number;
+  systemDailyBudget: number | null;
+  circuitOpen: boolean;
+  circuitReason?: string;
+};
+
+export type VerificationPolicyUpdate = Omit<VerificationPolicy, "version"> & { expectedVersion: number };
+export type BudgetReservation = {
+  messageId: MessageId;
+  budgetDate: string;
+  state: "held" | "released";
+};
+
+export interface PolicyStore {
+  get(tx?: SmsTransaction): Promise<VerificationPolicy>;
+  update(input: VerificationPolicyUpdate, tx?: SmsTransaction): Promise<VerificationPolicy>;
+  holdBudget(messageId: MessageId, now: Date, tx: SmsTransaction): Promise<BudgetReservation>;
+  releaseBudget(messageId: MessageId, tx: SmsTransaction): Promise<boolean>;
 }
 
 export interface SmsStore {
@@ -387,15 +466,18 @@ export interface SmsStore {
   config: ConfigRepository;
   resources: ResourceRepository;
   messages: MessageRepository;
+  attempts: AttemptRepository;
+  receipts: ReceiptRepository;
   jobs: JobRepository;
   challenges: ChallengeRepository;
   rateLimits: RateLimitRepository;
+  policy: PolicyStore;
   audits: AuditRepository;
   stats: StatsRepository;
 }
 ```
 
-Define each repository method with an optional final `tx?: SmsTransaction` argument. `consumeProof()` must require a transaction and return `{ consumed: true; replay: boolean } | { consumed: false; reason: "invalid" | "expired" | "used" }`. Define `Sleeper.sleep(ms)` separately from `Clock.now()` so timing behavior is deterministic in tests. Adapter-specific external transaction conversion belongs only to `sms-kit/postgres` as `asSmsTransaction(client: PoolClient)`.
+Define each repository method with an optional final `tx?: SmsTransaction` argument. `consumeProof()` must require a transaction and return `{ consumed: true; replay: boolean } | { consumed: false; reason: "invalid" | "expired" | "used" }`. `ProviderSendInput` requires a positive `timeoutMs`; `ProviderDeliveryQuery` must require `phoneNumber`, `sendDate`, `currentPage` and `pageSize`, with optional `bizId`. Define `Sleeper.sleep(ms)` separately from `Clock.now()` so timing behavior is deterministic in tests. Adapter-specific external transaction conversion belongs only to `sms-kit/postgres` as `asSmsTransaction(client: PoolClient)`.
 
 Every operational repository input must carry a branded `tenantId`; configuration/resource methods remain system-global. Define `TenantContext.resolve(input)` for host adapters and `FixedTenantContext` for single-tenant use. Store contracts must not expose an unscoped list/get method for messages, jobs, Challenges, audits or statistics.
 
@@ -441,9 +523,19 @@ it("uses authenticated encryption and key ids", async () => {
     keyById: async (id: string) => id === "k1" ? key32 : undefined,
   };
   const protector = new AesGcmMessagePayloadProtector(keyring);
-  const sealed = await protector.seal({ order: "A-100" });
+  const context: ProtectionContext = {
+    envelopeVersion: 1,
+    purpose: "render-params",
+    tenantId: tenantA,
+    recordId: messageA,
+    fieldName: "render_params_ciphertext",
+  };
+  const sealed = await protector.seal({ order: "A-100" }, context);
   expect(sealed.ciphertext).not.toContain("A-100");
-  await expect(protector.open(sealed)).resolves.toEqual({ order: "A-100" });
+  await expect(protector.open(sealed, context)).resolves.toEqual({ order: "A-100" });
+  await expect(protector.open(sealed, { ...context, recordId: messageB })).rejects.toMatchObject({
+    code: "STORAGE_FAILURE",
+  });
 });
 ```
 
@@ -458,10 +550,22 @@ Expected: FAIL because the concrete resolvers and protectors are absent.
 ```ts
 type CipherEnvelope = { v: 1; iv: string; tag: string; data: string };
 
-async function sealBytes(key: Buffer, plaintext: Buffer): Promise<string> {
+function encodeAad(keyId: string, context: ProtectionContext): Buffer {
+  return Buffer.from(JSON.stringify([
+    context.envelopeVersion, keyId, context.purpose, context.tenantId,
+    context.recordId, context.fieldName,
+  ]), "utf8");
+}
+
+async function sealBytes(
+  key: Buffer,
+  keyId: string,
+  plaintext: Buffer,
+  context: ProtectionContext,
+): Promise<string> {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(Buffer.from("sms-kit:cipher-envelope:v1"));
+  cipher.setAAD(encodeAad(keyId, context));
   const data = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const envelope: CipherEnvelope = {
     v: 1,
@@ -473,13 +577,13 @@ async function sealBytes(key: Buffer, plaintext: Buffer): Promise<string> {
 }
 ```
 
-Require exactly 32-byte AES keys and a separate HMAC key. Include key ID in the returned metadata, authenticate the envelope version as AAD, use constant-time comparison for HMAC verification, and map all failures to safe error codes without embedding key material.
+Require exactly 32-byte AES keys and a separate HMAC key. Include key ID in returned metadata and authenticate the tuple `version + keyId + purpose + tenantId + recordId + fieldName` as AAD for both phone and render-parameter protectors. Generate the application UUID before encryption so `recordId` is stable. Use constant-time comparison for HMAC verification, and map all failures to safe error codes without embedding key material.
 
 - [ ] **Step 4: Verify wrong-key, tamper and missing-variable behavior**
 
 Run: `npm test --workspace sms-kit -- test/unit/security && npm run typecheck --workspace sms-kit`
 
-Expected: PASS; tampered ciphertext, unknown key IDs, empty env variables and invalid reference schemes fail with safe messages.
+Expected: PASS; tampered ciphertext, unknown key IDs, and ciphertext swapped across tenants, messages or fields fail authentication; empty env variables and invalid reference schemes fail with safe messages.
 
 - [ ] **Step 5: Commit security primitives**
 
@@ -492,6 +596,7 @@ git commit -m "feat: protect sms secrets and sensitive payloads"
 
 **Files:**
 - Create: `packages/sms-kit/src/postgres/migrations/0001_initial.sql`
+- Create: `packages/sms-kit/src/postgres/migrations/0002_reliability_policy.sql`
 - Create: `packages/sms-kit/src/postgres/migrator.ts`
 - Create: `packages/sms-kit/src/postgres/transaction.ts`
 - Create: `packages/sms-kit/scripts/copy-assets.mjs`
@@ -499,6 +604,7 @@ git commit -m "feat: protect sms secrets and sensitive payloads"
 - Modify: `packages/sms-kit/src/postgres/index.ts`
 - Test: `packages/sms-kit/test/integration/postgres/migration.test.ts`
 - Test: `packages/sms-kit/test/integration/postgres/helpers.ts`
+- Create: `packages/sms-kit/test/fixtures/postgres/0000_previous.sql`
 
 **Interfaces:**
 - Consumes: database design sections 1-6 and `SmsTransaction`.
@@ -516,26 +622,37 @@ it("creates the complete sms_kit schema idempotently", async () => {
      where table_schema = 'sms_kit' order by table_name`,
   );
   expect(rows.map((row) => row.table_name)).toEqual([
-    "audit_event", "daily_stat", "delivery_receipt", "otp_challenge",
-    "provider_config", "rate_limit_bucket", "resource_sync",
-    "resource_sync_candidate", "schema_migration", "send_attempt",
-    "send_job", "send_message", "signature", "stat_dirty_date", "template",
+    "audit_event", "daily_send_budget", "daily_stat", "delivery_receipt",
+    "otp_challenge", "policy_config", "provider_config", "rate_limit_bucket",
+    "resource_sync", "resource_sync_candidate", "schema_migration",
+    "send_attempt", "send_budget_reservation", "send_job", "send_message",
+    "signature", "stat_dirty_date", "template",
   ]);
   await expect(columnIsNotNull(pool, "send_message", "tenant_id")).resolves.toBe(true);
   await expect(columnIsNotNull(pool, "otp_challenge", "tenant_id")).resolves.toBe(true);
+  await stop();
+});
+
+it("upgrades the fixed previous-version fixture", async () => {
+  const { pool, stop } = await startPostgres();
+  await pool.query(await readFile(previousSchemaFixture, "utf8"));
+  await migrateSmsKit(pool);
+  await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(2);
+  await migrateSmsKit(pool);
+  await expect(allRequiredConstraintsExist(pool)).resolves.toBe(true);
   await stop();
 });
 ```
 
 - [ ] **Step 2: Run the integration test and confirm migration is missing**
 
-Run: `npm run test:integration --workspace sms-kit -- migration.test.ts`
+Run on a host or CI runner where `docker info` succeeds: `npm run test:integration --workspace sms-kit -- migration.test.ts`
 
 Expected: FAIL because `migrateSmsKit` and the SQL migration are missing.
 
 - [ ] **Step 3: Implement the exact schema and migration checksum guard**
 
-Create every table, status `CHECK`, foreign key, unique constraint, partial index and retention-nullable column from `doc/数据库设计.md`. The migrator must lock `pg_advisory_xact_lock(hashtext('sms-kit-migrate'))`, compare the SHA-256 checksum of already-applied migrations, apply unapplied files in lexical order, and insert `schema_migration` in the same transaction. Add `scripts/copy-assets.mjs` only now that the source migration directory exists, and change the package build script to `tsc -p tsconfig.build.json && node scripts/copy-assets.mjs`.
+Create every table, status `CHECK`, foreign key, unique constraint, partial index and retention-nullable column from `doc/数据库设计.md`. `0001_initial.sql` creates the base version-1 model; `0002_reliability_policy.sql` adds policy, daily budget, reservation, dispatch/lease fencing, explicit statistic columns, phone key ID and unmatched-receipt support. The committed `0000_previous.sql` fixture is an exact version-1 database plus its real version-1 migration checksum, not a hand-edited approximation. The migrator must lock `pg_advisory_xact_lock(hashtext('sms-kit-migrate'))`, execute hard-coded idempotent bootstrap DDL for the schema and `schema_migration` ledger, then compare the SHA-256 checksum of every recorded application migration. Application migrations start at version 1 and must not create their own ledger. Apply each unapplied file and insert its ledger row in the same transaction. Add `scripts/copy-assets.mjs` only now that the source migration directory exists, and change the package build script to `tsc -p tsconfig.build.json && node scripts/copy-assets.mjs`.
 
 ```ts
 export async function migrateSmsKit(pool: Pool): Promise<void> {
@@ -543,6 +660,8 @@ export async function migrateSmsKit(pool: Pool): Promise<void> {
   try {
     await client.query("begin");
     await client.query("select pg_advisory_xact_lock(hashtext('sms-kit-migrate'))");
+    await ensureMigrationLedger(client);
+    await verifyRecordedChecksums(client, migrationFiles);
     await applyMigrations(client, migrationFiles);
     await client.query("commit");
   } catch (error) {
@@ -556,9 +675,9 @@ export async function migrateSmsKit(pool: Pool): Promise<void> {
 
 - [ ] **Step 4: Run migration, downgrade-detection and build checks**
 
-Run: `npm run test:integration --workspace sms-kit -- migration.test.ts && npm run build --workspace sms-kit`
+Run on a Docker-capable host: `npm run test:integration --workspace sms-kit -- migration.test.ts && npm run build --workspace sms-kit`
 
-Expected: PASS; running migration twice changes nothing, checksum tampering fails, and built SQL exists under `dist/postgres/migrations`.
+Expected: PASS; a completely empty database reaches version 2 through both migrations, the fixed version-1 schema applies only migration 2, running either path twice changes nothing, checksum tampering fails, and both built SQL files exist under `dist/postgres/migrations`.
 
 - [ ] **Step 5: Commit the database schema**
 
@@ -567,20 +686,24 @@ git add packages/sms-kit/src/postgres packages/sms-kit/test/integration/postgres
 git commit -m "feat: add sms-kit postgres schema and migrator"
 ```
 
-### Task 7: Implement configuration, resource and message/job repositories
+### Task 7: Implement configuration, policy, budget and dispatch repositories
 
 **Files:**
 - Create: `packages/sms-kit/src/postgres/repositories/config-repository.ts`
 - Create: `packages/sms-kit/src/postgres/repositories/resource-repository.ts`
 - Create: `packages/sms-kit/src/postgres/repositories/message-repository.ts`
+- Create: `packages/sms-kit/src/postgres/repositories/attempt-repository.ts`
+- Create: `packages/sms-kit/src/postgres/repositories/receipt-repository.ts`
 - Create: `packages/sms-kit/src/postgres/repositories/job-repository.ts`
+- Create: `packages/sms-kit/src/postgres/repositories/policy-repository.ts`
 - Create: `packages/sms-kit/src/postgres/store.ts`
 - Test: `packages/sms-kit/test/integration/postgres/config-resource.test.ts`
 - Test: `packages/sms-kit/test/integration/postgres/message-job.test.ts`
+- Test: `packages/sms-kit/test/integration/postgres/policy-budget.test.ts`
 
 **Interfaces:**
 - Consumes: Store interfaces from Task 4, schema and transaction adapter from Task 6.
-- Produces: `PgConfigRepository`, `PgResourceRepository`, `PgMessageRepository`, `PgJobRepository`, partial `PgSmsStore`.
+- Produces: `PgConfigRepository`, `PgResourceRepository`, `PgMessageRepository`, `PgAttemptRepository`, `PgReceiptRepository`, `PgJobRepository`, `PgPolicyStore`, partial `PgSmsStore`.
 
 - [ ] **Step 1: Write failing repository concurrency tests**
 
@@ -608,17 +731,35 @@ it("rejects an expired resource preview", async () => {
     code: "CONCURRENT_MODIFICATION",
   });
 });
+
+it("never exceeds the system daily budget under concurrency", async () => {
+  await store.policy.update({ ...defaultPolicy, expectedVersion: 1, systemDailyBudget: 1 });
+  const results = await Promise.allSettled([
+    holdBudgetFor(messageA), holdBudgetFor(messageB),
+  ]);
+  expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+  expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+});
+
+it("creates only one started attempt per message", async () => {
+  const first = await createStartedAttempt({ messageId, dispatchMode: "queued", leaseToken });
+  await expect(createStartedAttempt({ messageId, dispatchMode: "queued", leaseToken }))
+    .rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" });
+  expect(first.dispatchToken).toBeDefined();
+});
 ```
 
 - [ ] **Step 2: Run repository tests and confirm missing implementations**
 
-Run: `npm run test:integration --workspace sms-kit -- config-resource.test.ts message-job.test.ts`
+Run on a Docker-capable host: `npm run test:integration --workspace sms-kit -- config-resource.test.ts message-job.test.ts policy-budget.test.ts`
 
 Expected: FAIL because PostgreSQL repositories do not exist.
 
 - [ ] **Step 3: Implement repositories with explicit SQL and safe leases**
 
-Use parameterized SQL only. Configuration updates must use `WHERE id = 1 AND version = $expectedVersion` and increment version. Resource commits must lock the sync row, verify expiry and all candidate checksums, then import selected resources without changing local enablement on later syncs. Message creation and `send` job insertion share one transaction. Use `(tenant_id, idempotency_key)` for message uniqueness and require tenant predicates on every operational lookup.
+Use parameterized SQL only. Configuration and policy updates independently use `WHERE id = 1 AND version = $expectedVersion` and increment their own versions. Resource commits lock the sync row, verify expiry and all candidate checksums, then import selected resources without changing local enablement on later syncs. Message creation and `send` job insertion share one transaction. Use `(tenant_id, idempotency_key)` for message uniqueness and require tenant predicates on every operational lookup.
+
+`PgPolicyStore.holdBudget()` locks policy row 1 and the UTC-date budget row, rejects `circuit_open`, reuses an existing message reservation, and inserts/increments exactly once when below a non-null limit. `releaseBudget()` conditionally changes `held` to `released` and decrements once. `PgAttemptRepository.createStarted()` enforces the direct/queued lease-token check and returns a generated `dispatch_token`; `completeByDispatchToken()` performs only allowed monotonic transitions. `PgReceiptRepository` accepts matched and unmatched rows with one deterministic dedupe key.
 
 ```sql
 with candidate as (
@@ -629,17 +770,21 @@ with candidate as (
   limit $1
 )
 update sms_kit.send_job j
-set state = 'leased', lease_owner = $2, lease_until = now() + $3::interval
+set state = 'leased', lease_owner = $2, lease_token = $3,
+    lease_generation = lease_generation + 1,
+    lease_until = now() + $4::interval
 from candidate c
 where j.id = c.id
 returning j.*;
 ```
 
+Every `renew`, `reschedule`, `succeed` and `fail` statement uses `WHERE id = $id AND state = 'leased' AND lease_token = $leaseToken`; a zero-row result is `CONCURRENT_MODIFICATION`. Returning a job to `pending` clears owner, token and expiry. Expired leases are classified by the later dispatch-recovery service: only jobs with no started Attempt may be returned to pending.
+
 - [ ] **Step 4: Run integration tests including lease expiry and checksum conflict**
 
-Run: `npm run test:integration --workspace sms-kit -- config-resource.test.ts message-job.test.ts && npm run typecheck --workspace sms-kit`
+Run on a Docker-capable host: `npm run test:integration --workspace sms-kit -- config-resource.test.ts message-job.test.ts policy-budget.test.ts && npm run typecheck --workspace sms-kit`
 
-Expected: PASS; concurrent idempotent creation returns one message, expired leases can be reclaimed, and stale previews cannot commit.
+Expected: PASS; concurrent idempotent creation returns one message, lease tokens fence stale owners, a message has at most one started Attempt, budget reservation cannot exceed its limit or double count, config/policy versions are independent, and stale previews cannot commit.
 
 - [ ] **Step 5: Commit configuration and delivery persistence**
 
@@ -648,7 +793,7 @@ git add packages/sms-kit/src/postgres/repositories packages/sms-kit/src/postgres
 git commit -m "feat: persist sms configuration resources and jobs"
 ```
 
-### Task 8: Complete Challenge, rate-limit, audit and statistics stores and contract suite
+### Task 8: Complete Challenge, rate-limit, audit and explicit statistics stores
 
 **Files:**
 - Create: `packages/sms-kit/src/postgres/repositories/challenge-repository.ts`
@@ -670,10 +815,24 @@ git commit -m "feat: persist sms configuration resources and jobs"
 ```ts
 it("allows only one concurrent proof consumer", async () => {
   const results = await Promise.all([
-    consumeProofInNewTransaction(store, proof),
-    consumeProofInNewTransaction(store, proof),
+    consumeProofInNewTransaction(store, proof, "operation-a"),
+    consumeProofInNewTransaction(store, proof, "operation-b"),
   ]);
   expect(results.filter((result) => result.consumed)).toHaveLength(1);
+});
+
+it("returns replay true to concurrent consumers using the same key", async () => {
+  const results = await Promise.all([
+    consumeProofInNewTransaction(store, proof, "operation-a"),
+    consumeProofInNewTransaction(store, proof, "operation-a"),
+  ]);
+  expect(results.map((result) => result.replay).sort()).toEqual([false, true]);
+});
+
+it("does not consume a proof through a wrong binding", async () => {
+  await expect(consumeProof({ proof, subjectId: "other-user", action: "password.change" }))
+    .rejects.toMatchObject({ code: "PROOF_INVALID" });
+  await expect(consumeProof(validBinding)).resolves.toMatchObject({ consumed: true, replay: false });
 });
 
 it("never exposes another tenant's records", async () => {
@@ -698,32 +857,25 @@ Expected: FAIL because Challenge, rate-limit, audit and statistics repositories 
 
 - [ ] **Step 3: Implement atomic repositories and reusable contract tests**
 
-Rate-limit increments must use one `INSERT ... ON CONFLICT ... DO UPDATE SET count = rate_limit_bucket.count + 1 RETURNING count`. Proof consumption must set both `consumed_at` and `consumed_by_key` in one conditional write, then return a same-key replay without reopening the proof; a different key must return `used`. Stats must increment `stat_dirty_date.version` whenever message status changes, recompute absolute counts, and delete the dirty row only when its version is unchanged.
+Rate-limit increments must use one `INSERT ... ON CONFLICT ... DO UPDATE SET count = rate_limit_bucket.count + 1 RETURNING count`. Proof consumption first locks the unique row by `tenant_id + proof_hash`, validates `subject_id`, `action`, verification and expiry without writing on a mismatch, then sets both consumption fields or returns same-key replay under that lock. Stats must increment `stat_dirty_date.version` whenever acceptance or delivery changes; rollup recomputes all explicitly named absolute counts and deletes the dirty row only when its version is unchanged.
 
 ```sql
-with consumed as (
-  update sms_kit.otp_challenge
-  set consumed_at = now(), consumed_by_key = $2
-  where proof_hash = $1
-    and tenant_id = $3
-    and verified_at is not null
-    and proof_expires_at > now()
-    and consumed_at is null
-  returning id, subject_id, action, false as replay
-)
-select * from consumed
-union all
-select id, subject_id, action, true as replay
+select id, subject_id, action, verified_at, proof_expires_at,
+       consumed_at, consumed_by_key
 from sms_kit.otp_challenge
-where proof_hash = $1 and consumed_by_key = $2 and tenant_id = $3
-  and not exists (select 1 from consumed);
+where tenant_id = $1 and proof_hash = $2
+for update;
 ```
 
-`runSmsStoreContract` must exercise singleton config, optimistic locking, resource checksum expiry, tenant-scoped message idempotency, cross-tenant read isolation, job leases, tenant-bound proof single-use, atomic rate limits, receipt dedupe and tenant/date dirty rollup against any Store factory.
+After the lock, compare `subject_id` and `action` before any update. If unconsumed and valid, run `UPDATE ... SET consumed_at = $now, consumed_by_key = $consumptionKey WHERE id = $id`; if consumed by the same key return `{ consumed: true, replay: true }`; otherwise return `used`. The transaction boundary is mandatory.
+
+The rollup output fields are exactly `submittedCount`, `acceptedCount`, `acceptanceRejectedCount`, `acceptanceUnknownCount`, `deliveryWaitingCount`, `deliveredCount`, `deliveryFailedCount`, `deliveryUnknownFinalCount`, and `retryCount`; do not introduce generic `failedCount` or `unknownCount` fields.
+
+`runSmsStoreContract` must exercise singleton provider/policy configs, independent optimistic locks, atomic system budget, resource checksum expiry, tenant-scoped message idempotency, cross-tenant read isolation, lease-token fencing, direct/queued Attempt constraints, tenant/subject/action-bound proof locking and replay, atomic rate limits, matched/unmatched receipt dedupe and tenant/date dirty rollup against any Store factory.
 
 - [ ] **Step 4: Run the complete foundation verification**
 
-Run: `npm test --workspace sms-kit && npm run typecheck --workspace sms-kit && npm run build --workspace sms-kit`
+Run unit/contract checks everywhere, and integration tests only where `docker info` succeeds: `npm test --workspace sms-kit && npm run test:integration --workspace sms-kit && npm run typecheck --workspace sms-kit && npm run build --workspace sms-kit`
 
 Expected: PASS with unit and PostgreSQL integration suites, including two-tenant isolation and fixed-default-tenant contracts; no live network call is made.
 
@@ -742,9 +894,10 @@ Run:
 
 ```bash
 npm test --workspace sms-kit
+npm run test:integration --workspace sms-kit
 npm run typecheck --workspace sms-kit
 npm run build --workspace sms-kit
 git status --short
 ```
 
-Expected: every test passes; typecheck and build exit 0; only pre-existing user-owned files may remain untracked. Do not begin the Aliyun Delivery plan until this gate passes.
+Expected on a host where `docker info` succeeds: unit/contract and PostgreSQL Testcontainers suites pass; typecheck and build exit 0; only pre-existing user-owned files may remain untracked. On a Node 20 container without a mounted Docker socket, run only unit, contract, typecheck and build—the final plan verifies that lane separately. Do not begin the Aliyun Delivery plan until the Docker-capable integration gate passes.

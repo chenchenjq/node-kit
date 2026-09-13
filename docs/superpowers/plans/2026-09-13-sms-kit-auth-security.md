@@ -14,9 +14,9 @@
 
 - Complete Foundation and Aliyun Delivery plans first.
 - Better Auth is optional; core and non-auth subpaths must load without Better Auth installed.
-- First release supports existing accounts only; `signUpOnVerification` is disabled and no registration API is created.
+- First release supports existing accounts only; omit `signUpOnVerification` entirely (its current type is an object, not `false`) and create no registration API.
 - Better Auth owns login/password-reset OTP verification, users and sessions; sms-kit owns send policy, template mapping, rate limits, redacted records and audit.
-- Generic Challenge OTPs are six digits, expire after five minutes, and allow at most three verification attempts by default.
+- Generic Challenge defaults are six digits, five minutes and three attempts, but every issuance snapshots the validated versioned policy.
 - OTPs and proof tokens are never stored plaintext or logged; only keyed hashes are persisted.
 - A proof binds `subjectId + action + challengeId`; consumption requires `consumptionKey` and is idempotent only for the same key.
 - Challenge, proof, rate-limit and Better Auth send inputs bind a trusted `tenantId`; subject and phone lookup never cross tenants.
@@ -31,10 +31,11 @@
 - `src/application/proof-service.ts`: same-database and compensating proof consumption.
 - `src/security/otp-generator.ts`: cryptographically secure six-digit code generation.
 - `src/postgres/proof-transaction.ts`: joins host `pg.PoolClient` transactions.
-- `src/better-auth/types.ts`: adapter options and narrow Better Auth callback shapes.
+- `src/better-auth/types.ts`: adapter options derived from the installed Better Auth `phoneNumber()` option types.
 - `src/better-auth/adapter.ts`: existing-phone lookup, constant-envelope scheduling and template mapping.
 - `src/better-auth/index.ts`: optional public exports.
-- `test/contract/better-auth-adapter.test.ts`: adapter contract without creating auth sessions.
+- `test/contract/better-auth-adapter.test.ts`: runtime adapter behavior without creating auth sessions.
+- `test/contract/better-auth-types.test.ts`: compile-time compatibility with the real Better Auth plugin types.
 - `docs` changes inside `packages/sms-kit/README.md`: integration examples and security warnings.
 
 ---
@@ -50,7 +51,7 @@
 - Test: `packages/sms-kit/test/integration/application/challenge-service.test.ts`
 
 **Interfaces:**
-- Consumes: SendService direct OTP path, ChallengeRepository, RateLimitRepository, OtpHasher, PhoneNumberProtector, Clock, IdGenerator.
+- Consumes: SendService fenced direct OTP path, ChallengeRepository, RateLimitRepository, PolicyStore, OtpHasher, PhoneNumberProtector, Clock, IdGenerator.
 - Produces: `OtpGenerator`, `ChallengeService.issue(input)`, `ChallengeService.verify(input)`.
 
 - [ ] **Step 1: Write failing issuance, expiry and attempt-limit tests**
@@ -104,7 +105,7 @@ export type VerifyChallengeResult = {
 };
 ```
 
-`issue()` must enforce phone/purpose/IP/global limits before generating a code, store only the keyed hash, then call `sendOtpNow()` with `auth.password_change` or `auth.step_up`. A rejected send must invalidate the challenge before returning; an acceptance-unknown result must invalidate it and instruct the caller to request a fresh code without automatically resending. The issue idempotency key returns the same terminal outcome and never creates a second challenge. `verify()` must conditionally increment attempts, compare hashes in constant time, set `verified_at`, generate 32 random proof bytes, store only the proof hash, and return the plaintext proof once.
+`issue()` reads the versioned policy, atomically enforces its phone/purpose/IP/tenant limits before generating a code, snapshots the selected length/TTL/max-attempt values in the Challenge, stores only the keyed hash, then calls fenced `sendOtpNow()` with `auth.password_change` or `auth.step_up`. A rejected send must invalidate the challenge before returning; an acceptance-unknown result must invalidate it and instruct the caller to request a fresh code without automatically resending. The issue idempotency key returns the same terminal outcome and never creates a second challenge. `verify()` must conditionally increment attempts, compare hashes in constant time, set `verified_at`, generate 32 random proof bytes, store only the proof hash, apply the configured proof TTL, and return the plaintext proof once.
 
 Both operations require `tenantId`; challenge lookup predicates include tenant, and the signed/hashed proof binding includes tenant so a proof cannot authorize the same subject/action in another tenant.
 
@@ -149,6 +150,19 @@ it("rejects a second operation key for one proof", async () => {
   await expect(proofService.consume({ ...baseInput, consumptionKey: "operation-b" }))
     .rejects.toMatchObject({ code: "PROOF_INVALID" });
 });
+
+it("serializes concurrent same-key replay", async () => {
+  const [first, second] = await Promise.all([
+    proofService.consume(baseInput), proofService.consume(baseInput),
+  ]);
+  expect([first.replay, second.replay].sort()).toEqual([false, true]);
+});
+
+it("does not burn a proof when subject or action binding is wrong", async () => {
+  await expect(proofService.consume({ ...baseInput, subjectId: "user-2" }))
+    .rejects.toMatchObject({ code: "PROOF_INVALID" });
+  await expect(proofService.consume(baseInput)).resolves.toMatchObject({ consumed: true, replay: false });
+});
 ```
 
 - [ ] **Step 2: Run proof tests and confirm transaction helpers are missing**
@@ -182,15 +196,13 @@ export async function withPgProofTransaction<T>(
 }
 ```
 
-Repository consumption must conditionally set `consumed_at` and `consumed_by_key`; if already consumed by the same key, return `replay: true`, and if consumed by another key, reject. Cross-database documentation must require the downstream operation to use exactly the same `consumptionKey` as its idempotency key.
-
-The condition also matches `tenant_id`, `subject_id` and `action`. Add a negative integration test proving that the same proof, subject and action fail when only `tenantId` changes.
+Repository consumption starts a transaction and performs `SELECT id, subject_id, action, verified_at, proof_expires_at, consumed_at, consumed_by_key FROM sms_kit.otp_challenge WHERE tenant_id = $1 AND proof_hash = $2 FOR UPDATE`. Under the row lock, validate subject, action, verification and expiry before writing. A binding mismatch returns `PROOF_INVALID` without changing consumption fields. If unconsumed, set both fields; if already consumed by the same key, return `replay: true`; if consumed by another key, reject. Cross-database documentation must require the downstream operation to use exactly the same `consumptionKey` as its idempotency key. Add a negative integration test proving that changing only `tenantId` fails without consuming the valid tenant's proof.
 
 - [ ] **Step 4: Verify rollback, same-key replay and concurrent consumers**
 
 Run: `npm run test:integration --workspace sms-kit -- proof-service.test.ts proof-transaction.test.ts`
 
-Expected: PASS; a business callback failure rolls back proof consumption in same-database mode, and only one distinct consumption key can succeed.
+Expected: PASS; a business callback failure rolls back proof consumption in same-database mode, concurrent same-key calls yield one original plus one replay, only one distinct key can succeed, and wrong tenant/subject/action attempts do not consume the proof.
 
 - [ ] **Step 5: Commit proof consumption modes**
 
@@ -206,9 +218,10 @@ git commit -m "feat: consume sms proofs with transaction safety"
 - Create: `packages/sms-kit/src/better-auth/adapter.ts`
 - Modify: `packages/sms-kit/src/better-auth/index.ts`
 - Test: `packages/sms-kit/test/contract/better-auth-adapter.test.ts`
+- Test: `packages/sms-kit/test/contract/better-auth-types.test.ts`
 
 **Interfaces:**
-- Consumes: SendService direct OTP path, `isExistingPhone`, scheduler, Clock, EventSink.
+- Consumes: SendService fenced direct OTP path, tenant-scoped `isExistingPhone`, RateLimitRepository, PolicyStore, `BackgroundTaskScheduler`, Clock, Sleeper, EventSink, and real Better Auth plugin types.
 - Produces: `createBetterAuthSmsAdapter(options)` returning `sendOTP` and `sendPasswordResetOTP` callbacks.
 
 - [ ] **Step 1: Write failing existing/unknown-phone and template mapping tests**
@@ -229,42 +242,84 @@ it("does not send or reveal an unknown phone", async () => {
   expect(sendService.calls).toHaveLength(0);
   expect(eventSink.events[0]).not.toHaveProperty("phoneNumber");
 });
+
+it("deduplicates a repeated Better Auth callback without storing the code", async () => {
+  await adapter.sendOTP(args, context);
+  await adapter.sendOTP(args, context);
+  await scheduler.drain();
+  expect(sendService.calls).toHaveLength(1);
+  expect(JSON.stringify(await loadMessages())).not.toContain(args.code);
+});
+
+it("rate limits before account lookup for both known and unknown phones", async () => {
+  await adapter.sendOTP(args, context);
+  expect(callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup", "schedule"]);
+  options.isExistingPhone.mockResolvedValue(false);
+  callOrder.length = 0;
+  await adapter.sendOTP(args, context);
+  expect(callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup"]);
+  expect(await countBudgetReservations()).toBe(1);
+});
+
+it("surfaces scheduler rejection and observes asynchronous failures", async () => {
+  scheduler.rejectNext(new Error("scheduler unavailable"));
+  await expect(adapter.sendOTP(args, context)).rejects.toMatchObject({ code: "STORAGE_FAILURE" });
+  scheduler.failNextTask(new Error("background send failed"));
+  await adapter.sendOTP(args, context);
+  await scheduler.drain();
+  expect(eventSink.events.at(-1)).toMatchObject({ code: "STORAGE_FAILURE" });
+});
+
+it("is accepted by the installed Better Auth phone plugin", () => {
+  const callbacks = createBetterAuthSmsAdapter(options);
+  const plugin = phoneNumber({ ...callbacks, allowedAttempts: 3 });
+  expect(plugin).toBeDefined();
+});
 ```
 
 - [ ] **Step 2: Run adapter contract tests and confirm exports are missing**
 
-Run: `npm test --workspace sms-kit -- test/contract/better-auth-adapter.test.ts`
+Run: `npm run test:contract --workspace sms-kit -- better-auth-adapter.test.ts better-auth-types.test.ts`
 
 Expected: FAIL because the Better Auth adapter does not exist.
 
 - [ ] **Step 3: Implement optional callbacks with scheduled provider work**
 
 ```ts
-export type BetterAuthSmsAdapterOptions<Context> = {
+import { phoneNumber } from "better-auth/plugins";
+
+type PhoneNumberOptions = Parameters<typeof phoneNumber>[0];
+type BetterAuthSendOtp = NonNullable<PhoneNumberOptions["sendOTP"]>;
+type BetterAuthSendPasswordResetOtp = NonNullable<PhoneNumberOptions["sendPasswordResetOTP"]>;
+type BetterAuthOtpInput = Parameters<BetterAuthSendOtp>[0];
+type BetterAuthCallbackContext = Parameters<BetterAuthSendOtp>[1];
+
+export type BetterAuthSmsAdapterOptions = {
   sendService: Pick<SendService, "sendOtpNow">;
-  isExistingPhone(phone: string, context: Context): Promise<boolean>;
-  resolveTenant(context: Context): Promise<TenantId>;
-  schedule(task: Promise<void>, context: Context): void;
+  isExistingPhone(tenantId: TenantId, phone: string): Promise<boolean>;
+  resolveTenant(context: BetterAuthCallbackContext): Promise<TenantId>;
+  resolveTrustedIp(context: BetterAuthCallbackContext): Promise<string | undefined>;
+  scheduler: BackgroundTaskScheduler<BetterAuthCallbackContext>;
   templates?: { login?: string; passwordReset?: string };
   minimumResponseMs?: number;
 };
 
-export function createBetterAuthSmsAdapter<Context>(options: BetterAuthSmsAdapterOptions<Context>) {
+export function createBetterAuthSmsAdapter(options: BetterAuthSmsAdapterOptions) {
   return {
-    sendOTP: (input: PhoneOtpInput, context: Context) => dispatchKnownPhone("login", input, context),
-    sendPasswordResetOTP: (input: PhoneOtpInput, context: Context) =>
-      dispatchKnownPhone("passwordReset", input, context),
-  };
+    sendOTP: ((input, context) => dispatchKnownPhone("login", input, context)) satisfies BetterAuthSendOtp,
+    sendPasswordResetOTP: ((input, context) =>
+      dispatchKnownPhone("passwordReset", input, context)) satisfies BetterAuthSendPasswordResetOtp,
+  } satisfies Pick<PhoneNumberOptions, "sendOTP" | "sendPasswordResetOTP">;
 }
 ```
 
-Resolve the tenant from trusted server context, normalize the phone, perform the tenant-scoped `isExistingPhone`, and schedule `sendOtpNow()` only for existing accounts. Both branches must meet the configured minimum response envelope with a test-injected Clock/Sleeper. Never accept tenant from the phone callback payload or include existence, tenant, phone or code in external errors/events. The integration README must show Better Auth `phoneNumber({ sendOTP, sendPasswordResetOTP })` without `signUpOnVerification`.
+Derive callback input/context from installed Better Auth 1.7.4 types; do not maintain a hand-written duplicate. Resolve tenant/IP from trusted server context and normalize/hash the phone, then atomically apply phone, IP and tenant limits before calling tenant-scoped `isExistingPhone`. For a known account, derive the direct-send idempotency key as `better-auth:<purpose>:<keyed HMAC of tenant + normalized phone + code>`; never persist or emit the code or raw HMAC input. Schedule `sendOtpNow()` only for existing accounts by passing an unstarted `() => Promise<void>` to `scheduler.schedule`; unknown accounts neither reserve budget nor send. Await/handle synchronous scheduler rejection, wrap the task so every asynchronous failure emits a redacted event, and never create an unobserved Promise. Both branches traverse the same deterministic response-envelope helper backed by injected Clock/Sleeper; tests assert call sequence and requested delay, not wall-clock milliseconds. Never accept tenant from callback payload or include existence, tenant, phone or code in external errors/events. README uses `phoneNumber({ sendOTP, sendPasswordResetOTP, allowedAttempts: 3 })` and omits `signUpOnVerification` entirely.
 
 - [ ] **Step 4: Verify optional dependency and timing contract**
 
-Run: `npm test --workspace sms-kit -- test/contract/better-auth-adapter.test.ts && npm run typecheck --workspace sms-kit`
+Run: `npm run test:contract --workspace sms-kit -- better-auth-adapter.test.ts better-auth-types.test.ts && npm run typecheck --workspace sms-kit`
 
-Expected: PASS; known phones schedule sends, unknown phones do not, outward results match, and importing `sms-kit/core` succeeds in a fixture install without Better Auth.
+Expected: PASS; the callbacks compile when passed to the real `phoneNumber()` API, limits run before lookup, known phones schedule an unstarted task, unknown phones do not send or reserve budget, scheduler failures are observed, outward results match, and importing `sms-kit/core` succeeds in a fixture install without Better Auth.
 
 - [ ] **Step 5: Commit Better Auth adapter**
 
@@ -316,16 +371,22 @@ Document exact Better Auth server configuration, phone fields/migration responsi
 const callbacks = createBetterAuthSmsAdapter({
   sendService,
   resolveTenant: (context) => tenantFromTrustedSession(context),
-  isExistingPhone: (phone, context) => users.existsByPhone(tenantFromTrustedSession(context), phone),
-  schedule: (task) => waitUntil(task),
+  resolveTrustedIp: (context) => ipFromTrustedProxy(context),
+  isExistingPhone: (tenantId, phone) => users.existsByPhone(tenantId, phone),
+  scheduler: { schedule: (task) => waitUntil(task()) },
 });
+const policy = await policyService.get(systemActor);
 
 phoneNumber({
   sendOTP: callbacks.sendOTP,
   sendPasswordResetOTP: callbacks.sendPasswordResetOTP,
-  allowedAttempts: 3,
+  otpLength: policy.otpLength,
+  expiresIn: policy.otpTtlSeconds,
+  allowedAttempts: policy.otpMaxAttempts,
 });
 ```
+
+Do not add a `signUpOnVerification` property to this object. In Better Auth 1.7.4 it is an object configuration when enabled, so `false` is not a valid way to disable registration. Document that Better Auth reads these three numeric options when the auth instance is constructed; a host that allows them to change at runtime must rebuild its auth instance through its normal configuration lifecycle, while sms-kit send limits, budget and circuit settings take effect dynamically on each request.
 
 - [ ] **Step 4: Run complete auth security verification**
 

@@ -6,15 +6,16 @@
 
 **Architecture:** Zod schemas are the single source for runtime validation and exported TypeScript DTOs. Handler factories use standard Web `Request`/`Response`, inject actor and scheduler verification, call application services, and return stable envelopes; this keeps the adapter compatible with Next.js App Router without importing UI code or binding to a deployment vendor.
 
-**Tech Stack:** TypeScript 7.0.2, Node.js 20+, Zod 4.6.4, Vitest 5.0.0, PostgreSQL 17, standard Web Request/Response APIs.
+**Tech Stack:** TypeScript 7.0.2, Node.js 20+, Zod 4.6.4, Vitest 5.0.0, PostgreSQL 17, standard Web Request/Response APIs; compatibility fixture uses Next.js 16.3.5, React 19.3.0 and React DOM 19.3.0.
 
 **Spec:** `doc/prd/001-sms-kit.md` section 11.1; UI consumer rules: `doc/前端开发规范.md`; agent prompt: `doc/prompts/sms-kit-admin-ui.md`
 
 ## Global Constraints
 
 - Complete Foundation, Aliyun Delivery and Auth Security plans first.
-- Export API DTOs from `sms-kit/next/types`; frontend and mock services must import these types instead of duplicating them.
+- Export browser-safe API DTOs from `sms-kit/next/types`; frontend and mock services use `import type` instead of duplicating them.
 - Route handlers run only in Next.js Node.js Runtime, never Edge Runtime.
+- Sensitive subpaths must fail a real Client Component build, while `sms-kit/next/types` type-only imports and ordinary Node.js consumers remain valid.
 - Successful responses are `{ data, requestId }`; pages place `{ items, page, pageSize, total }` inside `data`; failures use the PRD stable error envelope.
 - Reject unknown request fields, invalid pagination, untrusted actor/IP values, missing versions and missing write idempotency keys.
 - Admin identity and roles come from the host; every handler requests the exact PRD permission before reading or mutating data.
@@ -31,8 +32,8 @@
 - `src/next/types/common.ts`: response, page, trusted actor/tenant and error DTOs.
 - `src/next/types/config.ts`: config and two-stage test schemas.
 - `src/next/types/resources.ts`: sync, signature and template schemas.
-- `src/next/types/verification.ts`: Better Auth mappings and Challenge settings.
-- `src/next/types/messages.ts`: receipt health, message, job and statistics schemas.
+- `src/next/types/verification.ts`: Better Auth mappings plus versioned Challenge, rate-limit, budget and circuit settings.
+- `src/next/types/messages.ts`: unmatched receipt health, message, job and explicit acceptance/delivery statistics schemas.
 - `src/next/types/index.ts`: public DTO/error exports.
 - `src/next/http.ts`: JSON parsing limits, envelopes and error mapping.
 - `src/next/admin-router.ts`: method/path matching and actor injection.
@@ -44,6 +45,7 @@
 - `src/next/index.ts`: public Route Handler factories.
 - `test/integration/next/*.test.ts`: handler integration tests.
 - `test/e2e/sms-admin-flow.test.ts`: full simulated admin flow.
+- `test/fixtures/next-host/`: minimal App Router project with passing server/type-only imports and an intentionally failing Client Component case.
 
 ---
 
@@ -81,6 +83,25 @@ it("does not expose a full phone field on MessageDto", () => {
   expect(dto.phone).toEqual({ masked: "138****8000", last4Available: true });
   expect(JSON.stringify(dto)).not.toContain("+8613800138000");
 });
+
+it("keeps verification policy and provider versions independent", () => {
+  const dto = verificationSettingsDtoSchema.parse(verificationFixture({
+    version: 4, systemDailyBudget: null, circuitOpen: false,
+  }));
+  expect(dto.version).toBe(4);
+  expect(dto.systemDailyBudget).toBeNull();
+  expect(dto).not.toHaveProperty("providerConfigVersion");
+});
+
+it("uses explicit acceptance and delivery statistic fields", () => {
+  const dto = smsStatsDtoSchema.parse(statsFixture());
+  expect(dto).toMatchObject({
+    submitted: 10, accepted: 7, acceptanceRejected: 2, acceptanceUnknown: 1,
+    deliveryWaiting: 2, delivered: 4, deliveryFailed: 1, deliveryUnknownFinal: 0,
+  });
+  expect(dto).not.toHaveProperty("failed");
+  expect(dto).not.toHaveProperty("unknown");
+});
 ```
 
 - [ ] **Step 2: Run DTO tests and confirm schemas are missing**
@@ -112,7 +133,7 @@ export function pageSchema<T extends z.ZodTypeAny>(item: T) {
 }
 ```
 
-Define every route DTO named in PRD section 11.1. Secret references contain only `scheme`, `maskedName`, `configured`; message phone contains only `masked`, `last4Available`; sync candidates include ID, external key, checksum and expiry. Use `z.strictObject` or `.strict()` everywhere.
+Define every route DTO named in PRD section 11.1. Secret references contain only `scheme`, `maskedName`, `configured`; message phone contains only `masked`, `last4Available`; sync candidates include ID, external key, checksum and expiry. `VerificationSettingsDto` and update input include independent policy `version`, OTP/Challenge values, phone/IP limits, nullable `systemDailyBudget`, `circuitOpen` and optional redacted reason. `ReceiptHealthDto` includes `unmatchedCount`. Stats expose exactly `submitted`, `accepted`, `acceptanceRejected`, `acceptanceUnknown`, `deliveryWaiting`, `delivered`, `deliveryFailed`, `deliveryUnknownFinal` and `retry`; rates are derived server-side. Use `z.strictObject` or `.strict()` everywhere.
 
 - [ ] **Step 4: Verify DTO fixtures and exported declaration names**
 
@@ -270,7 +291,7 @@ git commit -m "feat: expose sms configuration and resource api"
 - Test: `packages/sms-kit/test/integration/next/operations-routes.test.ts`
 
 **Interfaces:**
-- Consumes: Challenge settings, HealthService, ReconcileService, MessageRepository queries, StatsRepository and JobRepository.
+- Consumes: PolicyService, Better Auth mapping settings, HealthService, ReconcileService, MessageRepository queries, StatsRepository and JobRepository.
 - Produces: handlers for `/verification`, `/receipt-health`, `/reconcile`, `/messages`, `/messages/:id`, `/stats`, `/jobs/:id`.
 
 - [ ] **Step 1: Write failing status-separation and exact-phone-query tests**
@@ -292,6 +313,19 @@ it("does not return another tenant's message, job or statistics", async () => {
   expect((await requestAs(tenantAReader, "GET", `/jobs/${tenantBJobId}`)).status).toBe(404);
   expect(await statsFor(tenantAReader)).toEqual(tenantAOnlyStats);
 });
+
+it("updates policy with its own optimistic version", async () => {
+  const response = await requestAs(admin, "PATCH", "/verification", {
+    ...verificationUpdateFixture,
+    version: 3,
+    systemDailyBudget: 500,
+    circuitOpen: true,
+    circuitReason: "provider incident",
+  });
+  expect(response.status).toBe(200);
+  expect((await response.json()).data).toMatchObject({ version: 4, circuitOpen: true });
+  expect(configService.calls.save).toBe(0);
+});
 ```
 
 - [ ] **Step 2: Run operations route tests and confirm routes are absent**
@@ -302,7 +336,7 @@ Expected: FAIL with 404 responses for operations routes.
 
 - [ ] **Step 3: Implement bounded filters and serializers**
 
-Parse dates as ISO 8601, cap page size at 100 and cap statistics range at 366 days. Exact phone search accepts one request value, normalizes and hashes it server-side within `actor.tenantId`, then discards it; response includes only masked phone. Reconcile returns a tenant-scoped `JobDto`, not a false completion response. Missing and other-tenant message/job IDs both return 404. Job reads require the permission associated with the originating action.
+Parse dates as ISO 8601, cap page size at 100 and cap statistics range at 366 days. `GET/PATCH /verification` reads/writes `PolicyService` using the policy version, validates all PRD ranges, and never calls `ConfigService.save`; changing policy cannot reset provider readiness. Exact phone search accepts one request value, normalizes and hashes it server-side within `actor.tenantId`, then discards it; response includes only masked phone. Reconcile returns a tenant-scoped `JobDto`, not a false completion response. Missing and other-tenant message/job IDs both return 404. Job reads require the permission associated with the originating action. Receipt health includes redacted unmatched count and system budget/circuit state.
 
 ```ts
 routes.get("/stats", async ({ actor, url, requestId }) => {
@@ -316,7 +350,7 @@ routes.get("/stats", async ({ actor, url, requestId }) => {
 
 Run: `npm run test:integration --workspace sms-kit -- operations-routes.test.ts`
 
-Expected: PASS; message results never combine acceptance/delivery, exact phone input is not echoed, and rates use accepted/submitted and delivered/accepted denominators.
+Expected: PASS; policy/config versions remain independent, budget/circuit fields round-trip, message results never combine acceptance/delivery, exact phone input is not echoed, unmatched receipt health is present, explicit counters are returned, and rates use accepted/submitted and delivered/accepted denominators.
 
 - [ ] **Step 5: Commit operations routes**
 
@@ -335,7 +369,7 @@ git commit -m "feat: expose sms operations and statistics api"
 - Test: `packages/sms-kit/test/integration/next/task-handler.test.ts`
 
 **Interfaces:**
-- Consumes: ReceiptService, SendWorker, ReconcileService, MaintenanceService and host verification callbacks.
+- Consumes: ReceiptService, SendWorker, DispatchRecoveryService, ReconcileService, MaintenanceService, Clock and host verification callbacks.
 - Produces: `createAliyunReceiptHandler(options)` and `createSmsTaskHandler(options)`.
 
 - [ ] **Step 1: Write failing callback acknowledgment and scheduler-auth tests**
@@ -351,6 +385,22 @@ it("rejects an unverified scheduler", async () => {
   const response = await taskHandler(taskRequest("send-worker", "wrong"));
   expect(response.status).toBe(401);
   expect(sendWorker.calls).toBe(0);
+});
+
+it("returns retryable 503 before the callback deadline", async () => {
+  clock.setSequence([
+    new Date("2026-09-13T00:00:00.000Z"),
+    new Date("2026-09-13T00:00:00.690Z"),
+  ]);
+  const response = await receiptHandler(validReceiptRequest(validPathToken));
+  expect(response.status).toBe(503);
+  expect(receiptService.calls).toBe(0);
+});
+
+it("acknowledges a structurally valid unmatched receipt", async () => {
+  const response = await receiptHandler(unmatchedReceiptRequest(validPathToken));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ code: 0, msg: "成功" });
 });
 ```
 
@@ -373,13 +423,13 @@ export function createSmsTaskHandler(options: SmsTaskHandlerOptions) {
 }
 ```
 
-Receipt handler accepts only GET connectivity checks and POST receipt bodies, validates the path token before body parsing, and completes within the host's 700ms budget by doing only bounded parsing and one short transaction. Task handler exposes an allowlisted task union: `send-worker`, `receipt-reconcile`, `data-retention`, `daily-rollup`, `resource-sync`.
+Receipt handler accepts only GET connectivity checks and POST receipt bodies, validates the path token before body parsing, computes `deadlineAt = receivedAt + 700ms`, and checks the injected Clock before parsing and before delegating. Near-deadline work returns retryable 503; valid unmatched receipts return the Alibaba success acknowledgement. A separate non-gating benchmark records ordinary latency, but automated correctness never asserts a wall-clock millisecond threshold. Task handler exposes an allowlisted task union: `send-worker`, `dispatch-recovery`, `receipt-reconcile`, `data-retention`, `daily-rollup`, `resource-sync`.
 
 - [ ] **Step 4: Verify HTTP methods, limits, time budget and task allowlist**
 
 Run: `npm run test:integration --workspace sms-kit -- receipt-handler.test.ts task-handler.test.ts`
 
-Expected: PASS; wrong tokens do not parse bodies, oversized batches fail, unsupported tasks never execute, and the valid callback test completes below 500ms locally.
+Expected: PASS; wrong tokens do not parse bodies, oversized batches fail, unsupported tasks never execute, unmatched receipts are acknowledged, and an injected near-deadline Clock deterministically returns 503 without a flaky real-time assertion.
 
 - [ ] **Step 5: Commit receipt and task handlers**
 
@@ -430,7 +480,7 @@ it("isolates otherwise identical workflows across tenants", async () => {
 
 - [ ] **Step 2: Run E2E and confirm fixture gaps**
 
-Run: `npm test --workspace sms-kit -- test/e2e/sms-admin-flow.test.ts`
+Run on a host where `docker info` succeeds: `npm test --workspace sms-kit -- test/e2e/sms-admin-flow.test.ts`
 
 Expected: FAIL until the admin-host fixture wires the complete system.
 
@@ -440,7 +490,7 @@ Use PostgreSQL Testcontainers, FakeAliyunApi, fixed UTC Clock, sequential IDs, A
 
 - [ ] **Step 4: Run E2E twice and the full suite**
 
-Run: `npm test --workspace sms-kit -- test/e2e/sms-admin-flow.test.ts && npm test --workspace sms-kit`
+Run on a Docker-capable host: `npm test --workspace sms-kit -- test/e2e/sms-admin-flow.test.ts && npm test --workspace sms-kit`
 
 Expected: PASS on both runs; shared resources work across two tenant fixtures, operational reads remain isolated, the database container is isolated per run and no live network call occurs.
 
@@ -459,6 +509,11 @@ git commit -m "test: cover complete sms admin workflow"
 - Modify: `PACKAGES.md`
 - Test: `packages/sms-kit/test/compat/exports.test.ts`
 - Test: `packages/sms-kit/test/compat/browser-safety.test.ts`
+- Test: `packages/sms-kit/test/compat/next-build.test.ts`
+- Create: `packages/sms-kit/test/fixtures/next-host/package.json`
+- Create: `packages/sms-kit/test/fixtures/next-host/app/server/page.tsx`
+- Create: `packages/sms-kit/test/fixtures/next-host/app/type-only/page.tsx`
+- Create: `packages/sms-kit/test/fixtures/next-host/app/forbidden/page.tsx`
 
 **Interfaces:**
 - Consumes: every public module from all plans.
@@ -467,7 +522,7 @@ git commit -m "test: cover complete sms admin workflow"
 - [ ] **Step 1: Write failing public-export and optional-peer tests**
 
 ```ts
-it.each(["core", "application", "ports", "security", "postgres", "aliyun", "better-auth", "next", "next/types", "testing"])(
+it.each(["core", "application", "ports", "security", "postgres", "aliyun", "better-auth", "next/types", "testing"])(
   "imports sms-kit/%s from built output",
   async (subpath) => expect(await import(`sms-kit/${subpath}`)).toBeDefined(),
 );
@@ -475,6 +530,17 @@ it.each(["core", "application", "ports", "security", "postgres", "aliyun", "bett
 it("keeps core independent of optional Better Auth", async () => {
   const result = await importCoreFromFixtureWithoutBetterAuth();
   expect(result.exitCode).toBe(0);
+});
+
+it("keeps the Next runtime entry poisoned outside a React Server graph", async () => {
+  await expect(import("sms-kit/next")).rejects.toThrow(/Server Component/);
+});
+
+it("builds server and type-only imports but rejects a sensitive client import", async () => {
+  expect((await runNextFixture(["server", "type-only"])).exitCode).toBe(0);
+  const forbidden = await runNextFixture(["forbidden"]);
+  expect(forbidden.exitCode).not.toBe(0);
+  expect(forbidden.output).toMatch(/server-only|Client Component/);
 });
 ```
 
@@ -486,7 +552,9 @@ Expected: FAIL until every export map target, declaration and optional-peer boun
 
 - [ ] **Step 3: Finalize exports and README integration recipes**
 
-Ensure the root export contains only safe convenience exports and every server implementation subpath runs the browser guard. README must include installation, migration, Secret/keyring injection, Alibaba configuration, resource sync, notification send, Worker scheduling, callback URL setup with log redaction, reconciliation, retention, statistics, Better Auth, high-risk proof modes, fake testing and live-test guard instructions.
+Add exact dev dependencies `next@16.3.5`, `react@19.3.0` and `react-dom@19.3.0` for the compatibility fixture. Ensure the root export contains only browser-safe convenience exports. Sensitive export maps resolve the browser condition to the `server-only` poison module, while `sms-kit/next` also imports its Next-specific marker; `core`, `ports` and `next/types` remain safe. `runNextFixture()` copies the fixture to a fresh temporary directory, selects only named routes, installs or links the built package, runs `next build`, captures exit code/output and always removes the temporary directory. Passing routes import a sensitive entry only from a Server Component and use `import type` from `sms-kit/next/types` in a Client Component; the forbidden route imports `sms-kit/security` from a Client Component and must fail at build time. A separate spawned ordinary Node.js process imports `sms-kit/security` without Next.js conditions and must succeed.
+
+README must include installation, migration bootstrap, Secret/keyring and protection-context injection, Alibaba configuration, policy/budget/circuit management, resource sync, notification send, Worker and dispatch-recovery scheduling, callback URL setup with log redaction, unmatched receipt behavior, reconciliation, retention, explicit statistics, Better Auth, high-risk proof modes, fake testing and live-test guard instructions.
 
 Do not include a registry URL or `.npmrc`; keep `private: true`. Update `PACKAGES.md` purpose and public subpaths without claiming publication.
 
@@ -497,15 +565,17 @@ Run locally:
 ```bash
 npm ci
 npm test --workspace sms-kit
+npm run test:integration --workspace sms-kit
 npm run typecheck --workspace sms-kit
 npm run build --workspace sms-kit
+npm exec --workspace sms-kit -- vitest run test/compat
 npm pack --dry-run --workspace sms-kit
 docker run --rm -v "$PWD":/workspace -v /workspace/node_modules \
   -v /workspace/packages/sms-kit/node_modules -w /workspace node:20-alpine sh -lc \
-  "npm ci && npm test --workspace sms-kit && npm run typecheck --workspace sms-kit && npm run build --workspace sms-kit"
+  "npm ci && npm run test:unit --workspace sms-kit && npm run test:contract --workspace sms-kit && npm run typecheck --workspace sms-kit && npm run build --workspace sms-kit && npm exec --workspace sms-kit -- vitest run test/compat"
 ```
 
-Expected: all commands exit 0; `npm pack --dry-run` lists only intended dist/docs assets; Node 20 container passes; live test remains skipped and no publish occurs.
+Expected: host commands run where `docker info` succeeds, including PostgreSQL Testcontainers; `npm pack --dry-run` lists only intended dist/docs assets. The Node 20 container runs no integration/E2E Testcontainers and therefore needs no Docker socket, but unit, contract, type, build, ordinary Node import and Next build compatibility all pass. The intentionally forbidden Client Component case is asserted as an expected inner build failure. Live test remains skipped and no publish occurs.
 
 - [ ] **Step 5: Commit package completion**
 
@@ -523,10 +593,12 @@ Verify every PRD acceptance item against an automated test or README section, th
 ```bash
 npm ci
 npm test --workspace sms-kit
+npm run test:integration --workspace sms-kit
 npm run typecheck --workspace sms-kit
 npm run build --workspace sms-kit
+npm exec --workspace sms-kit -- vitest run test/compat
 npm pack --dry-run --workspace sms-kit
 git status --short
 ```
 
-Expected: all checks pass, package stays private, no live SMS is sent, and only pre-existing user-owned files may remain untracked.
+Then run the Node 20 no-Docker command from Task 7 Step 4. Expected: Docker-capable host integration/E2E, compatibility fixtures, package checks and the no-Docker Node 20 lane all pass; package stays private, no live SMS is sent, and only pre-existing user-owned files may remain untracked.

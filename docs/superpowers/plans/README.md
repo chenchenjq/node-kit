@@ -28,19 +28,24 @@
 | @alicloud/dysmsapi20170525 | `4.6.0` |
 | @alicloud/openapi-client / tea-util | `0.4.15` / `1.4.11` |
 | Better Auth | `1.7.4` |
+| server-only | `0.0.1` |
+| Next.js / React / React DOM（兼容 fixture） | `16.3.5` / `19.3.0` / `19.3.0` |
 
 ## 交付覆盖
 
 | PRD 能力 | 实施计划 |
 | --- | --- |
-| 私有包、TypeScript、ESM、server-only、条件导出 | Foundation |
+| 私有包、TypeScript、ESM、浏览器拒绝导出与 Next.js 构建期 server-only | Foundation + Next Admin API |
 | ORM 无关 Ports、PostgreSQL DDL/迁移/pg 适配器 | Foundation |
+| 空库 bootstrap、版本 1 fixture 升级、迁移校验和保护 | Foundation |
 | 全局单配置、运行数据租户隔离、单租户默认键 | Foundation + 各服务/API 计划 |
-| 手机号与异步模板变量保护、幂等、租约、限流数据结构 | Foundation |
+| 上下文绑定手机号/变量加密、幂等、派发令牌、租约、限流、策略与预算数据结构 | Foundation |
 | 阿里云授权测试、分页同步、候选快照与导入 | Aliyun Delivery |
-| OTP 直发、普通短信异步、受理未知、回执与补查 | Aliyun Delivery |
+| `businessType`/双模板枚举映射与 `QuerySendDetails` 必填分页参数 | Aliyun Delivery |
+| OTP 围栏直发、普通短信异步、租约恢复、受理未知、未匹配回执与补查 | Aliyun Delivery |
 | 数据清理、脏日期统计重算、健康与指标事件 | Aliyun Delivery |
-| 高风险验证、单次证明、同库事务与跨库补偿 | Auth Security |
-| Better Auth 已有账号免密登录与密码重置发送适配 | Auth Security |
+| 结构合法未匹配回执确认、可注入回调截止时间 | Aliyun Delivery + Next Admin API |
+| 高风险验证、行锁单次证明、同库事务与跨库补偿 | Auth Security |
+| Better Auth 真实类型契约、已有账号免密登录、密码重置与防枚举调度 | Auth Security |
 | 管理权限、审计、API/DTO、Next.js Route Handler | Next Admin API |
-| 双层测试、真实联调保护、构建与接入文档 | Next Admin API |
+| 双层测试、真实联调保护、Next 客户端导入失败契约、Node 20 无 Docker-in-Docker 验证与接入文档 | Next Admin API |
