@@ -5,7 +5,7 @@ import type { ConfigRepository, ConfiguredProviderConfig, UpdateProviderConfigIn
 import type { ProviderAuthInput } from "../../../src/ports/provider.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 
-const actor = { id: "operator", tenantId: "system" } as AuthorizationActor;
+const actor = { id: "operator", tenantId: "tenant-a" } as AuthorizationActor;
 const readyConfig: ConfiguredProviderConfig = {
   provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ACCESS_KEY_ID",
   accessKeySecretRef: "env://ACCESS_KEY_SECRET", receiptCallbackTokenRef: "env://CALLBACK_TOKEN",
@@ -66,5 +66,34 @@ describe("ConfigService", () => {
     expect(resolved).toEqual(["env://ACCESS_KEY_ID", "env://ACCESS_KEY_SECRET"]);
     expect(connectionInput).toMatchObject({ accessKeyId: "env://ACCESS_KEY_ID", accessKeySecret: "env://ACCESS_KEY_SECRET" });
     expect(JSON.stringify(connectionInput)).not.toContain("resolved:");
+  });
+
+  it("audits global configuration changes under the system tenant and normalizes secret failures", async () => {
+    const audits: unknown[] = [];
+    const service = new ConfigService({
+      store: {
+        config: {
+          get: async () => readyConfig, update: async () => readyConfig,
+          recordConnectionTest: async () => ({ ...readyConfig, status: "degraded" as const, version: 4 }),
+        },
+        audits: { append: async (event: unknown) => { audits.push(event); return event; } },
+        transaction: async (work: (tx: never) => Promise<unknown>) => work(undefined as never),
+      } as never,
+      provider: {} as never,
+      secretResolver: { resolve: async () => { throw new Error("resolved-secret-value must not escape"); } },
+      authorizer: { assert: () => undefined }, clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+      ids: { next: () => "audit-3" }, events: { emit: () => undefined },
+    });
+
+    await service.save(actor, { ...readyConfig, expectedVersion: readyConfig.version });
+    await expect(service.testConnection(actor)).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE", message: "provider connection test failed",
+    });
+
+    expect(audits).toEqual([
+      expect.objectContaining({ tenantId: "__system__", actorId: "operator", action: "config.save" }),
+      expect.objectContaining({ tenantId: "__system__", actorId: "operator", action: "config.test_connection", errorCode: "PROVIDER_UNAVAILABLE" }),
+    ]);
+    expect(JSON.stringify(audits)).not.toContain("resolved-secret-value");
   });
 });

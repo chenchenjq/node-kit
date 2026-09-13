@@ -3,6 +3,7 @@ import { validateTemplateKey } from "../core/template.js";
 import type { ProviderAuthInput, ProviderPage, ProviderSignature, ProviderTemplate, SmsProvider } from "../ports/provider.js";
 import type { Clock, EventSink, IdGenerator } from "../ports/runtime.js";
 import type { Authorizer, AuthorizationActor } from "../ports/security.js";
+import type { TenantId } from "../core/types.js";
 import {
   createResourceSyncCandidate,
   type ConfiguredProviderConfig,
@@ -39,6 +40,7 @@ export type ResourceSyncServiceDependencies<Actor extends AuthorizationActor = A
 
 const PREVIEW_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_PAGE_SIZE = 50;
+const SYSTEM_TENANT_ID = "__system__" as TenantId;
 
 function providerConfig(config: Awaited<ReturnType<SmsStore["config"]["get"]>>): ConfiguredProviderConfig {
   if (config.status === "unconfigured" || config.status !== "ready" || !config.enabled) {
@@ -154,6 +156,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     const localSignaturesByKey = new Map(localSignatures.map((signature) => [signature.externalKey, signature]));
     const localTemplatesByCode = new Map(localTemplates.map((template) => [template.externalCode, template]));
     const localTemplatesByKey = new Map(localTemplates.map((template) => [template.templateKey, template]));
+    const localSignaturesById = new Map(localSignatures.map((signature) => [signature.id, signature]));
     const discoveredSignatureKeys = new Set(signatures.map((signature) => signature.externalKey));
     const knownSignatureKeys = new Set([...localSignaturesByKey.keys(), ...discoveredSignatureKeys]);
     const templateByExternalKey = new Map(templates.map((template) => [template.externalKey, template]));
@@ -181,6 +184,14 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       };
       resources.push(createResourceSyncCandidate({ ...base, checksum: candidateChecksum(base) }));
     }
+    for (const signature of localSignatures) {
+      if (discoveredSignatureKeys.has(signature.externalKey)) continue;
+      const base = {
+        id: this.dependencies.ids.next(), externalKey: signature.externalKey, changeType: "unavailable" as const, resourceType: "signature" as const,
+        snapshot: { kind: "signature" as const, externalName: signature.externalName, externalStatus: "unavailable", externalType: signature.externalType },
+      };
+      resources.push(createResourceSyncCandidate({ ...base, checksum: candidateChecksum(base) }));
+    }
     for (const [externalKey, selection] of selectionsByExternalKey) {
       const template = templateByExternalKey.get(externalKey);
       if (template === undefined) throw new SmsKitError("CONFIG_INVALID", "selected template is not in the provider snapshot");
@@ -200,9 +211,33 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       };
       resources.push(createResourceSyncCandidate({ ...base, checksum: candidateChecksum(base) }));
     }
+    const discoveredTemplateCodes = new Set(templates.map((template) => template.externalCode));
+    for (const template of localTemplates) {
+      if (discoveredTemplateCodes.has(template.externalCode)) continue;
+      const signature = localSignaturesById.get(template.signatureId);
+      if (signature === undefined) throw new SmsKitError("STORAGE_FAILURE", "template has no local signature", true);
+      const base = {
+        id: this.dependencies.ids.next(), externalKey: `aliyun:template:${template.externalCode}`,
+        changeType: "unavailable" as const, resourceType: "template" as const,
+        signatureExternalKey: signature.externalKey, templateKey: template.templateKey, purpose: template.purpose,
+        snapshot: {
+          kind: "template" as const, externalCode: template.externalCode, externalName: template.externalName,
+          externalStatus: "unavailable", templateType: template.templateType, variableNames: template.variables.map((variable) => variable.name),
+        },
+      };
+      resources.push(createResourceSyncCandidate({ ...base, checksum: candidateChecksum(base) }));
+    }
     const now = this.dependencies.clock.now();
-    const preview = await this.dependencies.store.resources.createSyncPreview({
-      id: this.dependencies.ids.next(), actorId: actor.id, expiresAt: new Date(now.getTime() + PREVIEW_TTL_MS), resources,
+    const preview = await this.dependencies.store.transaction(async (tx) => {
+      const created = await this.dependencies.store.resources.createSyncPreview({
+        id: this.dependencies.ids.next(), actorId: actor.id, expiresAt: new Date(now.getTime() + PREVIEW_TTL_MS), resources,
+      }, tx);
+      await this.dependencies.store.audits.append({
+        id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
+        action: "resource.sync.preview", targetType: "resource_sync", targetId: created.id,
+        result: "succeeded", metadata: { counts: [{ name: "resource", value: resources.length }] }, occurredAt: this.dependencies.clock.now(),
+      }, tx);
+      return created;
     });
     await this.dependencies.events.emit({ name: "resource.sync.previewed", level: "info", metadata: { counts: [{ name: "resource", value: resources.length }] } });
     return preview;
@@ -216,7 +251,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     const committed = await this.dependencies.store.transaction(async (tx) => {
       const result = await this.dependencies.store.resources.commitSync({ ...input, now: this.dependencies.clock.now() }, tx);
       await this.dependencies.store.audits.append({
-        id: this.dependencies.ids.next(), tenantId: actor.tenantId, actorId: actor.id,
+        id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
         action: "resource.sync.commit", targetType: "resource_sync", targetId: input.syncId,
         result: "succeeded", metadata: { counts: [{ name: "resource", value: result.candidates.length }] }, occurredAt: this.dependencies.clock.now(),
       }, tx);
