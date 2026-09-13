@@ -2,14 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   FixedTenantContext,
+  createResourceSyncCandidate,
   positiveTimeoutMs,
   type PolicyStore,
   type ProviderDeliveryQuery,
   type ProviderSendInput,
-  type ResourceSyncCandidate,
   type SafeEventMetadata,
   type SmsProvider,
   type SmsTransaction,
+  type TemplateResourceSnapshot,
 } from "../../../src/ports/index.js";
 import type { MessageId, TenantId } from "../../../src/core/index.js";
 
@@ -117,7 +118,7 @@ describe("public port contracts", () => {
   });
 
   it("accepts only finite provider-resource snapshots", () => {
-    const signature: ResourceSyncCandidate = {
+    const signature = createResourceSyncCandidate({
       id: "candidate-signature",
       resourceType: "signature",
       externalKey: "aliyun:sign:1",
@@ -129,8 +130,8 @@ describe("public port contracts", () => {
         externalStatus: "approved",
         externalType: "general",
       },
-    };
-    const template: ResourceSyncCandidate = {
+    });
+    const template = createResourceSyncCandidate({
       id: "candidate-template",
       resourceType: "template",
       externalKey: "aliyun:template:1",
@@ -144,23 +145,52 @@ describe("public port contracts", () => {
         templateType: "verification",
         variableNames: ["code"],
       },
-    };
-    const unsafe: ResourceSyncCandidate = {
-      ...template,
-      snapshot: {
-        kind: "template",
-        externalCode: "SMS_1",
-        externalName: "Verification",
-        externalStatus: "approved",
-        templateType: "verification",
-        variableNames: ["code"],
-        // @ts-expect-error Resource snapshots cannot persist raw sensitive fields.
-        phone: "+8613800138000",
-      },
+    });
+    const unsafe: TemplateResourceSnapshot = {
+      kind: "template",
+      externalCode: "SMS_1",
+      externalName: "Verification",
+      externalStatus: "approved",
+      templateType: "verification",
+      variableNames: ["code"],
+      // @ts-expect-error Resource snapshots cannot persist raw sensitive fields.
+      phone: "+8613800138000",
     };
 
     expect(signature.snapshot.kind).toBe("signature");
     expect(template.snapshot.kind).toBe("template");
     expect(unsafe).toBeDefined();
+  });
+
+  it("projects a preconstructed provider preview before persistence", () => {
+    const untrustedPreview = {
+      id: "candidate-template",
+      resourceType: "template" as const,
+      externalKey: "aliyun:template:1",
+      changeType: "new" as const,
+      checksum: "checksum-template",
+      snapshot: {
+        kind: "template" as const,
+        externalCode: "SMS_1",
+        externalName: "Verification",
+        externalStatus: "approved",
+        templateType: "verification" as const,
+        variableNames: ["code"],
+        phone: "sensitive-input",
+      },
+    };
+
+    const candidate = createResourceSyncCandidate(untrustedPreview);
+
+    expect(candidate.snapshot).toEqual({
+      kind: "template",
+      externalCode: "SMS_1",
+      externalName: "Verification",
+      externalStatus: "approved",
+      templateType: "verification",
+      variableNames: ["code"],
+    });
+    expect("phone" in candidate.snapshot).toBe(false);
+    expect(Object.isFrozen(candidate)).toBe(true);
   });
 });
