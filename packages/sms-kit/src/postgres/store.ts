@@ -7,6 +7,8 @@ import { PgAuditRepository } from "./repositories/audit-repository.js";
 import { PgChallengeRepository } from "./repositories/challenge-repository.js";
 import { PgConfigRepository } from "./repositories/config-repository.js";
 import { PgJobRepository } from "./repositories/job-repository.js";
+import { PgHealthRepository } from "./repositories/health-repository.js";
+import { PgMaintenanceRepository } from "./repositories/maintenance-repository.js";
 import { PgMessageRepository } from "./repositories/message-repository.js";
 import { PgPolicyStore } from "./repositories/policy-repository.js";
 import { PgReceiptRepository } from "./repositories/receipt-repository.js";
@@ -28,6 +30,8 @@ export class PgSmsStore {
   readonly rateLimits: PgRateLimitRepository;
   readonly audits: PgAuditRepository;
   readonly stats: PgStatsRepository;
+  readonly maintenance: PgMaintenanceRepository;
+  readonly health: PgHealthRepository;
 
   constructor(private readonly pool: Pool) {
     this.config = new PgConfigRepository(pool);
@@ -41,6 +45,8 @@ export class PgSmsStore {
     this.rateLimits = new PgRateLimitRepository(pool);
     this.audits = new PgAuditRepository(pool);
     this.stats = new PgStatsRepository(pool);
+    this.maintenance = new PgMaintenanceRepository(pool);
+    this.health = new PgHealthRepository(pool);
   }
 
   async transaction<T>(work: (tx: SmsTransaction) => Promise<T>): Promise<T> {

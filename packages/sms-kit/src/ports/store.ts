@@ -444,6 +444,8 @@ export interface JobRepository {
   get(input: Readonly<{ tenantId: TenantId; id: string }>, tx?: SmsTransaction): Promise<Job | undefined>;
   getForUpdate(input: Readonly<{ tenantId: TenantId; id: string }>, tx: SmsTransaction): Promise<Job | undefined>;
   lease(input: Readonly<{ tenantId?: TenantId; jobType?: Job["jobType"]; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
+  /** Leases only reconciliation jobs whose tenant-owned messages remain queryable. */
+  leaseReconciliation(input: Readonly<{ owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
   renew(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; leaseMs: number; now: Date }>, tx?: SmsTransaction): Promise<Job>;
   reschedule(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<Job>;
   succeed(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string }>, tx?: SmsTransaction): Promise<Job>;
@@ -557,7 +559,26 @@ export type DailyStats = Readonly<{
 }>;
 export interface StatsRepository {
   query(input: Readonly<{ tenantId: TenantId; from: Date; to: Date }>, tx?: SmsTransaction): Promise<readonly DailyStats[]>;
-  rollupDirtyDates(input: Readonly<{ tenantId: TenantId; limit: number }>, tx?: SmsTransaction): Promise<number>;
+  /** Omitting tenantId lets the maintenance worker consume globally ordered dirty keys. */
+  rollupDirtyDates(input: Readonly<{ tenantId?: TenantId; limit: number }>, tx?: SmsTransaction): Promise<number>;
+}
+
+export interface MaintenanceRepository {
+  /** Applies only time-expired data lifecycle operations and returns affected rows. */
+  applyRetention(input: Readonly<{ before: Date; batchSize: number }>, tx?: SmsTransaction): Promise<number>;
+}
+
+export type HealthCounts = Readonly<{
+  pendingJobs: number;
+  acceptanceUnknown: number;
+  finalUnknown: number;
+  /** System-owned receipts deliberately have no tenant/message details. */
+  unmatchedReceipts: number;
+  heldBudgetCount?: number;
+  lastReceiptAt?: Date;
+}>;
+export interface HealthRepository {
+  snapshot(input: Readonly<{ tenantId: TenantId; now: Date }>, tx?: SmsTransaction): Promise<HealthCounts>;
 }
 
 export interface SmsStore {
@@ -573,4 +594,6 @@ export interface SmsStore {
   policy: PolicyStore;
   audits: AuditRepository;
   stats: StatsRepository;
+  maintenance: MaintenanceRepository;
+  health: HealthRepository;
 }

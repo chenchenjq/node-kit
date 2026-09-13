@@ -107,7 +107,7 @@ export class AliyunSmsProvider implements SmsProvider {
         ...(input.bizId === undefined ? {} : { bizId: input.bizId }),
       }));
       this.assertSuccessfulResponse(output);
-      return this.toDeliveryResult(output);
+      return this.toDeliveryResult(output, input.currentPage, input.pageSize);
     } catch {
       return { kind: "unknown", code: "DELIVERY_UNKNOWN" };
     }
@@ -169,22 +169,23 @@ export class AliyunSmsProvider implements SmsProvider {
     };
   }
 
-  private toDeliveryResult(output: AliyunQueryOutput): ProviderDeliveryResult {
+  private toDeliveryResult(output: AliyunQueryOutput, currentPage: number, pageSize: number): ProviderDeliveryResult {
     const detail = output.smsSendDetailDTOs?.smsSendDetailDTO?.[0];
+    const hasNextPage = Number(output.totalCount ?? 0) > currentPage * pageSize;
     if (detail === undefined || detail.sendStatus === undefined) {
-      return { kind: "waiting" };
+      return { kind: "waiting", hasNextPage };
     }
     if (detail.sendStatus === 3) {
-      return { kind: "delivered", ...(detail.outId === undefined ? {} : { bizId: detail.outId }) };
+      return { kind: "delivered", ...(detail.outId === undefined ? {} : { bizId: detail.outId }), hasNextPage };
     }
     if (detail.sendStatus === 2) {
       return {
         kind: "failed",
         code: detail.errCode ?? "PROVIDER_FAILED",
-        ...(detail.outId === undefined ? {} : { bizId: detail.outId }),
+        ...(detail.outId === undefined ? {} : { bizId: detail.outId }), hasNextPage,
       };
     }
-    return { kind: "waiting" };
+    return { kind: "waiting", hasNextPage };
   }
 }
 

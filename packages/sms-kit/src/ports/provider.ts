@@ -75,10 +75,10 @@ export type ProviderSendResult =
   | { kind: "unknown"; code: "ACCEPTANCE_UNKNOWN" };
 
 export type ProviderDeliveryResult =
-  | { kind: "waiting" }
-  | { kind: "delivered"; bizId?: string; deliveredAt?: Date }
-  | { kind: "failed"; code: string; bizId?: string; occurredAt?: Date }
-  | { kind: "unknown"; code: "DELIVERY_UNKNOWN" };
+  | { kind: "waiting"; hasNextPage?: boolean }
+  | { kind: "delivered"; bizId?: string; deliveredAt?: Date; hasNextPage?: boolean }
+  | { kind: "failed"; code: string; bizId?: string; occurredAt?: Date; hasNextPage?: boolean }
+  | { kind: "unknown"; code: "DELIVERY_UNKNOWN"; hasNextPage?: boolean };
 
 export type ProviderReceipt = Readonly<{
   bizId: string;
