@@ -32,7 +32,12 @@ function invalidReceipt(): never {
 
 function parseAliyunTimestamp(value: string): Date {
   // Mainland SmsReport timestamps are China Standard Time, without an offset.
-  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return invalidReceipt();
+  const fields = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value);
+  if (fields === null) return invalidReceipt();
+  const [year, month, day, hour, minute, second] = fields.slice(1).map(Number);
+  const calendar = new Date(Date.UTC(year!, month! - 1, day!, hour!, minute!, second!));
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month! - 1 || calendar.getUTCDate() !== day ||
+    calendar.getUTCHours() !== hour || calendar.getUTCMinutes() !== minute || calendar.getUTCSeconds() !== second) return invalidReceipt();
   const occurredAt = new Date(`${value.replace(" ", "T")}+08:00`);
   if (Number.isNaN(occurredAt.getTime())) return invalidReceipt();
   return occurredAt;
@@ -44,8 +49,9 @@ function parseAliyunTimestamp(value: string): Date {
  * never returned or made available to persistence callers.
  */
 export function parseAliyunReceiptBatch(body: string | Uint8Array): readonly AliyunReceipt[] {
+  if (typeof body === "string" && Buffer.byteLength(body, "utf8") > ALIYUN_RECEIPT_MAX_BODY_BYTES) return invalidReceipt();
+  if (typeof body !== "string" && body.byteLength > ALIYUN_RECEIPT_MAX_BODY_BYTES) return invalidReceipt();
   const raw = typeof body === "string" ? body : Buffer.from(body).toString("utf8");
-  if (Buffer.byteLength(raw, "utf8") > ALIYUN_RECEIPT_MAX_BODY_BYTES) return invalidReceipt();
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -54,12 +60,17 @@ export function parseAliyunReceiptBatch(body: string | Uint8Array): readonly Ali
   }
   const reports = receiptSchema.safeParse(value);
   if (!reports.success) return invalidReceipt();
-  return reports.data.map((report) => Object.freeze({
+  return reports.data.map((report) => {
+    // Validate both provider timestamps even though only report_time becomes
+    // the receipt occurrence time.
+    parseAliyunTimestamp(report.send_time);
+    return Object.freeze({
     bizId: report.biz_id,
     outId: report.out_id,
     occurredAt: parseAliyunTimestamp(report.report_time),
     deliveryStatus: report.success ? "delivered" : "failed",
     providerCode: report.err_code,
     providerMessage: report.err_msg,
-  }));
+    });
+  });
 }

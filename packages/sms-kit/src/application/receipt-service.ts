@@ -48,6 +48,15 @@ function deadlineReached(clock: Clock, deadlineAt: Date, safetyMarginMs: number)
   return !Number.isFinite(deadlineAt.getTime()) || deadlineAt.getTime() - clock.now().getTime() < safetyMarginMs;
 }
 
+/** Observability must never turn an already-durable provider acknowledgement into a retry. */
+function observe(events: EventSink, event: Parameters<EventSink["emit"]>[0]): void {
+  try {
+    void Promise.resolve(events.emit(event)).catch(() => undefined);
+  } catch {
+    // Event sinks are optional observers of durable receipt state.
+  }
+}
+
 /**
  * Accepts an already HTTPS-terminated callback. Its possession token prevents
  * accidental traffic, but message ownership is proved only by the opaque
@@ -97,7 +106,6 @@ export class ReceiptService {
           providerBizId: report.bizId,
           deliveryStatus: report.deliveryStatus,
           providerCode: report.providerCode,
-          providerMessage: report.providerMessage,
           occurredAt: report.occurredAt,
           receivedAt: this.dependencies.clock.now(),
           source: "callback",
@@ -127,10 +135,10 @@ export class ReceiptService {
     });
 
     if (outcomes.unmatched > 0) {
-      await this.dependencies.events.emit({ name: "sms.receipt.unmatched", level: "warn", metadata: { redactedFields: ["phone"], counts: [{ name: "receipt", value: outcomes.unmatched }] } });
+      observe(this.dependencies.events, { name: "sms.receipt.unmatched", level: "warn", metadata: { redactedFields: ["phone"], counts: [{ name: "receipt", value: outcomes.unmatched }] } });
     }
     if (outcomes.terminalConflicts > 0) {
-      await this.dependencies.events.emit({ name: "sms.receipt.terminal_conflict", level: "warn", metadata: { counts: [{ name: "receipt", value: outcomes.terminalConflicts }] } });
+      observe(this.dependencies.events, { name: "sms.receipt.terminal_conflict", level: "warn", metadata: { counts: [{ name: "receipt", value: outcomes.terminalConflicts }] } });
     }
     return { acknowledgement };
   }

@@ -53,3 +53,33 @@ git diff --check
 - Unmatched receipts remain unscoped system records and are acknowledged to
   prevent provider retry storms; matched receipt ownership is derived from the
   locked message inside the same transaction.
+
+## Fix round 1
+
+- An earlier unmatched row can now be atomically promoted after the message's
+  accepted dispatch references are durable and a later callback proves both
+  opaque identifiers. Promotion keeps one receipt row, derives its tenant from
+  the locked message, and runs the otherwise-idempotent delivery transition.
+- `err_msg` remains structural input only and is no longer passed to receipt
+  persistence. Persisted diagnostics retain the finite redacted payload, never
+  provider-controlled raw message text.
+- `Uint8Array.byteLength` is checked before a `Buffer` is allocated/decoded.
+  Both `send_time` and `report_time` require real Gregorian calendar values;
+  impossible normalizable dates are rejected.
+- Event-sink invocation is now detached and exception-safe after a durable
+  transaction. A throwing or never-resolving optional observer cannot block
+  Alibaba acknowledgement.
+
+Fix-round verification:
+
+```text
+npm test --workspace sms-kit -- test/unit/aliyun/receipt.test.ts
+# 1 file, 5 tests passed
+
+npm run test:integration --workspace sms-kit -- receipt-service.test.ts
+# 1 file, 9 PostgreSQL integration tests passed
+
+npm run typecheck --workspace sms-kit
+npm run build --workspace sms-kit
+# both exit 0
+```
