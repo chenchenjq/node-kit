@@ -42,20 +42,34 @@ export class SendWorker {
 
   async runBatch(input: SendWorkerRunInput): Promise<number> {
     assertRunInput(input);
-    const leased = await this.dependencies.store.jobs.lease({
-      owner: input.workerId,
-      jobType: "send",
-      limit: input.limit,
-      leaseMs: input.leaseMs,
-      now: this.dependencies.clock.now(),
-    });
-    for (const job of leased) await this.runJob(job, input);
-    return leased.length;
+    let processed = 0;
+    // Acquire immediately before each dispatch rather than letting later jobs
+    // age behind a slow provider call in one bulk lease.
+    while (processed < input.limit) {
+      const [job] = await this.dependencies.store.jobs.lease({
+        owner: input.workerId,
+        jobType: "send",
+        limit: 1,
+        leaseMs: input.leaseMs,
+        now: this.dependencies.clock.now(),
+      });
+      if (job === undefined) break;
+      await this.runJob(job, input);
+      processed += 1;
+    }
+    return processed;
   }
 
   private async runJob(job: Job, input: SendWorkerRunInput): Promise<void> {
     if (job.messageId === undefined || job.leaseToken === undefined) return;
     const prepared = await this.dependencies.store.transaction(async (tx) => {
+      const renewed = await this.dependencies.store.jobs.renew({
+        tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken!, leaseMs: input.leaseMs, now: this.dependencies.clock.now(),
+      }, tx);
+      const minimumLeaseUntil = new Date(this.dependencies.clock.now().getTime() + input.providerTimeoutMs);
+      if (renewed.leaseUntil === undefined || renewed.leaseUntil <= minimumLeaseUntil) {
+        throw new SmsKitError("CONCURRENT_MODIFICATION", "job lease is insufficient for provider dispatch");
+      }
       // createStarted locks the message and proves this exact queued token owns
       // a leased send job. Budget holding is idempotent per message.
       await this.dependencies.store.policy.holdBudget({ tenantId: job.tenantId, messageId: job.messageId!, now: this.dependencies.clock.now() }, tx);
@@ -65,11 +79,18 @@ export class SendWorker {
         dispatchMode: "queued",
         leaseToken: job.leaseToken!,
         dispatchMarkedAt: this.dependencies.clock.now(),
+        minimumLeaseUntil,
       }, tx);
     });
 
     // Never extend the transaction across decryption, config lookup, or I/O.
     const providerInput = await this.openProviderInput(job, input.providerTimeoutMs);
+    const renewedForProvider = await this.dependencies.store.jobs.renew({
+      tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken, leaseMs: input.leaseMs, now: this.dependencies.clock.now(),
+    });
+    if (renewedForProvider.leaseUntil === undefined || renewedForProvider.leaseUntil <= new Date(this.dependencies.clock.now().getTime() + input.providerTimeoutMs)) {
+      throw new SmsKitError("CONCURRENT_MODIFICATION", "job lease is insufficient for provider dispatch");
+    }
     const startedAt = this.dependencies.clock.now();
     let result: ProviderSendResult;
     try {
@@ -119,39 +140,53 @@ export class SendWorker {
       const messages = this.dependencies.store.messages;
       const jobs = this.dependencies.store.jobs;
       const policy = this.dependencies.store.policy;
+      const lockedJob = await jobs.getForUpdate({ tenantId: job.tenantId, id: job.id }, tx);
+      const current = await messages.lockByDispatchToken({ tenantId: job.tenantId, dispatchToken }, tx);
+      const attempt = await attempts.lockByDispatchToken({ tenantId: job.tenantId, dispatchToken }, tx);
+      if (current === undefined || attempt === undefined) return;
+      const ownsLease = lockedJob?.state === "leased" && lockedJob.leaseToken === job.leaseToken;
 
       if (result.kind === "accepted") {
+        if (current.acceptanceStatus === "accepted" || current.acceptanceStatus === "rejected") return;
         const message = await messages.completeAcceptance({ tenantId: job.tenantId, dispatchToken, status: "accepted", evidence: "same-dispatch-response", providerBizId: result.bizId, providerRequestId: result.requestId, occurredAt }, tx);
-        await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "accepted", providerRequestId: result.requestId, latencyMs, occurredAt }, tx);
+        if (attempt.status !== "accepted") await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "accepted", providerRequestId: result.requestId, latencyMs, occurredAt }, tx);
         await messages.clearRenderParams({ tenantId: job.tenantId, id: message.id }, tx);
-        await jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
+        if (ownsLease) await jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
         return;
       }
 
       if (result.kind === "unknown") {
+        // Recovery may already have conservatively recorded this exact token.
+        // A late timeout/throw supplies no newer evidence and is a no-op.
+        if (current.acceptanceStatus !== "pending" || attempt.status !== "started") return;
         const message = await messages.completeAcceptance({ tenantId: job.tenantId, dispatchToken, status: "unknown", evidence: "same-dispatch-response", finalErrorCode: result.code, occurredAt }, tx);
         await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "unknown", errorCode: result.code, latencyMs, occurredAt }, tx);
         await messages.clearRenderParams({ tenantId: job.tenantId, id: message.id }, tx);
         await jobs.ensureReconcile({ tenantId: job.tenantId, messageId: message.id, availableAt: occurredAt }, tx);
-        await jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
+        if (ownsLease) await jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
         return;
       }
 
-      const current = await messages.get({ tenantId: job.tenantId, id: job.messageId! }, tx);
-      if (current === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "queued message no longer exists");
       const exhausted = job.attemptCount + 1 >= job.maxAttempts;
-      const mustFinalize = !result.retryable || exhausted || current.acceptanceStatus === "unknown";
+      if (current.acceptanceStatus === "accepted" || current.acceptanceStatus === "rejected") return;
+      const mustFinalize = !result.retryable || exhausted || current.acceptanceStatus === "unknown" || !ownsLease;
       if (mustFinalize) {
         const message = await messages.completeAcceptance({ tenantId: job.tenantId, dispatchToken, status: "rejected", evidence: "same-dispatch-response", ...(result.requestId === undefined ? {} : { providerRequestId: result.requestId }), finalErrorCode: result.code, occurredAt }, tx);
-        await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "rejected", ...(result.requestId === undefined ? {} : { providerRequestId: result.requestId }), providerCode: result.code, errorCode: result.code, latencyMs, occurredAt }, tx);
+        if (attempt.status !== "rejected") await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "rejected", ...(result.requestId === undefined ? {} : { providerRequestId: result.requestId }), providerCode: result.code, errorCode: result.code, latencyMs, occurredAt }, tx);
         await messages.clearRenderParams({ tenantId: job.tenantId, id: message.id }, tx);
         await policy.releaseBudget({ tenantId: job.tenantId, messageId: message.id }, tx);
-        await jobs.tryFail({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken!, errorCode: result.code, terminal: true }, tx);
+        if (ownsLease) await jobs.tryFail({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken!, errorCode: result.code, terminal: true }, tx);
         return;
       }
 
       await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "rejected", ...(result.requestId === undefined ? {} : { providerRequestId: result.requestId }), providerCode: result.code, errorCode: result.code, latencyMs, occurredAt }, tx);
-      await jobs.tryReschedule({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken!, availableAt: new Date(occurredAt.getTime() + backoff(job.attemptCount)), errorCode: result.code }, tx);
+      const rescheduled = await jobs.tryReschedule({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken!, availableAt: new Date(occurredAt.getTime() + backoff(job.attemptCount)), errorCode: result.code }, tx);
+      if (rescheduled) return;
+      // A failed reschedule must not leave a known rejection pending. The
+      // attempt is already rejected, so only finish the message and release.
+      const message = await messages.completeAcceptance({ tenantId: job.tenantId, dispatchToken, status: "rejected", evidence: "same-dispatch-response", ...(result.requestId === undefined ? {} : { providerRequestId: result.requestId }), finalErrorCode: result.code, occurredAt }, tx);
+      await messages.clearRenderParams({ tenantId: job.tenantId, id: message.id }, tx);
+      await policy.releaseBudget({ tenantId: job.tenantId, messageId: message.id }, tx);
     });
   }
 }

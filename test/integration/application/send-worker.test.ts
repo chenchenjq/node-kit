@@ -9,6 +9,7 @@ import type { SmsProvider } from "../../../src/ports/provider.js";
 import type { TenantId } from "../../../src/core/types.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
+import type { SmsStore } from "../../../src/ports/store.js";
 import { startPostgres } from "../postgres/helpers.js";
 
 const tenantId = "worker-tenant" as TenantId;
@@ -21,10 +22,12 @@ class Clock {
 
 class Provider {
   calls = { send: 0 };
+  onSend?: () => void;
   private readonly results: Array<Awaited<ReturnType<SmsProvider["send"]>>> = [];
   queueResult(result: Awaited<ReturnType<SmsProvider["send"]>>): void { this.results.push(result); }
   readonly send: SmsProvider["send"] = async () => {
     this.calls.send += 1;
+    this.onSend?.();
     return this.results.shift() ?? { kind: "accepted", bizId: "default-biz", requestId: "default-request" };
   };
 }
@@ -68,7 +71,7 @@ describe("SendWorker", () => {
     return (await service.enqueueNotification({ tenantId, templateKey: "order.worker", phone: "13800138000", variables: { orderNo: "A-100" }, purpose: "notification", idempotencyKey: key })).id;
   }
 
-  function worker(currentStore = store): SendWorker {
+  function worker(currentStore: SmsStore = store): SendWorker {
     return new SendWorker({ store: currentStore, provider: provider as never, ...protectors, clock });
   }
 
@@ -118,5 +121,40 @@ describe("SendWorker", () => {
     await worker().runBatch({ workerId: "w2", limit: 10, leaseMs: 30_000, providerTimeoutMs: 1_000 });
     expect(provider.calls.send).toBe(0);
     await expect(store.messages.get({ tenantId, id: messageId as never })).resolves.toMatchObject({ acceptanceStatus: "unknown" });
+  });
+
+  it("acquires later jobs after a slow provider call so every dispatch has a fresh lease", async () => {
+    clock = new Clock(); provider = new Provider();
+    const first = await enqueue("sequential-expiry-a");
+    const second = await enqueue("sequential-expiry-b");
+    provider.onSend = () => { if (provider.calls.send === 1) clock.advanceBy(31_000); };
+    await expect(worker().runBatch({ workerId: "w1", limit: 2, leaseMs: 30_000, providerTimeoutMs: 1_000 })).resolves.toBe(2);
+    expect(provider.calls.send).toBe(2);
+    await expect(store.messages.get({ tenantId, id: first as never })).resolves.toMatchObject({ acceptanceStatus: "accepted" });
+    await expect(store.messages.get({ tenantId, id: second as never })).resolves.toMatchObject({ acceptanceStatus: "accepted" });
+  });
+
+  it("finalizes a known retryable rejection and releases its budget when fenced reschedule fails", async () => {
+    clock = new Clock(); provider = new Provider();
+    const messageId = await enqueue("reschedule-fence");
+    provider.queueResult({ kind: "rejected", code: "THROTTLED", retryable: true });
+    const fencedJobs = new Proxy(store.jobs, {
+      get(target, property) {
+        if (property === "tryReschedule") return async () => false;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const fencedStore = new Proxy(store, {
+      get(target, property) {
+        if (property === "jobs") return fencedJobs;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as SmsStore;
+    await worker(fencedStore).runBatch({ workerId: "w1", limit: 10, leaseMs: 30_000, providerTimeoutMs: 1_000 });
+    const budget = await pool.query<{ state: string }>("select state from sms_kit.send_budget_reservation where message_id = $1", [messageId]);
+    await expect(store.messages.get({ tenantId, id: messageId as never })).resolves.toMatchObject({ acceptanceStatus: "rejected" });
+    expect(budget.rows).toEqual([{ state: "released" }]);
   });
 });

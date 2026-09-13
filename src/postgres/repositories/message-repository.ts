@@ -89,6 +89,16 @@ export class PgMessageRepository implements MessageRepository {
     return rows[0] === undefined ? undefined : message(rows[0]);
   }
 
+  async lockByDispatchToken(input: Readonly<{ tenantId: Message["tenantId"]; dispatchToken: string }>, tx: SmsTransaction): Promise<Message | undefined> {
+    const { rows } = await queryable(this.pool, tx).query<MessageRow>(
+      `select ${selectMessageFromJoin} from sms_kit.send_message m
+        join sms_kit.send_attempt a on a.message_id = m.id
+       where m.tenant_id = $1 and a.dispatch_token = $2 for update of m, a`,
+      [input.tenantId, input.dispatchToken],
+    );
+    return rows[0] === undefined ? undefined : message(rows[0]);
+  }
+
   async list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number }> {
     const where = ["tenant_id = $1"];
     const values: unknown[] = [input.tenantId];

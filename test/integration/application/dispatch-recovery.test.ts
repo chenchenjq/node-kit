@@ -22,16 +22,18 @@ class Clock {
 class DeferredProvider {
   calls = { send: 0 };
   private resolve?: (value: Awaited<ReturnType<SmsProvider["send"]>>) => void;
+  private reject?: (reason?: unknown) => void;
   private called?: () => void;
   private readonly calledPromise = new Promise<void>((resolve) => { this.called = resolve; });
   defer = false;
   readonly send: SmsProvider["send"] = async () => {
     this.calls.send += 1; this.called?.();
     if (!this.defer) return { kind: "accepted", bizId: "biz", requestId: "request" };
-    return new Promise((resolve) => { this.resolve = resolve; });
+    return new Promise((resolve, reject) => { this.resolve = resolve; this.reject = reject; });
   };
   waitUntilSendCalled(): Promise<void> { return this.calledPromise; }
   resolveNext(result: Awaited<ReturnType<SmsProvider["send"]>>): void { this.resolve?.(result); }
+  rejectNext(reason: unknown): void { this.defer = false; this.reject?.(reason); }
 }
 
 describe("DispatchRecoveryService", () => {
@@ -79,5 +81,56 @@ describe("DispatchRecoveryService", () => {
     const message = await store.messages.get({ tenantId, id: messageId as never });
     expect(message).toMatchObject({ acceptanceStatus: "accepted", providerBizId: "late-biz" });
     expect(message).not.toHaveProperty("renderParamsCiphertext");
+  });
+
+  it("treats a late throw after recovery marked the same token unknown as idempotent", async () => {
+    clock = new Clock(); provider = new DeferredProvider(); provider.defer = true;
+    const messageId = await enqueue("late-throw");
+    const original = worker().runBatch({ workerId: "w1", limit: 2, leaseMs: 30_000, providerTimeoutMs: 1_000 });
+    await provider.waitUntilSendCalled();
+    const nextMessageId = await enqueue("late-throw-next");
+    clock.advanceBy(31_000);
+    await recovery().runBatch({ limit: 10, abandonedBefore: clock.now() });
+    provider.rejectNext(new Error("late transport failure"));
+    await expect(original).resolves.toBe(2);
+    await expect(store.messages.get({ tenantId, id: messageId as never })).resolves.toMatchObject({ acceptanceStatus: "unknown" });
+    await expect(store.messages.get({ tenantId, id: nextMessageId as never })).resolves.toMatchObject({ acceptanceStatus: "accepted" });
+    expect(provider.calls.send).toBe(2);
+  });
+
+  it("keeps a late same-token explicit rejection terminal and releases its held budget after recovery", async () => {
+    clock = new Clock(); provider = new DeferredProvider(); provider.defer = true;
+    const messageId = await enqueue("late-rejection");
+    const original = worker().runBatch({ workerId: "w1", limit: 10, leaseMs: 30_000, providerTimeoutMs: 1_000 });
+    await provider.waitUntilSendCalled();
+    clock.advanceBy(31_000);
+    await recovery().runBatch({ limit: 10, abandonedBefore: clock.now() });
+    provider.resolveNext({ kind: "rejected", code: "MOBILE_INVALID", retryable: true, requestId: "late-reject" });
+    await expect(original).resolves.toBe(1);
+    const budget = await pool.query<{ state: string }>("select state from sms_kit.send_budget_reservation where message_id = $1", [messageId]);
+    await expect(store.messages.get({ tenantId, id: messageId as never })).resolves.toMatchObject({ acceptanceStatus: "rejected", finalErrorCode: "MOBILE_INVALID" });
+    expect(budget.rows).toEqual([{ state: "released" }]);
+    expect(provider.calls.send).toBe(1);
+  });
+
+  it("locks an expired job before the fresh marker recheck so a blocked marker cannot be orphaned", async () => {
+    clock = new Clock(); provider = new DeferredProvider();
+    const messageId = await enqueue("locked-marker-recheck");
+    const [leased] = await store.jobs.lease({ tenantId, owner: "w1", jobType: "send", limit: 1, leaseMs: 30_000, now: clock.now() });
+    if (leased?.leaseToken === undefined) throw new Error("send job was not leased");
+    clock.advanceBy(31_000);
+    let marker: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+    await store.transaction(async (tx) => {
+      const [locked] = await store.jobs.lockExpiredSendJobs({ before: clock.now(), limit: 1 }, tx);
+      expect(locked?.id).toBe(leased.id);
+      marker = store.transaction((workerTx) => store.attempts.createStarted({
+        tenantId, messageId: messageId as never, dispatchMode: "queued", leaseToken: leased.leaseToken!, dispatchMarkedAt: clock.now(), minimumLeaseUntil: new Date(clock.now().getTime() + 1_000),
+      }, workerTx)).then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      await expect(store.jobs.returnToPendingIfNoStarted({ tenantId, id: leased.id, leaseToken: leased.leaseToken! }, tx)).resolves.toBe(true);
+    });
+    await expect(marker).resolves.toMatchObject({ ok: false, error: { code: "CONCURRENT_MODIFICATION" } });
+    await expect(store.jobs.get({ tenantId, id: leased.id })).resolves.toMatchObject({ state: "pending" });
+    await expect(pool.query<{ count: string }>("select count(*)::text as count from sms_kit.send_attempt where message_id = $1", [messageId])).resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
 });

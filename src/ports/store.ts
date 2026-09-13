@@ -310,6 +310,8 @@ export type TenantMessageQuery = Readonly<{
 export interface MessageRepository {
   createWithSendJob(input: CreateMessageInput, tx?: SmsTransaction): Promise<{ message: Message; created: boolean }>;
   get(input: Readonly<{ tenantId: TenantId; id: MessageId }>, tx?: SmsTransaction): Promise<Message | undefined>;
+  /** Locks the message and its authoritative dispatch attempt together. */
+  lockByDispatchToken(input: Readonly<{ tenantId: TenantId; dispatchToken: string }>, tx: SmsTransaction): Promise<Message | undefined>;
   list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number }>;
   findByProviderBizId(input: Readonly<{ tenantId: TenantId; bizId: string }>, tx?: SmsTransaction): Promise<Message | undefined>;
   completeAcceptance(input: Readonly<{
@@ -354,7 +356,10 @@ export interface AttemptRepository {
     dispatchMode: "direct" | "queued";
     leaseToken?: string;
     dispatchMarkedAt: Date;
+    /** Queued work must retain this much lease before its irreversible marker. */
+    minimumLeaseUntil?: Date;
   }>, tx?: SmsTransaction): Promise<Attempt>;
+  lockByDispatchToken(input: Readonly<{ tenantId: TenantId; dispatchToken: string }>, tx: SmsTransaction): Promise<Attempt | undefined>;
   completeByDispatchToken(input: Readonly<{
     tenantId: TenantId;
     dispatchToken: string;
@@ -430,6 +435,7 @@ export type JobPayload =
   | Readonly<{ kind: "rollup"; statDate?: string }>;
 export interface JobRepository {
   get(input: Readonly<{ tenantId: TenantId; id: string }>, tx?: SmsTransaction): Promise<Job | undefined>;
+  getForUpdate(input: Readonly<{ tenantId: TenantId; id: string }>, tx: SmsTransaction): Promise<Job | undefined>;
   lease(input: Readonly<{ tenantId?: TenantId; jobType?: Job["jobType"]; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
   renew(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; leaseMs: number; now: Date }>, tx?: SmsTransaction): Promise<Job>;
   reschedule(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<Job>;
@@ -442,8 +448,9 @@ export interface JobRepository {
   tryFail(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; errorCode: string; terminal: boolean }>, tx?: SmsTransaction): Promise<boolean>;
   /** Creates at most one reconciliation job per message, even under concurrent recovery. */
   ensureReconcile(input: Readonly<{ tenantId: TenantId; messageId: MessageId; availableAt: Date }>, tx?: SmsTransaction): Promise<void>;
-  /** Releases expired queued work only when no durable dispatch marker exists. */
-  recoverExpiredUnstarted(input: Readonly<{ before: Date; limit: number }>, tx?: SmsTransaction): Promise<number>;
+  /** Locks expired send jobs before a separate fresh marker recheck. */
+  lockExpiredSendJobs(input: Readonly<{ before: Date; limit: number }>, tx: SmsTransaction): Promise<readonly Job[]>;
+  returnToPendingIfNoStarted(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string }>, tx: SmsTransaction): Promise<boolean>;
 }
 
 export type Challenge = Readonly<{

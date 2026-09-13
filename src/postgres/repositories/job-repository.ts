@@ -20,6 +20,11 @@ export class PgJobRepository implements JobRepository {
     return rows[0] === undefined ? undefined : job(rows[0]);
   }
 
+  async getForUpdate(input: Readonly<{ tenantId: Job["tenantId"]; id: string }>, tx: SmsTransaction): Promise<Job | undefined> {
+    const { rows } = await db(this.pool, tx).query<Row>(`select ${fields} from sms_kit.send_job where tenant_id = $1 and id = $2 for update`, [input.tenantId, input.id]);
+    return rows[0] === undefined ? undefined : job(rows[0]);
+  }
+
   async lease(input: Readonly<{ tenantId?: Job["tenantId"]; jobType?: Job["jobType"]; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]> {
     const { rows } = await db(this.pool, tx).query<Row>(
       `with candidate as (
@@ -36,7 +41,7 @@ export class PgJobRepository implements JobRepository {
   }
 
   async renew(input: Readonly<{ tenantId: Job["tenantId"]; id: string; leaseToken: string; leaseMs: number; now: Date }>, tx?: SmsTransaction): Promise<Job> {
-    const { rows } = await db(this.pool, tx).query<Row>(`update sms_kit.send_job set lease_until = $1 + ($2 * interval '1 millisecond'), updated_at = now() where tenant_id = $3 and id = $4 and state = 'leased' and lease_token = $5 returning ${fields}`, [input.now, input.leaseMs, input.tenantId, input.id, input.leaseToken]);
+    const { rows } = await db(this.pool, tx).query<Row>(`update sms_kit.send_job set lease_until = $1 + ($2 * interval '1 millisecond'), updated_at = now() where tenant_id = $3 and id = $4 and state = 'leased' and lease_token = $5 and lease_until > $1 returning ${fields}`, [input.now, input.leaseMs, input.tenantId, input.id, input.leaseToken]);
     if (rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "job lease is no longer current");
     return job(rows[0]);
   }
@@ -100,17 +105,23 @@ export class PgJobRepository implements JobRepository {
     );
   }
 
-  async recoverExpiredUnstarted(input: Readonly<{ before: Date; limit: number }>, tx?: SmsTransaction): Promise<number> {
-    const result = await db(this.pool, tx).query(
-      `with candidate as (
-         select j.id from sms_kit.send_job j
-          where j.job_type = 'send' and j.state = 'leased' and j.lease_until < $1
-            and not exists (select 1 from sms_kit.send_attempt a where a.message_id = j.message_id and a.status = 'started')
-          order by j.lease_until, j.id for update skip locked limit $2
-       ) update sms_kit.send_job j set state = 'pending', lease_owner = null, lease_token = null, lease_until = null, updated_at = now()
-         from candidate c where j.id = c.id`,
+  async lockExpiredSendJobs(input: Readonly<{ before: Date; limit: number }>, tx: SmsTransaction): Promise<readonly Job[]> {
+    const { rows } = await db(this.pool, tx).query<Row>(
+      `select ${fields} from sms_kit.send_job
+        where job_type = 'send' and state = 'leased' and lease_until < $1
+        order by lease_until, id for update skip locked limit $2`,
       [input.before, input.limit],
     );
-    return result.rowCount ?? 0;
+    return rows.map(job);
+  }
+
+  async returnToPendingIfNoStarted(input: Readonly<{ tenantId: Job["tenantId"]; id: string; leaseToken: string }>, tx: SmsTransaction): Promise<boolean> {
+    const result = await db(this.pool, tx).query(
+      `update sms_kit.send_job j set state = 'pending', lease_owner = null, lease_token = null, lease_until = null, updated_at = now()
+        where j.tenant_id = $1 and j.id = $2 and j.job_type = 'send' and j.state = 'leased' and j.lease_token = $3
+          and not exists (select 1 from sms_kit.send_attempt a where a.message_id = j.message_id and a.status = 'started')`,
+      [input.tenantId, input.id, input.leaseToken],
+    );
+    return result.rowCount === 1;
   }
 }

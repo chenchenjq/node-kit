@@ -16,7 +16,7 @@ const fields = "a.id, m.tenant_id, a.message_id, a.attempt_no, a.status, a.dispa
 export class PgAttemptRepository implements AttemptRepository {
   constructor(private readonly pool: Pool) {}
 
-  async createStarted(input: Readonly<{ tenantId: Attempt["tenantId"]; messageId: Attempt["messageId"]; dispatchMode: "direct" | "queued"; leaseToken?: string; dispatchMarkedAt: Date }>, tx?: SmsTransaction): Promise<Attempt> {
+  async createStarted(input: Readonly<{ tenantId: Attempt["tenantId"]; messageId: Attempt["messageId"]; dispatchMode: "direct" | "queued"; leaseToken?: string; dispatchMarkedAt: Date; minimumLeaseUntil?: Date }>, tx?: SmsTransaction): Promise<Attempt> {
     const client = db(this.pool, tx);
     if ((input.dispatchMode === "queued") !== (input.leaseToken !== undefined)) throw new SmsKitError("CONCURRENT_MODIFICATION", "dispatch mode requires its matching lease token");
     const inserted = await client.query<AttemptRow>(
@@ -24,7 +24,8 @@ export class PgAttemptRepository implements AttemptRepository {
          select id from sms_kit.send_message where tenant_id = $1 and id = $2 for update
        ), leased_job as (
          select j.id from sms_kit.send_job j join owned_message m on m.id = j.message_id
-          where j.tenant_id = $1 and j.job_type = 'send' and j.state = 'leased' and j.lease_token = $5 for update
+          where j.tenant_id = $1 and j.job_type = 'send' and j.state = 'leased' and j.lease_token = $5
+            and j.lease_until > $8 for update
        ), eligible_message as (
          select id from owned_message where $3 = 'direct'
          union all
@@ -33,13 +34,22 @@ export class PgAttemptRepository implements AttemptRepository {
        insert into sms_kit.send_attempt (id, message_id, attempt_no, status, dispatch_mode, dispatch_token, lease_token, dispatch_marked_at, occurred_at)
        select $4, m.id, next_attempt.attempt_no, 'started', $3, $6, $5, $7, $7 from eligible_message m cross join next_attempt
        returning id, $1::text as tenant_id, message_id, attempt_no, status, dispatch_mode, dispatch_token, lease_token, dispatch_marked_at, provider_request_id, provider_code, error_code, latency_ms, occurred_at`,
-      [input.tenantId, input.messageId, input.dispatchMode, randomUUID(), input.leaseToken ?? null, randomUUID(), input.dispatchMarkedAt],
+      [input.tenantId, input.messageId, input.dispatchMode, randomUUID(), input.leaseToken ?? null, randomUUID(), input.dispatchMarkedAt, input.minimumLeaseUntil ?? input.dispatchMarkedAt],
     ).catch((error: unknown) => {
       if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") throw new SmsKitError("CONCURRENT_MODIFICATION", "message already has a started attempt");
       throw error;
     });
     if (inserted.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "attempt could not be created");
     return attempt(inserted.rows[0]);
+  }
+
+  async lockByDispatchToken(input: Readonly<{ tenantId: Attempt["tenantId"]; dispatchToken: string }>, tx: SmsTransaction): Promise<Attempt | undefined> {
+    const { rows } = await db(this.pool, tx).query<AttemptRow>(
+      `select ${fields} from sms_kit.send_attempt a join sms_kit.send_message m on m.id = a.message_id
+        where m.tenant_id = $1 and a.dispatch_token = $2 for update of a, m`,
+      [input.tenantId, input.dispatchToken],
+    );
+    return rows[0] === undefined ? undefined : attempt(rows[0]);
   }
 
   async completeByDispatchToken(input: Readonly<{ tenantId: Attempt["tenantId"]; dispatchToken: string; status: "accepted" | "rejected" | "unknown"; providerRequestId?: string; providerCode?: string; errorCode?: string; latencyMs?: number; occurredAt: Date }>, tx?: SmsTransaction): Promise<Attempt> {
