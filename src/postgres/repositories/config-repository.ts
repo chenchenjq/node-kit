@@ -54,20 +54,30 @@ export class PgConfigRepository implements ConfigRepository {
   }
 
   async update(input: UpdateProviderConfigInput, tx?: SmsTransaction): Promise<ProviderConfig> {
-    const { rows } = await executor(this.pool, tx).query<ConfigRow>(
-      `insert into sms_kit.provider_config (
+    const client = executor(this.pool, tx);
+    const values = [input.region, input.endpoint ?? null, input.accessKeyIdRef, input.accessKeySecretRef, input.receiptCallbackTokenRef, input.enabled];
+    const { rows } = input.expectedVersion === 0
+      ? await client.query<ConfigRow>(
+        `insert into sms_kit.provider_config (
           id, provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
           status, enabled, last_test_status, created_at, updated_at
         ) values (1, 'aliyun', $1, $2, $3, $4, $5, case when $6 then 'untested' else 'disabled' end, $6, 'never', now(), now())
-        on conflict (id) do update set
-          region = excluded.region, endpoint = excluded.endpoint, access_key_id_ref = excluded.access_key_id_ref,
-          access_key_secret_ref = excluded.access_key_secret_ref, receipt_callback_token_ref = excluded.receipt_callback_token_ref,
-          enabled = excluded.enabled, status = excluded.status, version = sms_kit.provider_config.version + 1, updated_at = now()
-        where sms_kit.provider_config.version = $7
-      returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
-                status, enabled, last_test_status, last_test_summary, last_tested_at, version`,
-      [input.region, input.endpoint ?? null, input.accessKeyIdRef, input.accessKeySecretRef, input.receiptCallbackTokenRef, input.enabled, input.expectedVersion],
-    );
+        on conflict (id) do nothing
+        returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
+                  status, enabled, last_test_status, last_test_summary, last_tested_at, version`,
+        values,
+      )
+      : await client.query<ConfigRow>(
+        `update sms_kit.provider_config set
+          region = $1, endpoint = $2, access_key_id_ref = $3, access_key_secret_ref = $4,
+          receipt_callback_token_ref = $5, enabled = $6,
+          status = case when $6 then 'untested' else 'disabled' end,
+          version = version + 1, updated_at = now()
+        where id = 1 and version = $7
+        returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
+                  status, enabled, last_test_status, last_test_summary, last_tested_at, version`,
+        [...values, input.expectedVersion],
+      );
     if (rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "provider configuration changed concurrently");
     return config(rows[0]);
   }
