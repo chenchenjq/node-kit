@@ -88,4 +88,19 @@ describe("MaintenanceService", () => {
     await expect(pool.query("select * from sms_kit.rate_limit_bucket where scope_hash = 'expired'")).resolves.toMatchObject({ rowCount: 0 });
     await expect(pool.query("select * from sms_kit.daily_stat where tenant_id = $1 and template_key = 'anonymous'", [tenantId])).resolves.toMatchObject({ rowCount: 1 });
   });
+
+  it("collects only a deterministic 90-day batch of ineligible reservations", async () => {
+    const firstMessage = await acceptedMessage();
+    const secondMessage = await acceptedMessage();
+    const now = new Date("2026-12-31T00:00:00.000Z");
+    const heldAt = new Date("2026-09-30T00:00:00.000Z");
+    await pool.query("insert into sms_kit.daily_send_budget (budget_date, held_count, updated_at) values ('2026-09-30', 2, now()) on conflict (budget_date) do update set held_count = 2", []);
+    await pool.query(`insert into sms_kit.send_budget_reservation (id, message_id, budget_date, state, held_at)
+      values ($1,$2,'2026-09-30','held',$3), ($4,$5,'2026-09-30','held',$6)`, [crypto.randomUUID(), firstMessage, heldAt, crypto.randomUUID(), secondMessage, new Date("2026-09-30T00:00:01.000Z")]);
+    const maintenance = new MaintenanceService({ store, clock: { now: () => now } });
+
+    await maintenance.applyRetention({ batchSize: 1 });
+
+    await expect(pool.query<{ message_id: string }>("select message_id from sms_kit.send_budget_reservation where message_id = any($1::uuid[]) order by held_at", [[firstMessage, secondMessage]])).resolves.toMatchObject({ rows: [{ message_id: secondMessage }] });
+  });
 });

@@ -19,7 +19,7 @@ export class MaintenanceService {
     const now = this.dependencies.clock.now();
     const daysAgo = (days: number) => new Date(now.getTime() - days * 24 * 60 * 60 * 1_000);
     return this.dependencies.store.maintenance.applyRetention({
-      now, challengeBefore: daysAgo(7), messagePhoneBefore: daysAgo(90), receiptBefore: daysAgo(180), auditBefore: daysAgo(180), reservationBefore: daysAgo(180), batchSize: input.batchSize,
+      now, challengeBefore: daysAgo(7), messagePhoneBefore: daysAgo(90), receiptBefore: daysAgo(90), auditBefore: daysAgo(180), reservationBefore: daysAgo(90), batchSize: input.batchSize,
     });
   }
 }

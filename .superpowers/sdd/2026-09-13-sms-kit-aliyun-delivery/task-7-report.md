@@ -84,3 +84,10 @@ git diff --check
 - Query receipts without a provider BizId are durable matched rows containing
   the returned persisted OutId in `provider_out_id`; no synthetic provider ID
   is treated as a trusted identity.
+
+## Fix round 3
+
+- Receipt-payload and ineligible-reservation retention now use the required
+  90-day boundary; audit retention remains 180 days.
+- Reservation collection selects by `held_at, id` with the supplied batch
+  limit, so one maintenance invocation cannot exceed its deterministic scope.
