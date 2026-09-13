@@ -1,5 +1,17 @@
 import type { MainlandPhone } from "../core/phone.js";
 
+declare const positiveTimeoutMsBrand: unique symbol;
+
+/** A finite duration that has been checked to be greater than zero. */
+export type PositiveTimeoutMs = number & { readonly [positiveTimeoutMsBrand]: "PositiveTimeoutMs" };
+
+export function positiveTimeoutMs(value: number): PositiveTimeoutMs {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError("provider timeout must be positive");
+  }
+  return value as PositiveTimeoutMs;
+}
+
 /** Ephemeral credentials resolved immediately before a provider operation. */
 export type ProviderAuthInput = Readonly<{
   region: string;
@@ -46,8 +58,7 @@ export type ProviderSendInput = ProviderAuthInput & Readonly<{
   templateCode: string;
   templateParams: Readonly<Record<string, string>>;
   outId: string;
-  /** Must be greater than zero; adapters reject non-positive values. */
-  timeoutMs: number;
+  timeoutMs: PositiveTimeoutMs;
 }>;
 
 export type ProviderDeliveryQuery = ProviderAuthInput & Readonly<{
