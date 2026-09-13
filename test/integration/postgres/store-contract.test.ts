@@ -22,13 +22,6 @@ describe("PostgreSQL SmsStore contract", () => {
     stop = postgres.stop;
     await migrateSmsKit(pool);
     store = new PgSmsStore(pool);
-    await pool.query(
-      `insert into sms_kit.provider_config (
-         id, provider, region, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
-         status, enabled, last_test_status, created_at, updated_at
-       ) values (1, 'aliyun', 'cn-hangzhou', 'secret://id', 'secret://key', 'secret://callback',
-         'untested', false, 'never', now(), now())`,
-    );
 
     const signatureId = randomUUID();
     templateId = randomUUID() as TemplateId;

@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { SmsKitError } from "../../core/errors.js";
 import { assertAcceptanceTransition, assertDeliveryTransition } from "../../core/status.js";
 import type { CreateMessageInput, Message, MessageRepository, SmsTransaction, TenantMessageQuery } from "../../ports/store.js";
+import { projectSafeEventMetadata } from "../../ports/runtime.js";
 import type { PgSmsTransaction } from "../transaction.js";
 import { markMessageStatsDirty } from "./stats-repository.js";
 
@@ -34,7 +35,7 @@ function message(row: MessageRow): Message {
     ...(row.phone_last4 === null ? {} : { phoneLast4: row.phone_last4 }), ...(row.phone_masked === null ? {} : { phoneMasked: row.phone_masked }),
     variableNames: Array.isArray(row.variable_names) ? row.variable_names.filter((value): value is string => typeof value === "string") : [],
     ...(row.render_params_ciphertext === null ? {} : { renderParamsCiphertext: row.render_params_ciphertext }),
-    ...(row.render_params_key_id === null ? {} : { renderParamsKeyId: row.render_params_key_id }), metadata: row.metadata,
+    ...(row.render_params_key_id === null ? {} : { renderParamsKeyId: row.render_params_key_id }), metadata: projectSafeEventMetadata(row.metadata),
     acceptanceStatus: row.acceptance_status, deliveryStatus: row.delivery_status,
     ...(row.provider_biz_id === null ? {} : { providerBizId: row.provider_biz_id }), ...(row.provider_request_id === null ? {} : { providerRequestId: row.provider_request_id }),
     ...(row.final_error_code === null ? {} : { finalErrorCode: row.final_error_code }), submittedAt: row.submitted_at,
@@ -56,7 +57,7 @@ export class PgMessageRepository implements MessageRepository {
          on conflict (tenant_id, idempotency_key) do nothing returning ${selectMessage}`,
         [input.id, input.tenantId, input.idempotencyKey, input.templateId, input.templateKeySnapshot, input.externalTemplateCodeSnapshot,
           input.signatureNameSnapshot, input.purpose, input.phoneCiphertext, input.phoneKeyId, input.phoneHash, input.phoneLast4, input.phoneMasked,
-          JSON.stringify(input.variableNames), input.renderParamsCiphertext ?? null, input.renderParamsKeyId ?? null, JSON.stringify(input.metadata ?? {}), input.submittedAt],
+          JSON.stringify(input.variableNames), input.renderParamsCiphertext ?? null, input.renderParamsKeyId ?? null, JSON.stringify(projectSafeEventMetadata(input.metadata)), input.submittedAt],
       );
       if (inserted.rows[0] === undefined) {
         const existing = await db.query<MessageRow>(`select ${selectMessage} from sms_kit.send_message where tenant_id = $1 and idempotency_key = $2`, [input.tenantId, input.idempotencyKey]);
@@ -114,8 +115,10 @@ export class PgMessageRepository implements MessageRepository {
       const current = await db.query<MessageRow>(`select ${selectMessageFromJoin} from sms_kit.send_message m join sms_kit.send_attempt a on a.message_id = m.id where m.tenant_id = $1 and a.dispatch_token = $2 for update`, [input.tenantId, input.dispatchToken]);
       if (current.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "dispatch token is no longer current");
       assertAcceptanceTransition(current.rows[0].acceptance_status, input.status, input.evidence);
-      const delivery = input.status === "accepted" ? "waiting" : input.status === "rejected" ? "not_applicable" : "waiting";
-      const updated = await db.query<MessageRow>(`update sms_kit.send_message set acceptance_status = $1, delivery_status = $2, provider_biz_id = coalesce($3, provider_biz_id), provider_request_id = coalesce($4, provider_request_id), final_error_code = coalesce($5, final_error_code), accepted_at = $6, finalized_at = case when $1 = 'rejected' then $6 else finalized_at end, version = version + 1, updated_at = now() where tenant_id = $7 and id = $8 and acceptance_status = $9 returning ${selectMessage}`,
+      const delivery = current.rows[0].delivery_status === "not_applicable"
+        ? (input.status === "rejected" ? "not_applicable" : "waiting")
+        : current.rows[0].delivery_status;
+      const updated = await db.query<MessageRow>(`update sms_kit.send_message set acceptance_status = $1, delivery_status = $2, provider_biz_id = coalesce($3, provider_biz_id), provider_request_id = coalesce($4, provider_request_id), final_error_code = coalesce($5, final_error_code), accepted_at = case when $1 = 'accepted' then coalesce(accepted_at, $6) else accepted_at end, finalized_at = case when $1 = 'rejected' then $6 else finalized_at end, version = version + 1, updated_at = now() where tenant_id = $7 and id = $8 and acceptance_status = $9 returning ${selectMessage}`,
         [input.status, delivery, input.providerBizId ?? null, input.providerRequestId ?? null, input.finalErrorCode ?? null, input.occurredAt, input.tenantId, current.rows[0].id, current.rows[0].acceptance_status]);
       if (updated.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message acceptance changed concurrently");
       await markMessageStatsDirty(db, input.tenantId, updated.rows[0].id);

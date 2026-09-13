@@ -17,17 +17,14 @@ describe("PostgreSQL configuration and resources", () => {
     stop = postgres.stop;
     await migrateSmsKit(postgres.pool);
     store = new PgSmsStore(postgres.pool);
-    await postgres.pool.query(`
-      insert into sms_kit.provider_config (
-        id, provider, region, access_key_id_ref, access_key_secret_ref,
-        receipt_callback_token_ref, status, enabled, last_test_status, created_at, updated_at
-      ) values (1, 'aliyun', 'cn-hangzhou', 'secret://id', 'secret://key',
-        'secret://callback', 'untested', false, 'never', now(), now())`);
   }, 120_000);
 
   afterAll(async () => stop?.());
 
   it("keeps configuration and policy optimistic versions independent", async () => {
+    await expect(store.config.get()).resolves.toEqual({
+      provider: "aliyun", status: "unconfigured", enabled: false, lastTestStatus: "never", version: 0,
+    });
     const policy = await store.policy.get();
     const configured = await store.config.update({
       provider: "aliyun",
@@ -37,16 +34,26 @@ describe("PostgreSQL configuration and resources", () => {
       accessKeySecretRef: "secret://key-v2",
       receiptCallbackTokenRef: "secret://callback-v2",
       enabled: true,
-      expectedVersion: 1,
+      expectedVersion: 0,
     });
     const updatedPolicy = await store.policy.update({ ...policy, expectedVersion: policy.version, otpMaxAttempts: 4 });
 
-    expect(configured.version).toBe(2);
+    expect(configured.version).toBe(1);
     expect(updatedPolicy.version).toBe(2);
     await expect(store.config.update({
       provider: "aliyun", region: "cn-beijing", accessKeyIdRef: "secret://id", accessKeySecretRef: "secret://key",
-      receiptCallbackTokenRef: "secret://callback", enabled: true, expectedVersion: 1,
+      receiptCallbackTokenRef: "secret://callback", enabled: true, expectedVersion: 0,
     })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+  });
+
+  it("projects test summaries before JSON persistence", async () => {
+    const config = await store.config.get();
+    const result = await store.config.recordConnectionTest({
+      status: "succeeded", testedAt: new Date("2026-09-13T00:00:00.000Z"), expectedVersion: config.version,
+      summary: { redactedFields: ["secret", "bad"], counts: [{ name: "resource", value: 2 }, { name: "receipt", value: Number.NaN }], nested: { key: "value" } } as never,
+    });
+    if (result.status === "unconfigured") throw new Error("configuration was not initialized");
+    expect(result.lastTestSummary).toEqual({ redactedFields: ["secret"], counts: [{ name: "resource", value: 2 }] });
   });
 
   it("rejects an expired resource preview and does not persist arbitrary snapshot data", async () => {

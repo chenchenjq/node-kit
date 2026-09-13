@@ -1,8 +1,8 @@
 import type { Pool, PoolClient } from "pg";
 
 import { SmsKitError } from "../../core/errors.js";
-import type { ConfigRepository, ProviderConfig, SmsTransaction, UpdateProviderConfigInput } from "../../ports/store.js";
-import type { SafeEventMetadata } from "../../ports/runtime.js";
+import type { ConfigRepository, ConfiguredProviderConfig, ProviderConfig, SmsTransaction, UpdateProviderConfigInput } from "../../ports/store.js";
+import { projectSafeEventMetadata, type SafeEventMetadata } from "../../ports/runtime.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
 type ConfigRow = {
@@ -12,7 +12,7 @@ type ConfigRow = {
   access_key_id_ref: string;
   access_key_secret_ref: string;
   receipt_callback_token_ref: string;
-  status: ProviderConfig["status"];
+  status: ConfiguredProviderConfig["status"];
   enabled: boolean;
   last_test_status: ProviderConfig["lastTestStatus"];
   last_test_summary: SafeEventMetadata | null;
@@ -24,7 +24,7 @@ function executor(pool: Pool, tx?: SmsTransaction): Pool | PoolClient {
   return tx === undefined ? pool : (tx as PgSmsTransaction).client;
 }
 
-function config(row: ConfigRow): ProviderConfig {
+function config(row: ConfigRow): ConfiguredProviderConfig {
   return {
     provider: row.provider,
     region: row.region,
@@ -35,7 +35,7 @@ function config(row: ConfigRow): ProviderConfig {
     status: row.status,
     enabled: row.enabled,
     lastTestStatus: row.last_test_status,
-    ...(row.last_test_summary === null ? {} : { lastTestSummary: row.last_test_summary }),
+    ...(row.last_test_summary === null ? {} : { lastTestSummary: projectSafeEventMetadata(row.last_test_summary) }),
     ...(row.last_tested_at === null ? {} : { lastTestedAt: row.last_tested_at }),
     version: Number(row.version),
   };
@@ -48,18 +48,22 @@ export class PgConfigRepository implements ConfigRepository {
     const { rows } = await executor(this.pool, tx).query<ConfigRow>(
       "select provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref, status, enabled, last_test_status, last_test_summary, last_tested_at, version from sms_kit.provider_config where id = 1",
     );
-    if (rows[0] === undefined) throw new SmsKitError("CONFIG_INVALID", "provider configuration is not initialized");
-    return config(rows[0]);
+    return rows[0] === undefined
+      ? { provider: "aliyun", status: "unconfigured", enabled: false, lastTestStatus: "never", version: 0 }
+      : config(rows[0]);
   }
 
   async update(input: UpdateProviderConfigInput, tx?: SmsTransaction): Promise<ProviderConfig> {
     const { rows } = await executor(this.pool, tx).query<ConfigRow>(
-      `update sms_kit.provider_config
-          set region = $1, endpoint = $2, access_key_id_ref = $3, access_key_secret_ref = $4,
-              receipt_callback_token_ref = $5, enabled = $6,
-              status = case when $6 then 'untested' else 'disabled' end,
-              version = version + 1, updated_at = now()
-        where id = 1 and version = $7
+      `insert into sms_kit.provider_config (
+          id, provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
+          status, enabled, last_test_status, created_at, updated_at
+        ) values (1, 'aliyun', $1, $2, $3, $4, $5, case when $6 then 'untested' else 'disabled' end, $6, 'never', now(), now())
+        on conflict (id) do update set
+          region = excluded.region, endpoint = excluded.endpoint, access_key_id_ref = excluded.access_key_id_ref,
+          access_key_secret_ref = excluded.access_key_secret_ref, receipt_callback_token_ref = excluded.receipt_callback_token_ref,
+          enabled = excluded.enabled, status = excluded.status, version = sms_kit.provider_config.version + 1, updated_at = now()
+        where sms_kit.provider_config.version = $7
       returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
                 status, enabled, last_test_status, last_test_summary, last_tested_at, version`,
       [input.region, input.endpoint ?? null, input.accessKeyIdRef, input.accessKeySecretRef, input.receiptCallbackTokenRef, input.enabled, input.expectedVersion],
@@ -82,7 +86,7 @@ export class PgConfigRepository implements ConfigRepository {
         where id = 1 and version = $4
       returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
                 status, enabled, last_test_status, last_test_summary, last_tested_at, version`,
-      [input.status, JSON.stringify(input.summary), input.testedAt, input.expectedVersion],
+      [input.status, JSON.stringify(projectSafeEventMetadata(input.summary)), input.testedAt, input.expectedVersion],
     );
     if (rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "provider configuration changed concurrently");
     return config(rows[0]);

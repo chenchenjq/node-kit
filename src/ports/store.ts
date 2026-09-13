@@ -3,7 +3,7 @@ import type { AcceptanceStatus, DeliveryStatus } from "../core/status.js";
 import { validateTemplateKey } from "../core/template.js";
 import type { ChallengeId, MessageId, TemplateId, TenantId } from "../core/types.js";
 import type { PolicyStore } from "./policy.js";
-import type { RedactedField, SafeEventMetadata } from "./runtime.js";
+import type { SafeEventMetadata, SafeReceiptPayload } from "./runtime.js";
 
 /** Opaque transaction capability. Infrastructure adapters own external-client conversion. */
 export interface SmsTransaction {
@@ -12,20 +12,29 @@ export interface SmsTransaction {
 
 export type ProviderConfigStatus = "unconfigured" | "untested" | "ready" | "degraded" | "disabled";
 
-export type ProviderConfig = Readonly<{
+export type UnconfiguredProviderConfig = Readonly<{
+  provider: "aliyun";
+  status: "unconfigured";
+  enabled: false;
+  lastTestStatus: "never";
+  version: 0;
+}>;
+export type ConfiguredProviderConfig = Readonly<{
   provider: "aliyun";
   region: string;
   endpoint?: string;
   accessKeyIdRef: string;
   accessKeySecretRef: string;
   receiptCallbackTokenRef: string;
-  status: ProviderConfigStatus;
+  status: Exclude<ProviderConfigStatus, "unconfigured">;
   enabled: boolean;
   lastTestStatus: "never" | "succeeded" | "failed";
   lastTestSummary?: SafeEventMetadata;
   lastTestedAt?: Date;
   version: number;
 }>;
+/** A pristine Store exposes an explicit singleton state without placeholder secret references. */
+export type ProviderConfig = UnconfiguredProviderConfig | ConfiguredProviderConfig;
 
 export type UpdateProviderConfigInput = Readonly<{
   provider: "aliyun";
@@ -382,10 +391,7 @@ export interface ReceiptRepository {
     occurredAt: Date;
     receivedAt: Date;
     source: "callback" | "query";
-    redactedPayload?: Readonly<{
-      redactedFields: readonly RedactedField[];
-      reportCount?: number;
-    }>;
+    redactedPayload?: SafeReceiptPayload;
   }>, tx?: SmsTransaction): Promise<{ receipt: DeliveryReceipt; created: boolean }>;
 }
 

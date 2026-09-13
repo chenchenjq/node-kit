@@ -37,6 +37,25 @@ CREATE INDEX delivery_receipt_match_status_received_at_idx
 ALTER TABLE sms_kit.send_job
   ADD COLUMN lease_token uuid,
   ADD COLUMN lease_generation bigint NOT NULL DEFAULT 0;
+-- A v1 lease has no fencing token. It may have reached the provider, so do not
+-- make it pending/retryable during upgrade: fence it permanently as uncertain.
+UPDATE sms_kit.send_message message
+   SET acceptance_status = 'unknown',
+       delivery_status = 'waiting',
+       final_error_code = coalesce(final_error_code, 'ACCEPTANCE_UNKNOWN'),
+       version = version + 1,
+       updated_at = now()
+  FROM sms_kit.send_job job
+ WHERE job.message_id = message.id
+   AND job.state = 'leased'
+   AND message.acceptance_status = 'pending';
+UPDATE sms_kit.send_job
+   SET state = 'dead',
+       lease_owner = null,
+       lease_until = null,
+       last_error_code = coalesce(last_error_code, 'ACCEPTANCE_UNKNOWN'),
+       updated_at = now()
+ WHERE state = 'leased';
 ALTER TABLE sms_kit.send_job
   ADD CONSTRAINT send_job_lease_state_check CHECK (
     (state = 'pending' AND lease_owner IS NULL AND lease_token IS NULL AND lease_until IS NULL) OR

@@ -38,22 +38,20 @@ export class PgPolicyStore implements PolicyStore {
 
   async holdBudget(input: Readonly<{ tenantId: TenantId; messageId: BudgetReservation["messageId"]; now: Date }>, tx: SmsTransaction): Promise<BudgetReservation> {
     const client = db(this.pool, tx);
-    const existing = await client.query<{ budget_date: string; state: "held" | "released" }>(`select r.budget_date::text, r.state from sms_kit.send_budget_reservation r join sms_kit.send_message m on m.id = r.message_id where r.message_id = $1 and m.tenant_id = $2`, [input.messageId, input.tenantId]);
-    if (existing.rows[0] !== undefined) return { messageId: input.messageId, budgetDate: existing.rows[0].budget_date, state: existing.rows[0].state };
     const settings = await client.query<PolicyRow>(`select ${fields} from sms_kit.policy_config where id = 1 for update`);
     if (settings.rows[0] === undefined) throw new SmsKitError("STORAGE_FAILURE", "policy configuration is not initialized", true);
     const current = policy(settings.rows[0]);
     if (current.circuitOpen) throw new SmsKitError("CIRCUIT_OPEN", "sending circuit is open");
+    const owned = await client.query<{ id: string }>("select id from sms_kit.send_message where id = $1 and tenant_id = $2 for update", [input.messageId, input.tenantId]);
+    if (owned.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message is outside the trusted tenant");
+    const existing = await client.query<{ budget_date: string; state: "held" | "released" }>("select budget_date::text, state from sms_kit.send_budget_reservation where message_id = $1", [input.messageId]);
+    if (existing.rows[0] !== undefined) return { messageId: input.messageId, budgetDate: existing.rows[0].budget_date, state: existing.rows[0].state };
     const budgetDate = input.now.toISOString().slice(0, 10);
     await client.query("insert into sms_kit.daily_send_budget (budget_date, held_count, updated_at) values ($1::date, 0, now()) on conflict (budget_date) do nothing", [budgetDate]);
-    const alreadyHeld = await client.query<{ budget_date: string; state: "held" | "released" }>(`select r.budget_date::text, r.state from sms_kit.send_budget_reservation r join sms_kit.send_message m on m.id = r.message_id where r.message_id = $1 and m.tenant_id = $2`, [input.messageId, input.tenantId]);
-    if (alreadyHeld.rows[0] !== undefined) return { messageId: input.messageId, budgetDate: alreadyHeld.rows[0].budget_date, state: alreadyHeld.rows[0].state };
     const budget = await client.query<{ held_count: string }>("select held_count::text from sms_kit.daily_send_budget where budget_date = $1::date for update", [budgetDate]);
     if (budget.rows[0] === undefined) throw new SmsKitError("STORAGE_FAILURE", "daily budget is not initialized", true);
     if (current.systemDailyBudget !== null && Number(budget.rows[0].held_count) >= current.systemDailyBudget) throw new SmsKitError("BUDGET_EXCEEDED", "system daily budget is exhausted");
-    await client.query("insert into sms_kit.send_budget_reservation (id, message_id, budget_date, state, held_at) select $4, m.id, $2::date, 'held', now() from sms_kit.send_message m where m.id = $1 and m.tenant_id = $3", [input.messageId, budgetDate, input.tenantId, randomUUID()]);
-    const reservation = await client.query("select message_id from sms_kit.send_budget_reservation where message_id = $1", [input.messageId]);
-    if (reservation.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message is outside the trusted tenant");
+    await client.query("insert into sms_kit.send_budget_reservation (id, message_id, budget_date, state, held_at) values ($1, $2, $3::date, 'held', now())", [randomUUID(), input.messageId, budgetDate]);
     await client.query("update sms_kit.daily_send_budget set held_count = held_count + 1, version = version + 1, updated_at = now() where budget_date = $1::date", [budgetDate]);
     return { messageId: input.messageId, budgetDate, state: "held" };
   }
