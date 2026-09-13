@@ -18,3 +18,9 @@ npm run test:live:connection --workspace sms-kit  live suite skipped
 ```
 
 No live environment was enabled, no provider credentials were read, and no SMS was sent.
+
+## Fix round 1
+
+Updated `test` and `test:unit` to exclude `test/live/**` unconditionally. A package-metadata regression test now asserts those defaults exclude live suites and that only the explicit live scripts select them.
+
+Verification passed with live opt-in flags set but no credentials configured: default `test` passed 91 tests and `test:unit` passed 89 tests, with neither discovering live suites. With live flags unset, `test:live` passed its guard tests and skipped both provider suites; `test:live:connection` skipped its provider suite. Typecheck passed.

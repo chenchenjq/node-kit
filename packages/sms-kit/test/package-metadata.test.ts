@@ -20,4 +20,12 @@ describe("sms-kit package metadata", () => {
     expect(pkg.exports["./security"].browser).toBe("./dist/browser-forbidden.js");
     expect(pkg.exports["./core"].browser).toBeUndefined();
   });
+
+  it("keeps live suites out of default test scripts and selects them only explicitly", async () => {
+    const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+    expect(pkg.scripts.test).toContain("--exclude 'test/live/**'");
+    expect(pkg.scripts["test:unit"]).toContain("--exclude 'test/live/**'");
+    expect(pkg.scripts["test:live"]).toBe("vitest run test/live");
+    expect(pkg.scripts["test:live:connection"]).toBe("vitest run test/live/aliyun.connection.live.test.ts");
+  });
 });
