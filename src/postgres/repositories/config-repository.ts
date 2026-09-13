@@ -61,22 +61,22 @@ export class PgConfigRepository implements ConfigRepository {
         `insert into sms_kit.provider_config (
           id, provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
           status, enabled, last_test_status, created_at, updated_at
-        ) values (1, 'aliyun', $1, $2, $3, $4, $5, case when $6 then 'untested' else 'disabled' end, $6, 'never', now(), now())
+        ) values (1, 'aliyun', $1, $2, $3, $4, $5, case when $7 then 'untested' when $6 then 'untested' else 'disabled' end, case when $7 then false else $6 end, 'never', now(), now())
         on conflict (id) do nothing
         returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
                   status, enabled, last_test_status, last_test_summary, last_tested_at, version`,
-        values,
+        [...values, input.resetReadiness ?? false],
       )
       : await client.query<ConfigRow>(
         `update sms_kit.provider_config set
           region = $1, endpoint = $2, access_key_id_ref = $3, access_key_secret_ref = $4,
-          receipt_callback_token_ref = $5, enabled = $6,
-          status = case when $6 then 'untested' else 'disabled' end,
+          receipt_callback_token_ref = $5, enabled = case when $8 then false else $6 end,
+          status = case when $8 then 'untested' when $6 then 'untested' else 'disabled' end,
           version = version + 1, updated_at = now()
         where id = 1 and version = $7
         returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
                   status, enabled, last_test_status, last_test_summary, last_tested_at, version`,
-        [...values, input.expectedVersion],
+        [...values, input.expectedVersion, input.resetReadiness ?? false],
       );
     if (rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "provider configuration changed concurrently");
     return config(rows[0]);
