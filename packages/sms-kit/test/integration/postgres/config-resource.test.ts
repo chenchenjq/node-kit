@@ -9,7 +9,7 @@ import { startPostgres } from "./helpers.js";
 
 describe("PostgreSQL configuration and resources", () => {
   let store: PgSmsStore;
-  let stop: () => Promise<void>;
+  let stop: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
     const postgres = await startPostgres();
@@ -24,7 +24,7 @@ describe("PostgreSQL configuration and resources", () => {
         'secret://callback', 'untested', false, 'never', now(), now())`);
   }, 120_000);
 
-  afterAll(async () => stop());
+  afterAll(async () => stop?.());
 
   it("keeps configuration and policy optimistic versions independent", async () => {
     const policy = await store.policy.get();

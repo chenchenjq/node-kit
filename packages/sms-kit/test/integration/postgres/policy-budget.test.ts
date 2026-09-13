@@ -10,7 +10,7 @@ import { startPostgres } from "./helpers.js";
 
 describe("PostgreSQL policy budgets", () => {
   let store: PgSmsStore;
-  let stop: () => Promise<void>;
+  let stop: (() => Promise<void>) | undefined;
   let pool: Awaited<ReturnType<typeof startPostgres>>["pool"];
   let templateId: string;
   const tenant = "tenant-a" as TenantId;
@@ -35,7 +35,7 @@ describe("PostgreSQL policy budgets", () => {
     );
   }, 120_000);
 
-  afterAll(async () => stop());
+  afterAll(async () => stop?.());
 
   it("never exceeds the system daily budget under concurrency and releases once", async () => {
     const defaultPolicy = await store.policy.get();

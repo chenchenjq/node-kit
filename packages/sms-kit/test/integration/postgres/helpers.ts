@@ -8,6 +8,7 @@ export async function startPostgres(): Promise<{
   const container: StartedTestContainer = await new GenericContainer("postgres:16-alpine")
     .withEnvironment({ POSTGRES_DB: "sms_kit_test", POSTGRES_PASSWORD: "test", POSTGRES_USER: "test" })
     .withExposedPorts(5432)
+    .withTmpFs({ "/var/lib/postgresql/data": "rw" })
     .start();
   const pool = new Pool({
     database: "sms_kit_test",

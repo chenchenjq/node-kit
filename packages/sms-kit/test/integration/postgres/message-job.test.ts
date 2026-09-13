@@ -14,7 +14,7 @@ const tenantB = "tenant-b" as TenantId;
 
 describe("PostgreSQL messages, attempts, receipts and jobs", () => {
   let store: PgSmsStore;
-  let stop: () => Promise<void>;
+  let stop: (() => Promise<void>) | undefined;
   let templateId: string;
 
   function messageFixture(overrides: Partial<CreateMessageInput> = {}): CreateMessageInput {
@@ -54,7 +54,7 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
     );
   }, 120_000);
 
-  afterAll(async () => stop());
+  afterAll(async () => stop?.());
 
   it("creates one message and job for concurrent idempotent requests", async () => {
     const input = messageFixture({ idempotencyKey: "order:A-100:shipped" });
@@ -77,20 +77,25 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
 
   it("fences stale lease owners and permits one started attempt per message", async () => {
     const created = await createMessage(messageFixture());
-    const [job] = await store.jobs.lease({ tenantId: tenantA, owner: "worker-a", leaseMs: 60_000, limit: 1, now: new Date("2026-09-13T00:00:01.000Z") });
-    await store.jobs.reschedule({ tenantId: tenantA, id: job!.id, leaseToken: job!.leaseToken!, availableAt: new Date("2026-09-13T00:00:02.000Z") });
-    const leasedAgain = await store.jobs.lease({ tenantId: tenantA, owner: "worker-b", leaseMs: 60_000, limit: 1, now: new Date("2026-09-13T00:00:02.000Z") });
-    expect(leasedAgain[0]!.leaseToken).not.toBe(job!.leaseToken);
-    await expect(store.jobs.succeed({ tenantId: tenantA, id: job!.id, leaseToken: job!.leaseToken! }))
+    const firstLease = await store.jobs.lease({ tenantId: tenantA, owner: "worker-a", leaseMs: 60_000, limit: 10, now: new Date("2026-09-13T00:00:01.000Z") });
+    const job = firstLease.find((candidate) => candidate.messageId === created.message.id);
+    expect(job).toBeDefined();
+    if (job === undefined) throw new Error("expected the created message job to be leased");
+    await store.jobs.reschedule({ tenantId: tenantA, id: job.id, leaseToken: job.leaseToken!, availableAt: new Date("2026-09-13T00:00:02.000Z") });
+    const secondLease = await store.jobs.lease({ tenantId: tenantA, owner: "worker-b", leaseMs: 60_000, limit: 10, now: new Date("2026-09-13T00:00:02.000Z") });
+    const leasedAgain = secondLease.find((candidate) => candidate.messageId === created.message.id);
+    expect(leasedAgain).toBeDefined();
+    if (leasedAgain === undefined) throw new Error("expected the rescheduled message job to be leased again");
+    expect(leasedAgain.leaseToken).not.toBe(job.leaseToken);
+    await expect(store.jobs.succeed({ tenantId: tenantA, id: job.id, leaseToken: job.leaseToken! }))
       .rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
 
-    const current = leasedAgain[0]!;
     const first = await store.attempts.createStarted({
-      tenantId: tenantA, messageId: created.message.id, dispatchMode: "queued", leaseToken: current.leaseToken!,
+      tenantId: tenantA, messageId: created.message.id, dispatchMode: "queued", leaseToken: leasedAgain.leaseToken!,
       dispatchMarkedAt: new Date("2026-09-13T00:00:03.000Z"),
     });
     await expect(store.attempts.createStarted({
-      tenantId: tenantA, messageId: created.message.id, dispatchMode: "queued", leaseToken: current.leaseToken!,
+      tenantId: tenantA, messageId: created.message.id, dispatchMode: "queued", leaseToken: leasedAgain.leaseToken!,
       dispatchMarkedAt: new Date("2026-09-13T00:00:04.000Z"),
     })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
     expect(first.dispatchToken).toBeTruthy();
