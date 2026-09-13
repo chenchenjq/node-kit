@@ -25,14 +25,19 @@ export async function enforcePhoneSendPolicy(input: Readonly<{
   tx: SmsTransaction;
 }>): Promise<void> {
   if (input.policy.circuitOpen) throw new SmsKitError("CIRCUIT_OPEN", "sending circuit is open");
-  const scopeHash = `${input.phoneHash}:${input.purpose}`;
-  if (input.policy.phoneMinIntervalSeconds > 0 && await count(input.rateLimits, input.tenantId, scopeHash, input.now, input.policy.phoneMinIntervalSeconds, input.tx) > 1) {
-    throw new SmsKitError("RATE_LIMITED", "phone send interval is limited");
+  const base = `${input.phoneHash}:${input.purpose}`;
+  if (input.policy.phoneMinIntervalSeconds > 0) {
+    const cooldown = `cooldown:${base}`;
+    // Store each event independently so the boundary is sliding, not epoch aligned.
+    await input.rateLimits.increment({ tenantId: input.tenantId, scope: "phone_purpose", scopeHash: cooldown, windowStart: input.now, windowSeconds: 1, expiresAt: new Date(input.now.getTime() + input.policy.phoneMinIntervalSeconds * 1_000) }, input.tx);
+    if (await input.rateLimits.countSince({ tenantId: input.tenantId, scope: "phone_purpose", scopeHash: cooldown, since: new Date(input.now.getTime() - input.policy.phoneMinIntervalSeconds * 1_000) }, input.tx) > 1) {
+      throw new SmsKitError("RATE_LIMITED", "phone send interval is limited");
+    }
   }
-  if (await count(input.rateLimits, input.tenantId, scopeHash, input.now, 60 * 60, input.tx) > input.policy.phoneHourlyLimit) {
+  if (await count(input.rateLimits, input.tenantId, `hourly:${base}`, input.now, 60 * 60, input.tx) > input.policy.phoneHourlyLimit) {
     throw new SmsKitError("RATE_LIMITED", "phone hourly send limit is exceeded");
   }
-  if (await count(input.rateLimits, input.tenantId, scopeHash, input.now, 24 * 60 * 60, input.tx) > input.policy.phoneDailyLimit) {
+  if (await count(input.rateLimits, input.tenantId, `daily:${base}`, input.now, 24 * 60 * 60, input.tx) > input.policy.phoneDailyLimit) {
     throw new SmsKitError("RATE_LIMITED", "phone daily send limit is exceeded");
   }
 }

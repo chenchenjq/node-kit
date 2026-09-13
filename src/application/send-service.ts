@@ -64,7 +64,7 @@ export class SendService {
 
   async enqueueNotification(input: EnqueueNotificationInput): Promise<Message> {
     validateInput(input);
-    const target = await this.requireUsableTemplate(input);
+    const target = await this.requireUsableTemplate(input, "notification");
     const phone = normalizeMainlandPhone(input.phone);
     const id = this.dependencies.ids.messageId();
     const [protectedPhone, protectedParams] = await Promise.all([
@@ -87,7 +87,10 @@ export class SendService {
 
   async sendOtpNow(input: SendInput): Promise<Message> {
     validateInput(input);
-    const target = await this.requireUsableTemplate(input);
+    const target = await this.requireUsableTemplate(input, "verification");
+    // Deterministic local failures must happen before any durable dispatch marker.
+    const auth = providerConfig(await this.dependencies.store.config.get());
+    const timeoutMs = positiveTimeoutMs(this.dependencies.providerTimeoutMs);
     const phone = normalizeMainlandPhone(input.phone);
     const id = this.dependencies.ids.messageId();
     const protectedPhone = await this.dependencies.phoneProtector.protect(phone, { envelopeVersion: 1, purpose: "phone", tenantId: input.tenantId, recordId: id, fieldName: "phone_ciphertext" });
@@ -116,7 +119,7 @@ export class SendService {
     const startedAt = this.dependencies.clock.now();
     let outcome: Awaited<ReturnType<SmsProvider["send"]>>;
     try {
-      outcome = await this.dependencies.provider.send({ ...providerConfig(await this.dependencies.store.config.get()), phoneNumber: phone, signatureName: target.signatureName, templateCode: target.template.externalCode, templateParams: input.variables, outId: prepared.message.id, timeoutMs: positiveTimeoutMs(this.dependencies.providerTimeoutMs) });
+      outcome = await this.dependencies.provider.send({ ...auth, phoneNumber: phone, signatureName: target.signatureName, templateCode: target.template.externalCode, templateParams: input.variables, outId: prepared.message.id, timeoutMs });
     } catch {
       outcome = { kind: "unknown", code: "ACCEPTANCE_UNKNOWN" };
     }
@@ -131,14 +134,13 @@ export class SendService {
       await this.complete(input.tenantId, prepared.dispatchToken, "unknown", occurredAt, { errorCode: outcome.code, latencyMs });
       throw new SmsKitError("ACCEPTANCE_UNKNOWN", "provider acceptance is unknown");
     }
-    await this.complete(input.tenantId, prepared.dispatchToken, "rejected", occurredAt, { ...(outcome.requestId === undefined ? {} : { providerRequestId: outcome.requestId }), providerCode: outcome.code, errorCode: outcome.code, latencyMs });
-    if (!outcome.retryable) await this.dependencies.store.transaction((tx) => policyStore.releaseBudget({ tenantId: input.tenantId, messageId: prepared.message.id }, tx));
+    await this.complete(input.tenantId, prepared.dispatchToken, "rejected", occurredAt, { ...(outcome.requestId === undefined ? {} : { providerRequestId: outcome.requestId }), providerCode: outcome.code, errorCode: outcome.code, latencyMs }, !outcome.retryable);
     throw new SmsKitError(outcome.retryable ? "PROVIDER_THROTTLED" : "PROVIDER_REJECTED", "provider rejected the SMS", outcome.retryable, undefined, outcome.code);
   }
 
-  private async requireUsableTemplate(input: SendInput): Promise<SendTarget> {
+  private async requireUsableTemplate(input: SendInput, templateType: Template["templateType"]): Promise<SendTarget> {
     const template = await this.dependencies.store.resources.findTemplateByKey({ templateKey: input.templateKey });
-    if (template === undefined || !template.enabled || !isCloudApproved(template.externalStatus) || template.purpose !== input.purpose) {
+    if (template === undefined || template.templateType !== templateType || !template.enabled || !isCloudApproved(template.externalStatus) || template.purpose !== input.purpose) {
       throw new SmsKitError("TEMPLATE_UNAVAILABLE", "template is not usable");
     }
     validateTemplateVariables(template.variables.map((variable) => variable.name), input.variables);
@@ -148,11 +150,12 @@ export class SendService {
     return { template, signatureName: signature.externalName };
   }
 
-  private async complete(tenantId: TenantId, dispatchToken: string, status: "accepted" | "rejected" | "unknown", occurredAt: Date, detail: Readonly<{ providerBizId?: string; providerRequestId?: string; providerCode?: string; errorCode?: string; latencyMs: number }>): Promise<Message> {
+  private async complete(tenantId: TenantId, dispatchToken: string, status: "accepted" | "rejected" | "unknown", occurredAt: Date, detail: Readonly<{ providerBizId?: string; providerRequestId?: string; providerCode?: string; errorCode?: string; latencyMs: number }>, releaseBudget = false): Promise<Message> {
     const attempts = this.dependencies.attempts ?? this.dependencies.store.attempts;
     return this.dependencies.store.transaction(async (tx) => {
       const message = await this.dependencies.store.messages.completeAcceptance({ tenantId, dispatchToken, status, evidence: "same-dispatch-response", ...(detail.providerBizId === undefined ? {} : { providerBizId: detail.providerBizId }), ...(detail.providerRequestId === undefined ? {} : { providerRequestId: detail.providerRequestId }), ...(detail.errorCode === undefined ? {} : { finalErrorCode: detail.errorCode }), occurredAt }, tx);
       await attempts.completeByDispatchToken({ tenantId, dispatchToken, status, ...(detail.providerRequestId === undefined ? {} : { providerRequestId: detail.providerRequestId }), ...(detail.providerCode === undefined ? {} : { providerCode: detail.providerCode }), ...(detail.errorCode === undefined ? {} : { errorCode: detail.errorCode }), latencyMs: detail.latencyMs, occurredAt }, tx);
+      if (releaseBudget) await (this.dependencies.policy ?? this.dependencies.store.policy).releaseBudget({ tenantId, messageId: message.id }, tx);
       return message;
     });
   }
