@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { SendService } from "../../../src/application/send-service.js";
 import { SendWorker } from "../../../src/application/send-worker.js";
 import { ReconcileService } from "../../../src/application/reconcile-service.js";
+import { ReceiptService } from "../../../src/application/receipt-service.js";
 import { ResourceSyncService } from "../../../src/application/resource-sync-service.js";
 import { MaintenanceService } from "../../../src/application/maintenance-service.js";
 import { PolicyService } from "../../../src/application/policy-service.js";
@@ -17,7 +18,9 @@ import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "../postgres/helpers.js";
 
 const tenantId = "final-review" as TenantId;
+const otherTenantId = "final-review-other" as TenantId;
 const actor = { id: "reviewer", tenantId };
+const callbackToken = Buffer.alloc(32, 7).toString("base64url");
 const ids = { next: () => crypto.randomUUID(), messageId: () => crypto.randomUUID() as never };
 const events = { emit: () => undefined };
 const protectors = {
@@ -69,6 +72,39 @@ describe("final service and PostgreSQL regressions", () => {
     expect((await pool.query("select state from sms_kit.send_job where message_id = $1 and job_type = 'reconcile'", [message.id])).rows).toEqual([{ state: "pending" }]);
     await new ReconcileService({ store, provider, phoneProtector: protectors.phoneProtector, clock, events }).runBatch({ limit: 10 });
     expect(await store.messages.get({ tenantId, id: message.id })).toMatchObject({ deliveryStatus: "delivered" });
+  });
+
+  it("retires an expired reconciliation lease after an idempotent terminal callback without crossing tenants", async () => {
+    const message = await service().sendOtpNow(input("verification"));
+    const [activeJob] = await store.jobs.leaseReconciliation({ owner: "racing-query", limit: 1, leaseMs: 1_000, now });
+    if (activeJob?.leaseToken === undefined) throw new Error("reconciliation job was not leased");
+    const body = JSON.stringify([{
+      phone_number: "13800138000", biz_id: "biz", send_time: "2026-09-14 08:00:00", report_time: "2026-09-14 08:00:05",
+      success: true, err_code: "DELIVERED", err_msg: "delivered", sms_size: "1", out_id: message.id,
+    }]);
+    const receipts = new ReceiptService({
+      store, secrets: { resolve: async () => callbackToken }, clock, events, safetyMarginMs: 0,
+    });
+
+    await receipts.ingest({ token: callbackToken, body, deadlineAt: new Date(now.getTime() + 1_000) });
+    await receipts.ingest({ token: callbackToken, body, deadlineAt: new Date(now.getTime() + 1_000) });
+    const foreignJobId = crypto.randomUUID();
+    await pool.query(`insert into sms_kit.send_job
+      (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, payload, created_at, updated_at)
+      values ($1, $2, $3, 'reconcile', $4, 'pending', $5, 0, 1, '{"kind":"reconcile"}'::jsonb, now(), now())`,
+    [foreignJobId, otherTenantId, `foreign-reconcile:${message.id}`, message.id, now]);
+
+    now = new Date(now.getTime() + 6 * 60_000);
+    let queries = 0;
+    const terminalProvider = { ...provider, queryDelivery: async () => { queries += 1; throw new Error("terminal messages must not be queried"); } };
+    await expect(new ReconcileService({ store, provider: terminalProvider, phoneProtector: protectors.phoneProtector, clock, events }).runBatch({ limit: 10 })).resolves.toBe(1);
+
+    expect(queries).toBe(0);
+    expect((await pool.query("select state from sms_kit.send_job where id = $1", [activeJob.id])).rows).toEqual([{ state: "succeeded" }]);
+    expect((await pool.query("select state from sms_kit.send_job where id = $1", [foreignJobId])).rows).toEqual([{ state: "pending" }]);
+    await expect(store.jobs.trySucceed({ tenantId, id: activeJob.id, leaseToken: activeJob.leaseToken })).resolves.toBe(false);
+    await expect(new HealthService({ store, clock }).getSnapshot({ tenantId })).resolves.toMatchObject({ pendingJobs: 0 });
+    expect((await pool.query("select count(*)::text as count from sms_kit.delivery_receipt where message_id = $1", [message.id])).rows).toEqual([{ count: "1" }]);
   });
 
   it("rolls back acceptance when durable reconciliation cannot be scheduled", async () => {

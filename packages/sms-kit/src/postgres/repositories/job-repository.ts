@@ -50,7 +50,8 @@ export class PgJobRepository implements JobRepository {
               (job.state = 'pending' and job.available_at <= $1)
               or (job.state = 'leased' and job.lease_until < $1)
             )
-            and message.delivery_status = 'waiting' and message.acceptance_status in ('accepted', 'unknown')
+            and message.acceptance_status in ('accepted', 'unknown')
+            and message.delivery_status in ('waiting', 'delivered', 'failed', 'unknown_final')
           order by job.available_at, job.id for update of job, message skip locked limit $2
        ) update sms_kit.send_job job set state = 'leased', lease_owner = $3,
          lease_token = md5(random()::text || clock_timestamp()::text || job.id::text)::uuid,
