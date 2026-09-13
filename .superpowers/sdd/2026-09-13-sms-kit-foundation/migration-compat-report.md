@@ -70,3 +70,28 @@ npm run build --workspace sms-kit                    # passed
 sha256sum 0002_reliability_policy.sql                # 2e50eb...75c06
 git diff --check                                     # passed
 ```
+
+## Residual configuration bootstrap repair
+
+`PgConfigRepository.update()` previously applied `expectedVersion` only to the
+`ON CONFLICT DO UPDATE` branch. When the singleton row was absent, PostgreSQL
+executed the INSERT branch for any expected version.
+
+The repository now uses two explicit optimistic paths: version zero may
+`INSERT ... ON CONFLICT DO NOTHING`, while every nonzero version performs an
+UPDATE-only statement with `WHERE id = 1 AND version = expectedVersion`. Both
+zero-row outcomes retain the existing `CONCURRENT_MODIFICATION` contract.
+
+The shared Store contract now tries `expectedVersion: 1` against an absent
+singleton before the valid version-zero bootstrap. The regression first failed
+in both multi-tenant and fixed-default-tenant lanes because the invalid update
+resolved with a newly inserted version-one row, then passed after the split.
+
+```text
+npm test --workspace sms-kit                         # 9 files, 45 tests passed
+npm run test:integration --workspace sms-kit -- config-resource.test.ts store-contract.test.ts
+                                                     # 2 files, 26 tests passed
+npm run typecheck --workspace sms-kit                # passed
+npm run build --workspace sms-kit                    # passed
+git diff --check                                     # passed
+```

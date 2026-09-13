@@ -43,11 +43,15 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const store = await factory.createStore();
       const config = await store.config.get();
       const policy = await store.policy.get();
-      const configured = await store.config.update({
+      const bootstrap = {
         provider: "aliyun", region: `cn-contract-${factory.ids.next()}`,
         accessKeyIdRef: "secret://id", accessKeySecretRef: "secret://key", receiptCallbackTokenRef: "secret://callback",
-        enabled: false, expectedVersion: config.version,
-      });
+        enabled: false,
+      } as const;
+      expect(config.version).toBe(0);
+      await expect(store.config.update({ ...bootstrap, expectedVersion: 1 }))
+        .rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+      const configured = await store.config.update({ ...bootstrap, expectedVersion: config.version });
       const updatedPolicy = await store.policy.update({ ...policy, expectedVersion: policy.version, otpMaxAttempts: policy.otpMaxAttempts === 10 ? 9 : policy.otpMaxAttempts + 1 });
       expect(configured.version).toBe(config.version + 1);
       expect(updatedPolicy.version).toBe(policy.version + 1);
