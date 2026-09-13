@@ -23,7 +23,16 @@ export class DispatchRecoveryService {
           returnedToPending += 1;
         }
       }
-      const attempts = await this.dependencies.store.attempts.listExpiredStarted({ before: input.abandonedBefore, limit: input.limit }, tx);
+      // Direct attempts have no queue ownership and can be recovered on their
+      // own. Queued attempts are deliberately selected only through the exact
+      // jobs locked above: never independently lock a queued attempt after its
+      // job was skipped by another completion transaction.
+      const directAttempts = await this.dependencies.store.attempts.listExpiredStarted({ before: input.abandonedBefore, limit: input.limit }, tx);
+      const queuedAttempts = await this.dependencies.store.attempts.listStartedForLeasedJobs({
+        jobs: expiredJobs.flatMap((job) => job.leaseToken === undefined ? [] : [{ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken }]),
+        limit: Math.max(0, input.limit - directAttempts.length),
+      }, tx);
+      const attempts = [...directAttempts, ...queuedAttempts];
       for (const attempt of attempts) {
         const occurredAt = this.dependencies.clock.now();
         const message = await this.dependencies.store.messages.completeAcceptance({

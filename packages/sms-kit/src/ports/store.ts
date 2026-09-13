@@ -378,6 +378,11 @@ export interface AttemptRepository {
    * their isolation by supplying tenantId.
    */
   listExpiredStarted(input: Readonly<{ tenantId?: TenantId; before: Date; limit: number }>, tx?: SmsTransaction): Promise<readonly Attempt[]>;
+  /** Queued attempts may only be recovered through jobs already locked by this transaction. */
+  listStartedForLeasedJobs(input: Readonly<{
+    jobs: ReadonlyArray<Readonly<{ tenantId: TenantId; id: string; leaseToken: string }>>;
+    limit: number;
+  }>, tx: SmsTransaction): Promise<readonly Attempt[]>;
 }
 
 export type DeliveryReceipt = Readonly<{
