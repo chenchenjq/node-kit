@@ -18,7 +18,7 @@
     "./testing": { "types": "./dist/testing/index.d.ts", "import": "./dist/testing/index.js" }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run --exclude 'test/integration/**'",
     "test:unit": "vitest run --exclude 'test/contract/**' --exclude 'test/integration/**'",
