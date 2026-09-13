@@ -2,7 +2,7 @@
 -- provider. Fence it permanently as uncertain instead of making it retryable.
 UPDATE sms_kit.send_message message
    SET acceptance_status = 'unknown',
-       delivery_status = 'waiting',
+       delivery_status = case when delivery_status = 'not_applicable' then 'waiting' else delivery_status end,
        final_error_code = coalesce(final_error_code, 'ACCEPTANCE_UNKNOWN'),
        version = version + 1,
        updated_at = now()

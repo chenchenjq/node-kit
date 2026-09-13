@@ -1,11 +1,39 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { getSmsKitSchemaVersion, migrateSmsKit } from "../../../src/postgres/index.js";
 import { allRequiredConstraintsExist, columnIsNotNull, startPostgres } from "./helpers.js";
 
-const previousSchemaFixture = fileURLToPath(new URL("../../fixtures/postgres/0000_previous.sql", import.meta.url));
+const previousV1SchemaFixture = fileURLToPath(new URL("../../fixtures/postgres/0001_previous.sql", import.meta.url));
+const previousV2SchemaFixture = fileURLToPath(new URL("../../fixtures/postgres/0000_previous.sql", import.meta.url));
+
+async function seedPendingDeliveredLease(pool: Pool, version: 1 | 2): Promise<void> {
+  const tenantId = `tenant-v${version}`;
+  await pool.query(
+    `insert into sms_kit.signature (id, external_key, external_name, external_status, external_type, imported_at, last_synced_at, created_at, updated_at)
+     values ('00000000-0000-4000-8000-000000000010', $1, 'Legacy', 'approved', 'text', now(), now(), now(), now())`,
+    [`sign:v${version}`],
+  );
+  await pool.query(
+    `insert into sms_kit.template (id, signature_id, template_key, external_code, external_name, external_status, template_type, purpose, content_snapshot, variable_schema, imported_at, last_synced_at, created_at, updated_at)
+     values ('00000000-0000-4000-8000-000000000011', '00000000-0000-4000-8000-000000000010', $1, $2, 'Legacy', 'approved', 'notification', 'migration', '', '[]', now(), now(), now(), now())`,
+    [`notice.v${version}`, `SMS_V${version}`],
+  );
+  await pool.query(
+    `insert into sms_kit.send_message (id, tenant_id, idempotency_key, template_id, template_key_snapshot, external_template_code_snapshot, signature_name_snapshot, purpose, variable_names, acceptance_status, delivery_status, submitted_at, delivered_at, created_at, updated_at)
+     values ('00000000-0000-4000-8000-000000000012', $1, $2, '00000000-0000-4000-8000-000000000011', $3, $4, 'Legacy', 'migration', '[]', 'pending', 'delivered', now(), now(), now(), now())`,
+    [tenantId, `message:v${version}`, `notice.v${version}`, `SMS_V${version}`],
+  );
+  const columns = version === 1 ? "" : ", lease_token";
+  const values = version === 1 ? "" : ", '00000000-0000-4000-8000-000000000014'";
+  await pool.query(
+    `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, lease_owner, lease_until, attempt_count, max_attempts, payload, created_at, updated_at${columns})
+     values ('00000000-0000-4000-8000-000000000013', $1, $2, 'send', '00000000-0000-4000-8000-000000000012', 'leased', now(), 'old-worker', now() + interval '1 hour', 1, 3, '{"kind":"none"}', now(), now()${values})`,
+    [tenantId, `v${version}-leased`],
+  );
+}
 
 describe("sms-kit PostgreSQL migration", () => {
   let postgres: Awaited<ReturnType<typeof startPostgres>>;
@@ -44,28 +72,43 @@ describe("sms-kit PostgreSQL migration", () => {
 
   it("upgrades the fixed previous-version fixture", async () => {
     const { pool } = postgres;
-    await pool.query(await readFile(previousSchemaFixture, "utf8"));
+    await pool.query(await readFile(previousV2SchemaFixture, "utf8"));
     await migrateSmsKit(pool);
     await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(3);
     await migrateSmsKit(pool);
     await expect(allRequiredConstraintsExist(pool)).resolves.toBe(true);
   }, 60_000);
 
-  it("upgrades an old v2 leased job without making a stale dispatch retryable", async () => {
+  it("upgrades a v1 lease before immutable migration 0002 validates lease state", async () => {
     const { pool } = postgres;
-    await pool.query(await readFile(previousSchemaFixture, "utf8"));
-    await pool.query(`insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, state, available_at, lease_owner, lease_token, lease_until, attempt_count, max_attempts, payload, created_at, updated_at)
-      values ('00000000-0000-4000-8000-000000000001', 'tenant-v2', 'v2-leased', 'send', 'leased', now(), 'old-worker', '00000000-0000-4000-8000-000000000002', now() + interval '1 hour', 1, 3, '{"kind":"none"}', now(), now())`);
+    await pool.query(await readFile(previousV1SchemaFixture, "utf8"));
+    await seedPendingDeliveredLease(pool, 1);
+
+    await migrateSmsKit(pool);
+
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(3);
+    await expect(pool.query<{ state: string; lease_token: string | null; last_error_code: string | null }>("select state, lease_token, last_error_code from sms_kit.send_job where dedupe_key = 'v1-leased'"))
+      .resolves.toMatchObject({ rows: [{ state: "dead", lease_token: null, last_error_code: "ACCEPTANCE_UNKNOWN" }] });
+    await expect(pool.query<{ acceptance_status: string; delivery_status: string }>("select acceptance_status, delivery_status from sms_kit.send_message where id = '00000000-0000-4000-8000-000000000012'"))
+      .resolves.toMatchObject({ rows: [{ acceptance_status: "unknown", delivery_status: "delivered" }] });
+  }, 60_000);
+
+  it("upgrades an old v2 lease without overwriting terminal delivery", async () => {
+    const { pool } = postgres;
+    await pool.query(await readFile(previousV2SchemaFixture, "utf8"));
+    await seedPendingDeliveredLease(pool, 2);
 
     await migrateSmsKit(pool);
 
     await expect(pool.query<{ state: string; lease_token: string | null; last_error_code: string | null }>("select state, lease_token, last_error_code from sms_kit.send_job where dedupe_key = 'v2-leased'"))
       .resolves.toMatchObject({ rows: [{ state: "dead", lease_token: null, last_error_code: "ACCEPTANCE_UNKNOWN" }] });
+    await expect(pool.query<{ acceptance_status: string; delivery_status: string }>("select acceptance_status, delivery_status from sms_kit.send_message where id = '00000000-0000-4000-8000-000000000012'"))
+      .resolves.toMatchObject({ rows: [{ acceptance_status: "unknown", delivery_status: "delivered" }] });
   }, 60_000);
 
   it("rejects an arbitrary checksum in an old v2 migration ledger", async () => {
     const { pool } = postgres;
-    await pool.query(await readFile(previousSchemaFixture, "utf8"));
+    await pool.query(await readFile(previousV2SchemaFixture, "utf8"));
     await pool.query("update sms_kit.schema_migration set checksum = 'tampered' where version = 2");
     await expect(migrateSmsKit(pool)).rejects.toThrow("checksum");
   }, 60_000);
