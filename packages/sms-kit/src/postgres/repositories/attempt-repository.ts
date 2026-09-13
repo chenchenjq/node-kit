@@ -46,7 +46,7 @@ export class PgAttemptRepository implements AttemptRepository {
     const { rows } = await db(this.pool, tx).query<AttemptRow>(
       `update sms_kit.send_attempt a set status = $1, provider_request_id = $2, provider_code = $3, error_code = $4, latency_ms = $5, occurred_at = $6
         from sms_kit.send_message m where a.message_id = m.id and m.tenant_id = $7 and a.dispatch_token = $8
-          and (a.status = 'started' or (a.status = 'unknown' and $1 = 'accepted'))
+          and (a.status = 'started' or (a.status = 'unknown' and $1 in ('accepted', 'rejected')))
       returning a.id, m.tenant_id, a.message_id, a.attempt_no, a.status, a.dispatch_mode, a.dispatch_token, a.lease_token, a.dispatch_marked_at, a.provider_request_id, a.provider_code, a.error_code, a.latency_ms, a.occurred_at`,
       [input.status, input.providerRequestId ?? null, input.providerCode ?? null, input.errorCode ?? null, input.latencyMs ?? null, input.occurredAt, input.tenantId, input.dispatchToken],
     );

@@ -471,6 +471,8 @@ export interface ChallengeRepository {
 }
 
 export interface RateLimitRepository {
+  /** Acquires a transaction-scoped stable lock for one tenant/phone/purpose policy stream. */
+  lock(input: Readonly<{ tenantId: TenantId; scopeHash: string }>, tx: SmsTransaction): Promise<void>;
   increment(input: Readonly<{
     tenantId: TenantId;
     scope: "phone_purpose" | "ip_purpose" | "global";

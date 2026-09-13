@@ -45,7 +45,7 @@ function fixture(circuitOpen = false, templateType: Template["templateType"] = "
       holdBudget: async (input: any) => { const held = { messageId: input.messageId, state: "held" }; reservations.push(held); return held; },
       releaseBudget: async () => true,
     },
-    rateLimits: { increment: async () => 1 },
+    rateLimits: { lock: async () => undefined, increment: async () => 1, countSince: async () => 1 },
     attempts: {
       createStarted: async (input: any) => { const attempt = { ...input, id: "attempt-1", dispatchToken: "dispatch-1", status: "started" }; attempts.push(attempt); return attempt; },
       completeByDispatchToken: async () => attempts[0],

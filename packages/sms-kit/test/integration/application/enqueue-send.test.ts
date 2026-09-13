@@ -23,8 +23,12 @@ describe("queued notification enqueue", () => {
     store = new PgSmsStore(pool);
     const signature = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "sign-queued", changeType: "new", checksum: "queued-signature", resourceType: "signature", snapshot: { kind: "signature", externalName: "Queued", externalStatus: "approved", externalType: "text" } });
     const template = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "template-queued", changeType: "new", checksum: "queued-template", resourceType: "template", signatureExternalKey: "sign-queued", templateKey: "order.shipped", purpose: "notification", snapshot: { kind: "template", externalCode: "SMS_QUEUED", externalName: "Queued", externalStatus: "approved", templateType: "notification", variableNames: ["orderNo"] } });
-    const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
+    const otpTemplate = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "template-otp", changeType: "new", checksum: "otp-template", resourceType: "template", signatureExternalKey: "sign-queued", templateKey: "otp.login", purpose: "verification", snapshot: { kind: "template", externalCode: "SMS_OTP", externalName: "OTP", externalStatus: "approved", templateType: "verification", variableNames: ["code"] } });
+    const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template, otpTemplate] });
     await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    const config = await store.config.update({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", enabled: true, expectedVersion: 0 });
+    await store.config.recordConnectionTest({ status: "succeeded", summary: {}, testedAt: new Date("2026-09-13T00:00:00.000Z"), expectedVersion: config.version });
+    await store.policy.get();
   }, 120_000);
 
   afterAll(async () => stop?.());
@@ -75,5 +79,45 @@ describe("queued notification enqueue", () => {
       return message;
     });
     expect(accepted).toMatchObject({ acceptanceStatus: "accepted", providerBizId: "biz-late" });
+  });
+
+  it("serializes cross-midnight concurrent OTP cooldowns before either provider dispatch", async () => {
+    let sends = 0;
+    const makeService = (now: Date) => new SendService({
+      store, provider: { send: async () => { sends += 1; return { kind: "accepted" as const, bizId: `biz-${sends}`, requestId: `req-${sends}` }; } } as never,
+      phoneProtector: { protect: async () => ({ ciphertext: "phone", keyId: "phone-k1", lookupHash: "lock-phone", last4: "0000", masked: "138****0000" }) } as never,
+      payloadProtector: { seal: async () => ({ ciphertext: "params", keyId: "params-k1" }) } as never,
+      clock: { now: () => now }, ids: { next: () => crypto.randomUUID(), messageId: () => crypto.randomUUID() as never }, events: { emit: () => undefined }, providerTimeoutMs: 1_000,
+    });
+    const base = { tenantId: tenantA, templateKey: "otp.login", phone: "13800138000", variables: { code: "123456" }, purpose: "verification" };
+    const results = await Promise.allSettled([
+      makeService(new Date("2026-09-13T23:59:59.999Z")).sendOtpNow({ ...base, idempotencyKey: "cross-midnight-a" }),
+      makeService(new Date("2026-09-14T00:00:00.001Z")).sendOtpNow({ ...base, idempotencyKey: "cross-midnight-b" }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected" && (result.reason as { code?: string }).code === "RATE_LIMITED")).toHaveLength(1);
+    expect(sends).toBe(1);
+  });
+
+  it("releases the held budget when a same-token recovered unknown is authoritatively rejected", async () => {
+    const now = new Date("2026-09-15T00:00:00.000Z");
+    const service = new SendService({
+      store, provider: { send: async () => ({ kind: "unknown" as const, code: "ACCEPTANCE_UNKNOWN" as const }) } as never,
+      phoneProtector: { protect: async () => ({ ciphertext: "phone", keyId: "phone-k1", lookupHash: "reject-phone", last4: "0000", masked: "138****0000" }) } as never,
+      payloadProtector: { seal: async () => ({ ciphertext: "params", keyId: "params-k1" }) } as never,
+      clock: { now: () => now }, ids: { next: () => crypto.randomUUID(), messageId: () => crypto.randomUUID() as never }, events: { emit: () => undefined }, providerTimeoutMs: 1_000,
+    });
+    await expect(service.sendOtpNow({ tenantId: tenantB, templateKey: "otp.login", phone: "13900139000", variables: { code: "654321" }, purpose: "verification", idempotencyKey: "recovered-reject" })).rejects.toMatchObject({ code: "ACCEPTANCE_UNKNOWN" });
+    const message = (await store.messages.list({ tenantId: tenantB, page: 1, pageSize: 10 })).items[0]!;
+    const [attempt] = await store.attempts.listExpiredStarted({ tenantId: tenantB, before: new Date(now.getTime() + 1), limit: 10 });
+    // Recovery retains the dispatch token; authoritative same-dispatch evidence may resolve it once.
+    const token = attempt?.dispatchToken ?? (await pool.query<{ dispatch_token: string }>("select dispatch_token from sms_kit.send_attempt where message_id = $1", [message.id])).rows[0]!.dispatch_token;
+    await store.transaction(async (tx) => {
+      await store.messages.completeAcceptance({ tenantId: tenantB, dispatchToken: token, status: "rejected", evidence: "same-dispatch-response", finalErrorCode: "isv.MOBILE_NUMBER_ILLEGAL", occurredAt: now }, tx);
+      await store.attempts.completeByDispatchToken({ tenantId: tenantB, dispatchToken: token, status: "rejected", providerCode: "isv.MOBILE_NUMBER_ILLEGAL", occurredAt: now }, tx);
+      await store.policy.releaseBudget({ tenantId: tenantB, messageId: message.id }, tx);
+    });
+    await expect(pool.query("select state from sms_kit.send_budget_reservation where message_id = $1", [message.id])).resolves.toMatchObject({ rows: [{ state: "released" }] });
+    await expect(store.messages.get({ tenantId: tenantB, id: message.id })).resolves.toMatchObject({ acceptanceStatus: "rejected" });
   });
 });
