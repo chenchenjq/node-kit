@@ -1,4 +1,5 @@
 import * as DysmsapiSdk from "@alicloud/dysmsapi20170525";
+import { RuntimeOptions } from "@alicloud/tea-util";
 import {
   QuerySendDetailsRequest,
   QuerySmsSignListRequest,
@@ -57,7 +58,8 @@ class AliyunSdkApi implements AliyunApi {
   }
 
   async sendSms(input: AliyunSendInput): Promise<AliyunSendOutput> {
-    const response = await this.client.sendSms(new SendSmsRequest(input));
+    const { timeoutMs = 10_000, ...request } = input;
+    const response = await this.client.sendSmsWithOptions(new SendSmsRequest(request), new RuntimeOptions({ readTimeout: timeoutMs, connectTimeout: timeoutMs, autoretry: false, maxAttempts: 1 }));
     return response.body ?? {};
   }
 

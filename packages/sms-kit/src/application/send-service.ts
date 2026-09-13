@@ -9,6 +9,7 @@ import type { Clock, EventSink, IdGenerator } from "../ports/runtime.js";
 import type { MessagePayloadProtector, PhoneNumberProtector } from "../ports/security.js";
 import type { AttemptRepository, Message, SmsStore, Template } from "../ports/store.js";
 import { enforcePhoneSendPolicy } from "./send-policy.js";
+import { withProviderTimeout } from "../ports/provider-timeout.js";
 
 export type SendInput = Readonly<{
   /** Supplied by a trusted host-authentication boundary; never copied from an HTTP body. */
@@ -119,7 +120,7 @@ export class SendService {
     const startedAt = this.dependencies.clock.now();
     let outcome: Awaited<ReturnType<SmsProvider["send"]>>;
     try {
-      outcome = await this.dependencies.provider.send({ ...auth, phoneNumber: phone, signatureName: target.signatureName, templateCode: target.template.externalCode, templateParams: input.variables, outId: prepared.message.id, timeoutMs });
+      outcome = await withProviderTimeout(() => this.dependencies.provider.send({ ...auth, phoneNumber: phone, signatureName: target.signatureName, templateCode: target.template.externalCode, templateParams: input.variables, outId: prepared.message.id, timeoutMs }), timeoutMs);
     } catch {
       outcome = { kind: "unknown", code: "ACCEPTANCE_UNKNOWN" };
     }
@@ -134,7 +135,7 @@ export class SendService {
       await this.complete(input.tenantId, prepared.dispatchToken, "unknown", occurredAt, { errorCode: outcome.code, latencyMs });
       throw new SmsKitError("ACCEPTANCE_UNKNOWN", "provider acceptance is unknown");
     }
-    await this.complete(input.tenantId, prepared.dispatchToken, "rejected", occurredAt, { ...(outcome.requestId === undefined ? {} : { providerRequestId: outcome.requestId }), providerCode: outcome.code, errorCode: outcome.code, latencyMs }, !outcome.retryable);
+    await this.complete(input.tenantId, prepared.dispatchToken, "rejected", occurredAt, { ...(outcome.requestId === undefined ? {} : { providerRequestId: outcome.requestId }), providerCode: outcome.code, errorCode: outcome.code, latencyMs }, true);
     throw new SmsKitError(outcome.retryable ? "PROVIDER_THROTTLED" : "PROVIDER_REJECTED", "provider rejected the SMS", outcome.retryable, undefined, outcome.code);
   }
 
@@ -155,6 +156,7 @@ export class SendService {
     return this.dependencies.store.transaction(async (tx) => {
       const message = await this.dependencies.store.messages.completeAcceptance({ tenantId, dispatchToken, status, evidence: "same-dispatch-response", ...(detail.providerBizId === undefined ? {} : { providerBizId: detail.providerBizId }), ...(detail.providerRequestId === undefined ? {} : { providerRequestId: detail.providerRequestId }), ...(detail.errorCode === undefined ? {} : { finalErrorCode: detail.errorCode }), occurredAt }, tx);
       await attempts.completeByDispatchToken({ tenantId, dispatchToken, status, ...(detail.providerRequestId === undefined ? {} : { providerRequestId: detail.providerRequestId }), ...(detail.providerCode === undefined ? {} : { providerCode: detail.providerCode }), ...(detail.errorCode === undefined ? {} : { errorCode: detail.errorCode }), latencyMs: detail.latencyMs, occurredAt }, tx);
+      if (status === "accepted" || status === "unknown") await this.dependencies.store.jobs.ensureReconcile({ tenantId, messageId: message.id, availableAt: occurredAt }, tx);
       if (releaseBudget) await (this.dependencies.policy ?? this.dependencies.store.policy).releaseBudget({ tenantId, messageId: message.id }, tx);
       return message;
     });

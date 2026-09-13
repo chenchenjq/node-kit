@@ -50,6 +50,7 @@ function fixture(circuitOpen = false, templateType: Template["templateType"] = "
       createStarted: async (input: any) => { const attempt = { ...input, id: "attempt-1", dispatchToken: "dispatch-1", status: "started" }; attempts.push(attempt); return attempt; },
       completeByDispatchToken: async () => attempts[0],
     },
+    jobs: { ensureReconcile: async () => undefined },
   };
   const service = new SendService({
     store: store as never,

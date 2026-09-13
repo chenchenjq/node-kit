@@ -53,6 +53,7 @@ export type AliyunSendInput = Readonly<{
   templateCode: string;
   templateParam: string;
   outId: string;
+  timeoutMs?: number;
 }>;
 
 /** The narrow boundary that keeps the Alibaba SDK outside the core provider port. */

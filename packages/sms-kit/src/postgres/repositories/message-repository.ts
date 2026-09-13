@@ -49,6 +49,16 @@ const selectMessageFromJoin = selectMessage.split(", ").map((field) => `m.${fiel
 export class PgMessageRepository implements MessageRepository {
   constructor(private readonly pool: Pool) {}
 
+  async rejectUndispatched(input: Parameters<MessageRepository["rejectUndispatched"]>[0], tx: SmsTransaction): Promise<void> {
+    const db = queryable(this.pool, tx);
+    const changed = await db.query(`update sms_kit.send_message m set acceptance_status = 'rejected', delivery_status = 'not_applicable', final_error_code = $3,
+      finalized_at = $4, render_params_ciphertext = null, render_params_key_id = null, version = version + 1, updated_at = now()
+      where tenant_id = $1 and id = $2 and acceptance_status = 'pending'
+        and not exists (select 1 from sms_kit.send_attempt a where a.message_id = m.id and a.status <> 'rejected')`, [input.tenantId, input.id, input.errorCode, input.occurredAt]);
+    if (changed.rowCount !== 1) throw new SmsKitError("CONCURRENT_MODIFICATION", "message cannot be rejected without dispatch evidence");
+    await markMessageStatsDirty(db, input.tenantId, input.id);
+  }
+
   async createWithSendJob(input: CreateMessageInput, tx?: SmsTransaction): Promise<{ message: Message; created: boolean }> {
     return transaction(this.pool, tx, async (db) => {
       const inserted = await db.query<MessageRow>(
@@ -85,7 +95,7 @@ export class PgMessageRepository implements MessageRepository {
   }
 
   async get(input: Readonly<{ tenantId: Message["tenantId"]; id: Message["id"] }>, tx?: SmsTransaction): Promise<Message | undefined> {
-    const { rows } = await queryable(this.pool, tx).query<MessageRow>(`select ${selectMessage} from sms_kit.send_message where tenant_id = $1 and id = $2`, [input.tenantId, input.id]);
+    const { rows } = await queryable(this.pool, tx).query<MessageRow>(`select ${selectMessage} from sms_kit.send_message where tenant_id = $1 and id = $2${tx === undefined ? "" : " for update"}`, [input.tenantId, input.id]);
     return rows[0] === undefined ? undefined : message(rows[0]);
   }
 

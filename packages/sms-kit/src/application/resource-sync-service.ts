@@ -178,6 +178,15 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       }
       selectionsByExternalKey.set(selection.externalKey, selection);
     }
+    // Imported resources remain observable even when administrators select no new imports.
+    for (const remote of templates) {
+      const local = localTemplatesByCode.get(remote.externalCode);
+      if (local === undefined || selectionsByExternalKey.has(remote.externalKey)) continue;
+      if (changedTemplate(remote, { ...local, variableNames: local.variables.map(({ name }) => name) }) === "unchanged") continue;
+      const signature = localSignaturesById.get(local.signatureId);
+      if (signature === undefined) throw new SmsKitError("STORAGE_FAILURE", "template has no local signature", true);
+      selectionsByExternalKey.set(remote.externalKey, { externalKey: remote.externalKey, signatureExternalKey: signature.externalKey, templateKey: local.templateKey, purpose: local.purpose });
+    }
 
     const resources: ResourceSyncCandidate[] = [];
     for (const signature of signatures) {

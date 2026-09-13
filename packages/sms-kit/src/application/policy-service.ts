@@ -29,12 +29,13 @@ export function validateVerificationPolicy(input: VerificationPolicyUpdate): voi
   if (!isIntegerInRange(input.otpTtlSeconds, 60, 900)) invalid("otpTtlSeconds");
   if (!isIntegerInRange(input.otpMaxAttempts, 1, 10)) invalid("otpMaxAttempts");
   if (!isIntegerInRange(input.proofTtlSeconds, 30, 900)) invalid("proofTtlSeconds");
-  if (!isIntegerInRange(input.phoneMinIntervalSeconds, 0, 86_400)) invalid("phoneMinIntervalSeconds");
-  if (!isIntegerInRange(input.phoneHourlyLimit, 1, 100_000)) invalid("phoneHourlyLimit");
-  if (!isIntegerInRange(input.phoneDailyLimit, input.phoneHourlyLimit, 1_000_000)) invalid("phoneDailyLimit");
-  if (!isIntegerInRange(input.ipWindowSeconds, 1, 86_400)) invalid("ipWindowSeconds");
-  if (!isIntegerInRange(input.ipWindowLimit, 1, 1_000_000)) invalid("ipWindowLimit");
-  if (input.systemDailyBudget !== null && !isIntegerInRange(input.systemDailyBudget, 1, 10_000_000)) invalid("systemDailyBudget");
+  if (!isIntegerInRange(input.phoneMinIntervalSeconds, 1, 3_600)) invalid("phoneMinIntervalSeconds");
+  if (!isIntegerInRange(input.phoneHourlyLimit, 1, 2_147_483_647)) invalid("phoneHourlyLimit");
+  if (!isIntegerInRange(input.phoneDailyLimit, input.phoneHourlyLimit, 2_147_483_647)) invalid("phoneDailyLimit");
+  if (!isIntegerInRange(input.ipWindowSeconds, 60, 86_400)) invalid("ipWindowSeconds");
+  if (!isIntegerInRange(input.ipWindowLimit, 1, 2_147_483_647)) invalid("ipWindowLimit");
+  if (input.systemDailyBudget !== null && !isIntegerInRange(input.systemDailyBudget, 1, 2_147_483_647)) invalid("systemDailyBudget");
+  if (typeof input.circuitOpen !== "boolean") invalid("circuitOpen");
   if (input.circuitOpen && (typeof input.circuitReason !== "string" || input.circuitReason.trim().length === 0)) invalid("circuitReason");
   if (!input.circuitOpen && input.circuitReason !== undefined) invalid("circuitReason");
 }

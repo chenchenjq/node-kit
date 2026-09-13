@@ -52,6 +52,11 @@ function safeSnapshot(candidate: ResourceSyncCandidate): object {
 export class PgResourceRepository implements ResourceRepository {
   constructor(private readonly pool: Pool) {}
 
+  async findSignatureById(input: Readonly<{ id: string }>, tx?: SmsTransaction): Promise<Signature | undefined> {
+    const { rows } = await queryable(this.pool, tx).query(`select id, external_key, external_name, external_status, external_type, enabled, version from sms_kit.signature where id = $1${tx === undefined ? "" : " for share"}`, [input.id]);
+    return rows[0] === undefined ? undefined : signature(rows[0]);
+  }
+
   async listSignatures(input: Readonly<{ page: number; pageSize: number }>, tx?: SmsTransaction): Promise<{ items: readonly Signature[]; total: number }> {
     const db = queryable(this.pool, tx);
     const [items, count] = await Promise.all([
@@ -71,7 +76,7 @@ export class PgResourceRepository implements ResourceRepository {
   }
 
   async findTemplateByKey(input: Readonly<{ templateKey: string }>, tx?: SmsTransaction): Promise<Template | undefined> {
-    const { rows } = await queryable(this.pool, tx).query("select id, signature_id, template_key, external_code, external_name, external_status, template_type, purpose, variable_schema, enabled, version from sms_kit.template where template_key = $1", [input.templateKey]);
+    const { rows } = await queryable(this.pool, tx).query(`select id, signature_id, template_key, external_code, external_name, external_status, template_type, purpose, variable_schema, enabled, version from sms_kit.template where template_key = $1${tx === undefined ? "" : " for share"}`, [input.templateKey]);
     return rows[0] === undefined ? undefined : template(rows[0]);
   }
 
@@ -115,7 +120,11 @@ export class PgResourceRepository implements ResourceRepository {
             continue;
           }
           if (!isCloudApproved(snapshot.externalStatus)) {
-            throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
+            const updated = await db.query("update sms_kit.signature set external_status = $2, enabled = false, last_synced_at = now(), version = version + 1, updated_at = now() where external_key = $1 returning id", [candidate.external_key, snapshot.externalStatus]);
+            if (updated.rowCount !== 1) throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
+            await db.query("update sms_kit.template set enabled = false, version = version + 1, updated_at = now() where signature_id = $1", [updated.rows[0].id]);
+            await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
+            continue;
           }
           await db.query(
             `insert into sms_kit.signature (id, external_key, external_name, external_status, external_type, imported_at, last_synced_at, created_at, updated_at)
@@ -135,12 +144,24 @@ export class PgResourceRepository implements ResourceRepository {
             continue;
           }
           if (!isCloudApproved(snapshot.externalStatus)) {
-            throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
+            const updated = await db.query("update sms_kit.template set external_status = $2, enabled = false, last_synced_at = now(), version = version + 1, updated_at = now() where external_code = $1", [snapshot.externalCode, snapshot.externalStatus]);
+            if (updated.rowCount !== 1) throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
+            await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
+            continue;
           }
           const signature = await db.query<{ id: string; enabled: boolean; external_status: string }>("select id, enabled, external_status from sms_kit.signature where external_key = $1", [snapshot.signatureExternalKey]);
           if (signature.rows[0] === undefined || !isUsableSignature({
             enabled: signature.rows[0].enabled, externalStatus: signature.rows[0].external_status,
           })) {
+            // Refreshing an already imported child must not undo the parent's revocation.
+            const updated = signature.rows[0] === undefined ? undefined : await db.query(`update sms_kit.template
+              set external_name = $3, external_status = $4, template_type = $5, variable_schema = $6::jsonb,
+                  enabled = false, last_synced_at = now(), version = version + 1, updated_at = now()
+              where external_code = $1 and signature_id = $2`, [snapshot.externalCode, signature.rows[0].id, snapshot.externalName, snapshot.externalStatus, snapshot.templateType, JSON.stringify(snapshot.variableNames)]);
+            if (updated?.rowCount === 1) {
+              await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
+              continue;
+            }
             throw new SmsKitError("CONFIG_INVALID", "template preview has no usable signature");
           }
           await db.query(
