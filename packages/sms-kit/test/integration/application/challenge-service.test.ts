@@ -21,7 +21,11 @@ describe("ChallengeService", () => {
   let now = new Date("2026-09-13T02:00:00.000Z");
   let providerOutcome: "accepted" | "rejected" | "throttled" | "unknown" | "deferred" = "accepted";
   let deferredStarted: (() => void) | undefined;
-  let resolveDeferred: ((result: { kind: "accepted"; bizId: string; requestId: string }) => void) | undefined;
+  let resolveDeferred: ((result:
+    | { kind: "accepted"; bizId: string; requestId: string }
+    | { kind: "rejected"; code: string; retryable: boolean }
+    | { kind: "unknown"; code: "ACCEPTANCE_UNKNOWN" }
+  ) => void) | undefined;
   let sends = 0;
 
   beforeAll(async () => {
@@ -51,7 +55,11 @@ describe("ChallengeService", () => {
               ? { kind: "rejected" as const, code: "isv.BUSINESS_LIMIT_CONTROL", retryable: true }
             : providerOutcome === "unknown"
               ? { kind: "unknown" as const, code: "ACCEPTANCE_UNKNOWN" as const }
-              : new Promise<{ kind: "accepted"; bizId: string; requestId: string }>((resolve) => {
+              : new Promise<
+                | { kind: "accepted"; bizId: string; requestId: string }
+                | { kind: "rejected"; code: string; retryable: boolean }
+                | { kind: "unknown"; code: "ACCEPTANCE_UNKNOWN" }
+              >((resolve) => {
                 resolveDeferred = resolve;
                 deferredStarted?.();
               });
@@ -71,6 +79,7 @@ describe("ChallengeService", () => {
       clock,
       ids: { next: () => crypto.randomUUID() },
       otpGenerator: { generate: () => "123456" },
+      pendingReplayWaitMs: 250,
     });
   }, 120_000);
 
@@ -155,18 +164,69 @@ describe("ChallengeService", () => {
     expect((await pool.query("select terminal_error_code from sms_kit.otp_challenge where subject_id = 'user-7'")).rows).toEqual([{ terminal_error_code: "ACCEPTANCE_UNKNOWN" }]);
   });
 
-  it("does not expose a deferred direct-delivery replay for verification before acceptance", async () => {
+  it("waits for a deferred accepted direct-delivery replay before exposing its challenge", async () => {
     providerOutcome = "deferred";
     const input = { tenantId: tenantA, subjectId: "user-8", action: "password.change" as const, phone: "13800138007", idempotencyKey: "user-8:password.change:1" };
     const started = new Promise<void>((resolve) => { deferredStarted = resolve; });
     const first = service.issue(input);
     await started;
-    const replay = await service.issue(input);
+    const replay = service.issue(input);
+    let replaySettled = false;
+    void replay.finally(() => { replaySettled = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(replaySettled).toBe(false);
 
-    await expect(service.verify({ tenantId: tenantA, challengeId: replay.id, code: "123456" })).rejects.toMatchObject({ code: "ACCEPTANCE_UNKNOWN" });
     resolveDeferred?.({ kind: "accepted", bizId: "biz-deferred", requestId: "req-deferred" });
-    await expect(first).resolves.toEqual(replay);
-    await expect(service.verify({ tenantId: tenantA, challengeId: replay.id, code: "123456" })).resolves.toMatchObject({ proof: expect.any(String) });
+    const [firstResult, replayResult] = await Promise.all([first, replay]);
+    expect(replayResult).toEqual(firstResult);
+    await expect(service.verify({ tenantId: tenantA, challengeId: replayResult.id, code: "123456" })).resolves.toMatchObject({ proof: expect.any(String) });
+    providerOutcome = "accepted";
+    deferredStarted = undefined;
+    resolveDeferred = undefined;
+  });
+
+  it.each([
+    ["rejected", { kind: "rejected" as const, code: "isv.BUSINESS_LIMIT_CONTROL", retryable: false }, "PROVIDER_REJECTED"],
+    ["unknown", { kind: "unknown" as const, code: "ACCEPTANCE_UNKNOWN" as const }, "ACCEPTANCE_UNKNOWN"],
+  ])("waits for a deferred %s direct-delivery replay and returns its exact terminal outcome", async (_name, deferredResult, errorCode) => {
+    providerOutcome = "deferred";
+    const input = { tenantId: tenantA, subjectId: `user-deferred-${errorCode}`, action: "password.change" as const, phone: errorCode === "PROVIDER_REJECTED" ? "13800138012" : "13800138013", idempotencyKey: `user-deferred:${errorCode}` };
+    const started = new Promise<void>((resolve) => { deferredStarted = resolve; });
+    const first = service.issue(input).then(
+      () => { throw new Error("expected direct delivery terminal outcome"); },
+      (error: unknown) => error as { toJSON(): unknown },
+    );
+    await started;
+    const replay = service.issue(input).then(
+      () => { throw new Error("expected replay terminal outcome"); },
+      (error: unknown) => error as { toJSON(): unknown },
+    );
+    resolveDeferred?.(deferredResult);
+    const [firstError, replayError] = await Promise.all([first, replay]);
+
+    expect(replayError.toJSON()).toEqual(firstError.toJSON());
+    expect(replayError.toJSON()).toMatchObject({ code: errorCode });
+    providerOutcome = "accepted";
+    deferredStarted = undefined;
+    resolveDeferred = undefined;
+  });
+
+  it("recovers a crashed pending direct dispatch as acceptance-unknown after the bounded replay wait", async () => {
+    providerOutcome = "deferred";
+    const input = { tenantId: tenantA, subjectId: "user-deferred-recovery", action: "password.change" as const, phone: "13800138014", idempotencyKey: "user-deferred:recovery" };
+    const started = new Promise<void>((resolve) => { deferredStarted = resolve; });
+    const first = service.issue(input).then(
+      () => { throw new Error("recovered pending dispatch must not become verifiable"); },
+      (error: unknown) => error as { toJSON(): unknown },
+    );
+    await started;
+    const replay = await service.issue(input).then(
+      () => { throw new Error("stale pending replay must not succeed"); },
+      (error: unknown) => error as { toJSON(): unknown },
+    );
+    expect(replay.toJSON()).toMatchObject({ code: "ACCEPTANCE_UNKNOWN" });
+    resolveDeferred?.({ kind: "accepted", bizId: "biz-late", requestId: "req-late" });
+    await expect(first).resolves.toMatchObject({ toJSON: expect.any(Function) });
     providerOutcome = "accepted";
     deferredStarted = undefined;
     resolveDeferred = undefined;

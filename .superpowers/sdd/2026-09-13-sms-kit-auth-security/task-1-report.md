@@ -20,6 +20,12 @@
 - Loaded one selected policy snapshot for challenge enforcement and challenge recording, eliminating a second policy read.
 - Updated the store contract’s already-verified proof fixture to explicitly model accepted delivery.
 
+## Review remediation (round 2)
+
+- Replays of a pending direct dispatch now poll the persisted challenge acceptance state and return the original accepted, rejected, or unknown outcome; the transaction advisory lock is released before the provider network call.
+- Pending replay recovery is bounded (30 seconds in production). A replay that still observes `pending` then locks the challenge row and atomically records `ACCEPTANCE_UNKNOWN`; a late provider response observes that terminal outcome instead of making the challenge verifiable.
+- Added deterministic PostgreSQL deferred-provider regressions for accepted, rejected, unknown, and stale/crashed-pending replay cases.
+
 ## TDD evidence
 
 - RED: OTP unit test failed because `otp-generator` was absent.
@@ -36,3 +42,4 @@
 - `npm run test:integration --workspace sms-kit -- store-contract.test.ts` — 21 tests passed.
 - `npm test --workspace sms-kit` — 19 files, 108 tests passed.
 - `npm run build --workspace sms-kit` — passed.
+- `npm run test:integration --workspace sms-kit -- challenge-service.test.ts` — 15 tests passed (including deferred terminal-outcome replay and bounded crash recovery).

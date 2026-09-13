@@ -37,6 +37,8 @@ export type ChallengeServiceDependencies = Readonly<{
   clock: Clock;
   ids: Pick<IdGenerator, "next">;
   otpGenerator?: Pick<OtpGenerator, "generate">;
+  /** Bounds a replay's wait for the original direct-dispatch owner; timeout is recovered as acceptance-unknown. */
+  pendingReplayWaitMs?: number;
 }>;
 
 type ChallengePurpose = Readonly<{ challenge: "password_change" | "step_up"; send: "auth.password_change" | "auth.step_up" }>;
@@ -69,12 +71,19 @@ function proofBinding(tenantId: TenantId, subjectId: string, action: string, pro
   return `${tenantId}\u0000${subjectId}\u0000${action}\u0000${proof}`;
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Issues one direct-delivery OTP challenge and verifies it under a transaction-scoped row lock. */
 export class ChallengeService {
   private readonly otpGenerator: Pick<OtpGenerator, "generate">;
+  private readonly pendingReplayWaitMs: number;
 
   constructor(private readonly dependencies: ChallengeServiceDependencies) {
     this.otpGenerator = dependencies.otpGenerator ?? new OtpGenerator();
+    this.pendingReplayWaitMs = dependencies.pendingReplayWaitMs ?? 30_000;
+    if (!Number.isSafeInteger(this.pendingReplayWaitMs) || this.pendingReplayWaitMs < 1) throw new SmsKitError("CONFIG_INVALID", "pending replay wait must be positive");
   }
 
   async issue(input: IssueChallengeInput): Promise<IssueChallengeResult> {
@@ -122,7 +131,13 @@ export class ChallengeService {
     });
     const priorError = terminalError(created.challenge);
     if (priorError !== undefined) throw priorError;
-    if (!created.created || created.code === undefined) return { id: created.challenge.id, expiresAt: created.challenge.expiresAt };
+    if (!created.created || created.code === undefined) {
+      const resolved = await this.waitForDirectOutcome(created.challenge);
+      const resolvedError = terminalError(resolved);
+      if (resolvedError !== undefined) throw resolvedError;
+      if (resolved.deliveryAcceptanceStatus !== "accepted") throw new SmsKitError("ACCEPTANCE_UNKNOWN", "provider acceptance is unknown; request a fresh challenge");
+      return { id: resolved.id, expiresAt: resolved.expiresAt };
+    }
 
     try {
       const message = await this.dependencies.sendService.sendOtpNow({
@@ -130,9 +145,12 @@ export class ChallengeService {
         purpose: created.sendPurpose, idempotencyKey: `challenge:${created.challenge.id}`,
       });
       if (message.acceptanceStatus === "accepted") {
-        await this.dependencies.store.transaction((tx) => this.dependencies.store.challenges.markDeliveryAcceptance({
+        const accepted = await this.dependencies.store.transaction((tx) => this.dependencies.store.challenges.markDeliveryAcceptance({
           tenantId: input.tenantId, id: created.challenge.id, status: "accepted",
         }, tx));
+        const acceptedError = terminalError(accepted);
+        if (acceptedError !== undefined) throw acceptedError;
+        if (accepted.deliveryAcceptanceStatus !== "accepted") throw new SmsKitError("ACCEPTANCE_UNKNOWN", "provider acceptance is unknown; request a fresh challenge");
       }
     } catch (error) {
       const terminalErrorCode = safeTerminalCode(error);
@@ -143,6 +161,32 @@ export class ChallengeService {
       throw terminalError(invalidated)!;
     }
     return { id: created.challenge.id, expiresAt: created.challenge.expiresAt };
+  }
+
+  /**
+   * The first caller owns network dispatch. Replays never issue another request: they poll the
+   * persisted acceptance state without a transaction lock, then atomically turn a stale pending
+   * dispatch into acceptance-unknown after the bounded recovery wait.
+   */
+  private async waitForDirectOutcome(initial: Challenge): Promise<Challenge> {
+    let current = initial;
+    const deadline = Date.now() + this.pendingReplayWaitMs;
+    while (current.deliveryAcceptanceStatus === "pending" && current.invalidatedAt === undefined && Date.now() < deadline) {
+      await wait(Math.min(25, Math.max(1, deadline - Date.now())));
+      const refreshed = await this.dependencies.store.challenges.get({ tenantId: current.tenantId, id: current.id });
+      if (refreshed === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "challenge disappeared while waiting for delivery");
+      current = refreshed;
+    }
+    if (current.deliveryAcceptanceStatus !== "pending" || current.invalidatedAt !== undefined) return current;
+    return this.dependencies.store.transaction(async (tx) => {
+      const locked = await this.dependencies.store.challenges.getForUpdate({ tenantId: current.tenantId, id: current.id }, tx);
+      if (locked === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "challenge disappeared while recovering delivery");
+      if (locked.deliveryAcceptanceStatus !== "pending" || locked.invalidatedAt !== undefined) return locked;
+      return this.dependencies.store.challenges.invalidate({
+        tenantId: locked.tenantId, id: locked.id, invalidatedAt: this.dependencies.clock.now(),
+        terminalErrorCode: "ACCEPTANCE_UNKNOWN", deliveryAcceptanceStatus: "unknown",
+      }, tx);
+    });
   }
 
   async verify(input: VerifyChallengeInput): Promise<VerifyChallengeResult> {
