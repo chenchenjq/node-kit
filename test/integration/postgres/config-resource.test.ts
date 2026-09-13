@@ -86,4 +86,33 @@ describe("PostgreSQL configuration and resources", () => {
     })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
     expect((await store.resources.listSignatures({ page: 1, pageSize: 10 })).total).toBe(0);
   });
+
+  it("imports a template through its signature identity and preserves local template controls on refresh", async () => {
+    const signature = {
+      id: randomUUID(), externalKey: "signature:template-owner", changeType: "new", checksum: "signature-template",
+      resourceType: "signature", snapshot: { kind: "signature", externalName: "Template owner", externalStatus: "approved", externalType: "text" },
+    };
+    const template = {
+      id: randomUUID(), externalKey: "provider-template:42", changeType: "new", checksum: "template-v1",
+      resourceType: "template", signatureExternalKey: "signature:template-owner", templateKey: "notice.stable", purpose: "shipping",
+      snapshot: { kind: "template", externalCode: "SMS_42", externalName: "Shipping", externalStatus: "approved", templateType: "notification", variableNames: ["order"] },
+    };
+    const preview = await store.resources.createSyncPreview({
+      id: randomUUID(), actorId: "operator-3", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] as never,
+    });
+    await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+    const first = await store.resources.findTemplateByKey({ templateKey: "notice.stable" });
+    expect(first?.signatureId).toBeDefined();
+    expect(first?.purpose).toBe("shipping");
+    const refreshedPreview = await store.resources.createSyncPreview({
+      id: randomUUID(), actorId: "operator-5", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [{
+        ...template, id: randomUUID(), checksum: "template-v3", changeType: "changed", templateKey: "illegal.change", purpose: "illegal-change",
+        snapshot: { ...template.snapshot, externalName: "Shipping refreshed" },
+      }] as never,
+    });
+    await store.resources.commitSync({ syncId: refreshedPreview.id, candidates: refreshedPreview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+    const refreshed = await store.resources.findTemplateByKey({ templateKey: "notice.stable" });
+    expect(refreshed?.purpose).toBe("shipping");
+    expect((await store.resources.findTemplateByKey({ templateKey: "illegal.change" }))).toBeUndefined();
+  });
 });

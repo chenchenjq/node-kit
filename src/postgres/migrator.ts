@@ -10,6 +10,7 @@ type MigrationFile = Readonly<{ version: number; name: string; url: URL }>;
 const migrationFiles: readonly MigrationFile[] = [
   { version: 1, name: "0001_initial.sql", url: new URL("./migrations/0001_initial.sql", import.meta.url) },
   { version: 2, name: "0002_reliability_policy.sql", url: new URL("./migrations/0002_reliability_policy.sql", import.meta.url) },
+  { version: 3, name: "0003_receipt_ownership.sql", url: new URL("./migrations/0003_receipt_ownership.sql", import.meta.url) },
 ];
 
 const bootstrapDdl = `

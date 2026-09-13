@@ -16,6 +16,7 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
   let store: PgSmsStore;
   let stop: (() => Promise<void>) | undefined;
   let templateId: string;
+  let pool: Awaited<ReturnType<typeof startPostgres>>["pool"];
 
   function messageFixture(overrides: Partial<CreateMessageInput> = {}): CreateMessageInput {
     const id = randomUUID();
@@ -38,6 +39,7 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
   beforeAll(async () => {
     const postgres = await startPostgres();
     stop = postgres.stop;
+    pool = postgres.pool;
     await migrateSmsKit(postgres.pool);
     store = new PgSmsStore(postgres.pool);
     const signatureId = randomUUID();
@@ -99,5 +101,66 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
       dispatchMarkedAt: new Date("2026-09-13T00:00:04.000Z"),
     })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
     expect(first.dispatchToken).toBeTruthy();
+  });
+
+  it("never creates a direct attempt for a message outside the trusted tenant", async () => {
+    const created = await createMessage(messageFixture());
+
+    await expect(store.attempts.createStarted({
+      tenantId: tenantB, messageId: created.message.id, dispatchMode: "direct",
+      dispatchMarkedAt: new Date("2026-09-13T00:00:05.000Z"),
+    })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+  });
+
+  it("locks the queued lease through attempt creation so recovery fences a stale dispatcher", async () => {
+    const created = await createMessage(messageFixture());
+    const jobs = await store.jobs.lease({ tenantId: tenantA, owner: "worker-a", leaseMs: 60_000, limit: 100, now: new Date("2026-09-13T00:00:10.000Z") });
+    const job = jobs.find((candidate) => candidate.messageId === created.message.id);
+    expect(job).toBeDefined();
+    if (job?.leaseToken === undefined) throw new Error("expected a leased job");
+
+    const lockingClient = await pool.connect();
+    try {
+      await lockingClient.query("begin");
+      await lockingClient.query("select id from sms_kit.send_job where id = $1 for update", [job.id]);
+      const recovered = store.jobs.reschedule({ tenantId: tenantA, id: job.id, leaseToken: job.leaseToken, availableAt: new Date("2026-09-13T00:00:11.000Z") });
+      const started = store.attempts.createStarted({
+        tenantId: tenantA, messageId: created.message.id, dispatchMode: "queued", leaseToken: job.leaseToken,
+        dispatchMarkedAt: new Date("2026-09-13T00:00:11.000Z"),
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      await lockingClient.query("commit");
+      await recovered;
+      await expect(started).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+    } finally {
+      await lockingClient.query("rollback").catch(() => undefined);
+      lockingClient.release();
+    }
+  });
+
+  it("rejects a send-job dedupe conflict and rolls back its new message", async () => {
+    const first = messageFixture({ sendJob: { id: randomUUID(), dedupeKey: "send:conflict", availableAt: new Date("2026-09-13T00:00:00.000Z"), maxAttempts: 3 } });
+    await createMessage(first);
+    const conflicting = messageFixture({ sendJob: { id: randomUUID(), dedupeKey: "send:conflict", availableAt: new Date("2026-09-13T00:00:00.000Z"), maxAttempts: 3 } });
+
+    await expect(createMessage(conflicting)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" } satisfies Partial<SmsKitError>);
+    expect(await store.messages.get({ tenantId: tenantA, id: conflicting.id })).toBeUndefined();
+  });
+
+  it("tenant-constrains receipt association and never discloses an unmatched receipt by dedupe", async () => {
+    const created = await createMessage(messageFixture());
+    await expect(store.receipts.record({
+      tenantId: tenantB, messageId: created.message.id, dedupeKey: "receipt:cross-tenant", providerBizId: "biz-cross",
+      deliveryStatus: "delivered", occurredAt: new Date("2026-09-13T00:00:20.000Z"), receivedAt: new Date("2026-09-13T00:00:20.000Z"), source: "callback",
+    })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+
+    await store.receipts.record({
+      tenantId: tenantA, dedupeKey: "receipt:unmatched", providerBizId: "biz-unmatched",
+      deliveryStatus: "failed", occurredAt: new Date("2026-09-13T00:00:21.000Z"), receivedAt: new Date("2026-09-13T00:00:21.000Z"), source: "callback",
+    });
+    await expect(store.receipts.record({
+      tenantId: tenantB, dedupeKey: "receipt:unmatched", providerBizId: "biz-unmatched",
+      deliveryStatus: "failed", occurredAt: new Date("2026-09-13T00:00:21.000Z"), receivedAt: new Date("2026-09-13T00:00:21.000Z"), source: "callback",
+    })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
   });
 });

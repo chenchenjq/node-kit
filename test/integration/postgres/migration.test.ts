@@ -39,14 +39,14 @@ describe("sms-kit PostgreSQL migration", () => {
     ]);
     await expect(columnIsNotNull(pool, "send_message", "tenant_id")).resolves.toBe(true);
     await expect(columnIsNotNull(pool, "otp_challenge", "tenant_id")).resolves.toBe(true);
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(2);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(3);
   }, 60_000);
 
   it("upgrades the fixed previous-version fixture", async () => {
     const { pool } = postgres;
     await pool.query(await readFile(previousSchemaFixture, "utf8"));
     await migrateSmsKit(pool);
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(2);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(3);
     await migrateSmsKit(pool);
     await expect(allRequiredConstraintsExist(pool)).resolves.toBe(true);
   }, 60_000);

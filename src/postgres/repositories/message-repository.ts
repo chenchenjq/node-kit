@@ -62,12 +62,19 @@ export class PgMessageRepository implements MessageRepository {
         return { message: message(existing.rows[0]), created: false };
       }
       if (input.sendJob !== undefined) {
-        await db.query(
+        const job = await db.query<{ id: string; message_id: string | null }>(
           `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, payload, created_at, updated_at)
            values ($1, $2, $3, 'send', $4, 'pending', $5, 0, $6, '{"kind":"none"}'::jsonb, now(), now())
-           on conflict (tenant_id, job_type, dedupe_key) do nothing`,
+           on conflict (tenant_id, job_type, dedupe_key) do nothing
+           returning id, message_id`,
           [input.sendJob.id, input.tenantId, input.sendJob.dedupeKey, input.id, input.sendJob.availableAt, input.sendJob.maxAttempts],
         );
+        if (job.rows[0] === undefined) {
+          const existing = await db.query<{ id: string; message_id: string | null }>("select id, message_id from sms_kit.send_job where tenant_id = $1 and job_type = 'send' and dedupe_key = $2 for update", [input.tenantId, input.sendJob.dedupeKey]);
+          if (existing.rows[0]?.id !== input.sendJob.id || existing.rows[0].message_id !== input.id) {
+            throw new SmsKitError("IDEMPOTENCY_CONFLICT", "send job dedupe key belongs to a different message");
+          }
+        }
       }
       return { message: message(inserted.rows[0]), created: true };
     });

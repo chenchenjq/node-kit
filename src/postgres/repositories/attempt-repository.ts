@@ -19,16 +19,21 @@ export class PgAttemptRepository implements AttemptRepository {
   async createStarted(input: Readonly<{ tenantId: Attempt["tenantId"]; messageId: Attempt["messageId"]; dispatchMode: "direct" | "queued"; leaseToken?: string; dispatchMarkedAt: Date }>, tx?: SmsTransaction): Promise<Attempt> {
     const client = db(this.pool, tx);
     if ((input.dispatchMode === "queued") !== (input.leaseToken !== undefined)) throw new SmsKitError("CONCURRENT_MODIFICATION", "dispatch mode requires its matching lease token");
-    if (input.dispatchMode === "queued") {
-      const lease = await client.query("select id from sms_kit.send_job where tenant_id = $1 and message_id = $2 and state = 'leased' and lease_token = $3", [input.tenantId, input.messageId, input.leaseToken]);
-      if (lease.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "job lease is no longer current");
-    }
     const inserted = await client.query<AttemptRow>(
-      `with next_attempt as (select coalesce(max(attempt_no), 0) + 1 as attempt_no from sms_kit.send_attempt where message_id = $2)
+      `with owned_message as (
+         select id from sms_kit.send_message where tenant_id = $1 and id = $2 for update
+       ), leased_job as (
+         select j.id from sms_kit.send_job j join owned_message m on m.id = j.message_id
+          where j.tenant_id = $1 and j.job_type = 'send' and j.state = 'leased' and j.lease_token = $5 for update
+       ), eligible_message as (
+         select id from owned_message where $3 = 'direct'
+         union all
+         select m.id from owned_message m where $3 = 'queued' and exists (select 1 from leased_job)
+       ), next_attempt as (select coalesce(max(a.attempt_no), 0) + 1 as attempt_no from sms_kit.send_attempt a join eligible_message m on m.id = a.message_id)
        insert into sms_kit.send_attempt (id, message_id, attempt_no, status, dispatch_mode, dispatch_token, lease_token, dispatch_marked_at, occurred_at)
-       select $1, $2, next_attempt.attempt_no, 'started', $3, $4, $5, $6, $6 from next_attempt
-       returning id, $7::text as tenant_id, message_id, attempt_no, status, dispatch_mode, dispatch_token, lease_token, dispatch_marked_at, provider_request_id, provider_code, error_code, latency_ms, occurred_at`,
-      [randomUUID(), input.messageId, input.dispatchMode, randomUUID(), input.leaseToken ?? null, input.dispatchMarkedAt, input.tenantId],
+       select $4, m.id, next_attempt.attempt_no, 'started', $3, $6, $5, $7, $7 from eligible_message m cross join next_attempt
+       returning id, $1::text as tenant_id, message_id, attempt_no, status, dispatch_mode, dispatch_token, lease_token, dispatch_marked_at, provider_request_id, provider_code, error_code, latency_ms, occurred_at`,
+      [input.tenantId, input.messageId, input.dispatchMode, randomUUID(), input.leaseToken ?? null, randomUUID(), input.dispatchMarkedAt],
     ).catch((error: unknown) => {
       if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") throw new SmsKitError("CONCURRENT_MODIFICATION", "message already has a started attempt");
       throw error;

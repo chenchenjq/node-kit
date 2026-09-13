@@ -9,7 +9,7 @@ import type { PgSmsTransaction } from "../transaction.js";
 type Queryable = Pool | PoolClient;
 type CandidateRow = {
   id: string; resource_type: "signature" | "template"; external_key: string;
-  change_type: ResourceSyncCandidate["changeType"]; checksum: string; snapshot: ResourceSyncCandidate["snapshot"];
+  change_type: ResourceSyncCandidate["changeType"]; checksum: string; snapshot: unknown;
 };
 
 function queryable(pool: Pool, tx?: SmsTransaction): Queryable {
@@ -45,7 +45,7 @@ function safeSnapshot(candidate: ResourceSyncCandidate): object {
   if (candidate.resourceType === "signature") {
     return { kind: "signature", externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, externalType: candidate.snapshot.externalType };
   }
-  return { kind: "template", externalCode: candidate.snapshot.externalCode, externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, templateType: candidate.snapshot.templateType, variableNames: [...candidate.snapshot.variableNames] };
+  return { kind: "template", externalCode: candidate.snapshot.externalCode, externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, templateType: candidate.snapshot.templateType, variableNames: [...candidate.snapshot.variableNames], signatureExternalKey: candidate.signatureExternalKey, templateKey: candidate.templateKey, purpose: candidate.purpose };
 }
 
 export class PgResourceRepository implements ResourceRepository {
@@ -98,7 +98,7 @@ export class PgResourceRepository implements ResourceRepository {
       }
       for (const candidate of candidates) {
         if (candidate.resource_type === "signature") {
-          const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "signature" }> ["snapshot"];
+          const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "signature" }>["snapshot"];
           await db.query(
             `insert into sms_kit.signature (id, external_key, external_name, external_status, external_type, imported_at, last_synced_at, created_at, updated_at)
              values ($1, $2, $3, $4, $5, now(), now(), now(), now())
@@ -107,23 +107,29 @@ export class PgResourceRepository implements ResourceRepository {
             [candidate.id, candidate.external_key, snapshot.externalName, snapshot.externalStatus, snapshot.externalType],
           );
         } else {
-          const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "template" }> ["snapshot"];
-          const signature = await db.query<{ id: string }>("select id from sms_kit.signature where external_key = $1", [candidate.external_key]);
+          const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "template" }>["snapshot"] & { signatureExternalKey: string; templateKey: string; purpose: string };
+          const signature = await db.query<{ id: string }>("select id from sms_kit.signature where external_key = $1", [snapshot.signatureExternalKey]);
           if (signature.rows[0] === undefined) throw new SmsKitError("CONFIG_INVALID", "template preview has no matching signature");
           await db.query(
             `insert into sms_kit.template (id, signature_id, template_key, external_code, external_name, external_status, template_type, purpose, content_snapshot, variable_schema, imported_at, last_synced_at, created_at, updated_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $3, '', $8::jsonb, now(), now(), now(), now())
-             on conflict (external_code) do update set external_name = excluded.external_name, external_status = excluded.external_status,
+             values ($1, $2, $3, $4, $5, $6, $7, $8, '', $9::jsonb, now(), now(), now(), now())
+             on conflict (external_code) do update set signature_id = excluded.signature_id, external_name = excluded.external_name, external_status = excluded.external_status,
                template_type = excluded.template_type, variable_schema = excluded.variable_schema, last_synced_at = now(), version = sms_kit.template.version + 1, updated_at = now()`,
-            [candidate.id, signature.rows[0].id, candidate.external_key, snapshot.externalCode, snapshot.externalName, snapshot.externalStatus, snapshot.templateType, JSON.stringify(snapshot.variableNames)],
+            [candidate.id, signature.rows[0].id, snapshot.templateKey, snapshot.externalCode, snapshot.externalName, snapshot.externalStatus, snapshot.templateType, snapshot.purpose, JSON.stringify(snapshot.variableNames)],
           );
         }
         await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
       }
       await db.query("update sms_kit.resource_sync set status = 'succeeded', finished_at = now(), summary = jsonb_build_object('committedCount', $2::integer) where id = $1", [input.syncId, candidates.length]);
-      const result = candidates.map((candidate) => ({
+      const result = candidates.map((candidate) => candidate.resource_type === "signature" ? ({
         id: candidate.id, externalKey: candidate.external_key, changeType: candidate.change_type, checksum: candidate.checksum,
-        resourceType: candidate.resource_type, snapshot: candidate.snapshot,
+        resourceType: "signature", snapshot: candidate.snapshot,
+      }) : ({
+        id: candidate.id, externalKey: candidate.external_key, changeType: candidate.change_type, checksum: candidate.checksum,
+        resourceType: "template", snapshot: candidate.snapshot,
+        signatureExternalKey: (candidate.snapshot as { signatureExternalKey: string }).signatureExternalKey,
+        templateKey: (candidate.snapshot as { templateKey: string }).templateKey,
+        purpose: (candidate.snapshot as { purpose: string }).purpose,
       })) as unknown as readonly ResourceSyncCandidate[];
       return { id: input.syncId, status: "succeeded", expiresAt: sync.rows[0].expires_at, candidates: result };
     });
