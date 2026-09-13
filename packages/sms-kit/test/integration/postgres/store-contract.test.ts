@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, describe } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { ChallengeId, MessageId, TenantId, TemplateId } from "../../../src/core/types.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
+import { asSmsTransaction } from "../../../src/postgres/transaction.js";
 import { FakeClock, SequenceIdGenerator } from "../../../src/testing/fakes.js";
 import { runSmsStoreContract } from "../../../src/testing/store-contract.js";
 import { startPostgres } from "./helpers.js";
@@ -61,5 +62,32 @@ describe("PostgreSQL SmsStore contract", () => {
     },
     messageId: () => randomUUID() as MessageId,
     tenantId: (value) => value as TenantId,
+  });
+
+  it("uses the UTC submitted date when the database session is near a local midnight", async () => {
+    const tenant = "tenant-utc-date" as TenantId;
+    const submittedAt = new Date("2026-09-13T00:30:00.000Z");
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local time zone 'America/Los_Angeles'");
+      const tx = asSmsTransaction(client);
+      const message = await store.messages.createWithSendJob({
+        id: randomUUID() as MessageId, tenantId: tenant, idempotencyKey: "utc-date-message", templateId,
+        templateKeySnapshot: "notice.contract", externalTemplateCodeSnapshot: "SMS_CONTRACT", signatureNameSnapshot: "Contract",
+        purpose: "contract", phoneCiphertext: "enc:test:phone", phoneKeyId: "test-key", phoneHash: "hash:test:phone",
+        phoneLast4: "0000", phoneMasked: "***0000", variableNames: [], submittedAt,
+      }, tx);
+      await store.stats.rollupDirtyDates({ tenantId: tenant, limit: 10 }, tx);
+      expect(await store.stats.query({
+        tenantId: tenant, from: new Date("2026-09-13T00:00:00.000Z"), to: new Date("2026-09-14T00:00:00.000Z"),
+      }, tx)).toContainEqual(expect.objectContaining({ statDate: "2026-09-13", submittedCount: 1, templateKey: message.message.templateKeySnapshot }));
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 });

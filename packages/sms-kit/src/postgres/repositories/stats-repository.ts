@@ -31,7 +31,7 @@ function stats(row: StatRow): DailyStats {
 export async function markMessageStatsDirty(client: Queryable, tenantId: string, messageId: string): Promise<void> {
   await client.query(
     `insert into sms_kit.stat_dirty_date (tenant_id, stat_date, version, updated_at)
-     select tenant_id, submitted_at::date, 1, now()
+     select tenant_id, (submitted_at at time zone 'UTC')::date, 1, now()
        from sms_kit.send_message
       where tenant_id = $1 and id = $2
      on conflict (tenant_id, stat_date)
@@ -76,7 +76,7 @@ export class PgStatsRepository implements StatsRepository {
              delivery_waiting_count, delivered_count, delivery_failed_count, delivery_unknown_final_count,
              retry_count, updated_at
            )
-           select m.tenant_id, m.submitted_at::date, max(m.template_id::text)::uuid, m.template_key_snapshot, m.purpose,
+           select m.tenant_id, (m.submitted_at at time zone 'UTC')::date, max(m.template_id::text)::uuid, m.template_key_snapshot, m.purpose,
                   count(*)::bigint,
                   count(*) filter (where m.acceptance_status = 'accepted')::bigint,
                   count(*) filter (where m.acceptance_status = 'rejected')::bigint,
@@ -88,8 +88,8 @@ export class PgStatsRepository implements StatsRepository {
                   coalesce(sum((select greatest(count(*) - 1, 0) from sms_kit.send_attempt a where a.message_id = m.id)), 0)::bigint,
                   now()
              from sms_kit.send_message m
-            where m.tenant_id = $1 and m.submitted_at::date = $2::date
-            group by m.tenant_id, m.submitted_at::date, m.template_key_snapshot, m.purpose`,
+            where m.tenant_id = $1 and (m.submitted_at at time zone 'UTC')::date = $2::date
+            group by m.tenant_id, (m.submitted_at at time zone 'UTC')::date, m.template_key_snapshot, m.purpose`,
           [input.tenantId, date.stat_date],
         );
         await client.query(

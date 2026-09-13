@@ -1,15 +1,41 @@
 import type { Pool, PoolClient } from "pg";
 
 import type { AuditEvent, AuditRepository, SmsTransaction } from "../../ports/store.js";
+import type { RedactedField, SafeEventMetadata, SafeMetricName } from "../../ports/runtime.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
-type AuditRow = { id: string; tenant_id: string; actor_id: string; action: string; target_type: string; target_id: string | null; result: AuditEvent["result"]; error_code: string | null; metadata: object; occurred_at: Date };
+type AuditRow = { id: string; tenant_id: string; actor_id: string; action: string; target_type: string; target_id: string | null; result: AuditEvent["result"]; error_code: string | null; metadata: unknown; occurred_at: Date };
 const fields = "id, tenant_id, actor_id, action, target_type, target_id, result, error_code, metadata, occurred_at";
 function db(pool: Pool, tx?: SmsTransaction): Pool | PoolClient { return tx === undefined ? pool : (tx as PgSmsTransaction).client; }
+const redactedFields = new Set<RedactedField>(["phone", "otp", "proof", "secret", "template-params"]);
+const metricNames = new Set<SafeMetricName>(["attempt", "job", "message", "receipt", "resource", "rate-limit"]);
+
+/** Projects runtime input onto the deliberately finite audit metadata contract. */
+function safeMetadata(input: unknown): SafeEventMetadata {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return {};
+  const source = input as Record<string, unknown>;
+  const safeFields = Array.isArray(source.redactedFields)
+    ? source.redactedFields.filter((field): field is RedactedField => typeof field === "string" && redactedFields.has(field as RedactedField))
+    : [];
+  const safeCounts = Array.isArray(source.counts)
+    ? source.counts.flatMap((count) => {
+      if (typeof count !== "object" || count === null || Array.isArray(count)) return [];
+      const value = count as Record<string, unknown>;
+      return typeof value.name === "string" && metricNames.has(value.name as SafeMetricName) &&
+        typeof value.value === "number" && Number.isFinite(value.value)
+        ? [{ name: value.name as SafeMetricName, value: value.value }]
+        : [];
+    })
+    : [];
+  return {
+    ...(safeFields.length === 0 ? {} : { redactedFields: safeFields }),
+    ...(safeCounts.length === 0 ? {} : { counts: safeCounts }),
+  };
+}
 function event(row: AuditRow): AuditEvent {
   return { id: row.id, tenantId: row.tenant_id as AuditEvent["tenantId"], actorId: row.actor_id, action: row.action, targetType: row.target_type,
     ...(row.target_id === null ? {} : { targetId: row.target_id }), result: row.result,
-    ...(row.error_code === null ? {} : { errorCode: row.error_code }), metadata: row.metadata, occurredAt: row.occurred_at };
+    ...(row.error_code === null ? {} : { errorCode: row.error_code }), metadata: safeMetadata(row.metadata), occurredAt: row.occurred_at };
 }
 
 export class PgAuditRepository implements AuditRepository {
@@ -19,7 +45,7 @@ export class PgAuditRepository implements AuditRepository {
     const { rows } = await db(this.pool, tx).query<AuditRow>(
       `insert into sms_kit.audit_event (id, tenant_id, actor_id, action, target_type, target_id, result, error_code, metadata, occurred_at)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10) returning ${fields}`,
-      [input.id, input.tenantId, input.actorId, input.action, input.targetType, input.targetId ?? null, input.result, input.errorCode ?? null, JSON.stringify(input.metadata ?? {}), input.occurredAt],
+      [input.id, input.tenantId, input.actorId, input.action, input.targetType, input.targetId ?? null, input.result, input.errorCode ?? null, JSON.stringify(safeMetadata(input.metadata)), input.occurredAt],
     );
     return event(rows[0]!);
   }
