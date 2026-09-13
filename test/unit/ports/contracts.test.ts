@@ -6,6 +6,7 @@ import {
   type PolicyStore,
   type ProviderDeliveryQuery,
   type ProviderSendInput,
+  type ResourceSyncCandidate,
   type SafeEventMetadata,
   type SmsProvider,
   type SmsTransaction,
@@ -112,6 +113,54 @@ describe("public port contracts", () => {
     const unsafe: SafeEventMetadata = { phone: "+8613800138000" };
 
     expect(safe.redactedFields).toEqual(["phone"]);
+    expect(unsafe).toBeDefined();
+  });
+
+  it("accepts only finite provider-resource snapshots", () => {
+    const signature: ResourceSyncCandidate = {
+      id: "candidate-signature",
+      resourceType: "signature",
+      externalKey: "aliyun:sign:1",
+      changeType: "new",
+      checksum: "checksum-signature",
+      snapshot: {
+        kind: "signature",
+        externalName: "Acme",
+        externalStatus: "approved",
+        externalType: "general",
+      },
+    };
+    const template: ResourceSyncCandidate = {
+      id: "candidate-template",
+      resourceType: "template",
+      externalKey: "aliyun:template:1",
+      changeType: "changed",
+      checksum: "checksum-template",
+      snapshot: {
+        kind: "template",
+        externalCode: "SMS_1",
+        externalName: "Verification",
+        externalStatus: "approved",
+        templateType: "verification",
+        variableNames: ["code"],
+      },
+    };
+    const unsafe: ResourceSyncCandidate = {
+      ...template,
+      snapshot: {
+        kind: "template",
+        externalCode: "SMS_1",
+        externalName: "Verification",
+        externalStatus: "approved",
+        templateType: "verification",
+        variableNames: ["code"],
+        // @ts-expect-error Resource snapshots cannot persist raw sensitive fields.
+        phone: "+8613800138000",
+      },
+    };
+
+    expect(signature.snapshot.kind).toBe("signature");
+    expect(template.snapshot.kind).toBe("template");
     expect(unsafe).toBeDefined();
   });
 });
