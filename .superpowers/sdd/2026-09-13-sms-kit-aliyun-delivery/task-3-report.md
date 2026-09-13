@@ -30,3 +30,11 @@
 ## Review fix round 3
 
 - Template selections now require a locally or currently discovered signature that is enabled and cloud-approved. The commit transaction independently verifies this immediately before importing a template, preventing a selected template from bypassing an unavailable, unapproved, or disabled signature.
+
+## Review fix round 4
+
+- Replaced preview's union of remote approval and stale local approval with the effective signature state after synchronization: the signature must be in the current complete provider snapshot, its current cloud status must be approved, and existing local enablement is preserved (new signatures default to enabled).
+- Preview and PostgreSQL commit now share `isUsableSignature` and the cloud-approval predicate in `core/resource-usability.ts`, with the projection/commit contract documented beside the helper. Missing signatures are retiring; current cloud approval cannot override a local disable.
+- RED: `npm run test:integration --workspace sms-kit -- resource-sync.test.ts` produced 3 expected assertion failures because service preview incorrectly resolved for an absent signature, a locally disabled approved signature, and a currently rejected signature with stale local approval (8 other tests passed).
+- GREEN: `npm run test:integration --workspace sms-kit -- resource-sync.test.ts config-resource.test.ts` passed all 16 tests. The service regressions assert `CONFIG_INVALID` and unchanged persisted batch counts; the positive path previews and commits a template with both a new and an existing currently discovered usable signature.
+- `npm run typecheck --workspace sms-kit`, the focused configuration/policy application unit tests (6 tests), and `git diff --check` passed.

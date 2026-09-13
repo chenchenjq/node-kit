@@ -1,4 +1,5 @@
 import { SmsKitError } from "../core/errors.js";
+import { isUsableSignature } from "../core/resource-usability.js";
 import { validateTemplateKey } from "../core/template.js";
 import type { ProviderAuthInput, ProviderPage, ProviderSignature, ProviderTemplate, SmsProvider } from "../ports/provider.js";
 import type { Clock, EventSink, IdGenerator } from "../ports/runtime.js";
@@ -41,10 +42,6 @@ export type ResourceSyncServiceDependencies<Actor extends AuthorizationActor = A
 const PREVIEW_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_PAGE_SIZE = 50;
 const SYSTEM_TENANT_ID = "__system__" as TenantId;
-
-function isCloudApproved(status: string): boolean {
-  return status.toLowerCase() === "approved" || status.toUpperCase() === "AUDIT_STATE_PASS";
-}
 
 function providerConfig(config: Awaited<ReturnType<SmsStore["config"]["get"]>>): ConfiguredProviderConfig {
   if (config.status === "unconfigured" || config.status !== "ready" || !config.enabled) {
@@ -162,10 +159,10 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     const localTemplatesByKey = new Map(localTemplates.map((template) => [template.templateKey, template]));
     const localSignaturesById = new Map(localSignatures.map((signature) => [signature.id, signature]));
     const discoveredSignatureKeys = new Set(signatures.map((signature) => signature.externalKey));
-    const selectableSignatureKeys = new Set([
-      ...signatures.filter((signature) => isCloudApproved(signature.externalStatus)).map((signature) => signature.externalKey),
-      ...localSignatures.filter((signature) => signature.enabled && isCloudApproved(signature.externalStatus)).map((signature) => signature.externalKey),
-    ]);
+    const selectableSignatureKeys = new Set(signatures.filter((signature) => isUsableSignature({
+      externalStatus: signature.externalStatus,
+      enabled: localSignaturesByKey.get(signature.externalKey)?.enabled ?? true,
+    })).map((signature) => signature.externalKey));
     const templateByExternalKey = new Map(templates.map((template) => [template.externalKey, template]));
     const selections = input.templates ?? [];
     const selectionsByExternalKey = new Map<string, ResourceSyncTemplateSelection>();

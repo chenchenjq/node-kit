@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { Pool } from "pg";
 
 import { ResourceSyncService } from "../../../src/application/resource-sync-service.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
@@ -95,10 +96,12 @@ describe("ResourceSyncService", () => {
 
 describe("ResourceSyncService with PostgreSQL", () => {
   let store: PgSmsStore;
+  let pool: Pool;
   let stop: (() => Promise<void>) | undefined;
 
   beforeAll(async () => {
     const postgres = await startPostgres();
+    pool = postgres.pool;
     stop = postgres.stop;
     await migrateSmsKit(postgres.pool);
     store = new PgSmsStore(postgres.pool);
@@ -232,5 +235,62 @@ describe("ResourceSyncService with PostgreSQL", () => {
     await expect(store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) }))
       .rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(await store.resources.findTemplateByKey({ templateKey: "notice.blocked" })).toBeUndefined();
+  });
+
+  it.each([
+    { name: "absent from the current provider snapshot", key: "missing", discovered: false, enabled: true, status: "approved" },
+    { name: "locally disabled despite current cloud approval", key: "disabled", discovered: true, enabled: false, status: "approved" },
+    { name: "no longer cloud-approved despite local approval", key: "rejected", discovered: true, enabled: true, status: "AUDIT_STATE_NOT_PASS" },
+  ])("rejects template selection before persisting a batch when its signature is $name", async ({ key, discovered, enabled, status }) => {
+    const externalKey = `aliyun:sign:selection-${key}`;
+    const signature = { externalKey, externalName: key, externalStatus: status, externalType: "通用类型" };
+    const templateKey = `notice.selection-${key}`;
+    const template = { externalKey: `aliyun:template:SMS_SELECTION_${key}`, externalCode: `SMS_SELECTION_${key}`, externalName: key, externalStatus: "approved", templateType: "notification", variableNames: [] };
+    const seed = await store.resources.createSyncPreview({
+      id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+      resources: [createResourceSyncCandidate({
+        id: crypto.randomUUID(), externalKey, changeType: "new", checksum: `seed-${key}`, resourceType: "signature",
+        snapshot: { kind: "signature", externalName: key, externalStatus: "approved", externalType: "通用类型" },
+      })],
+    });
+    await store.resources.commitSync({ syncId: seed.id, candidates: seed.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    if (!enabled) await pool.query("update sms_kit.signature set enabled = false where external_key = $1", [externalKey]);
+    const sync = new ResourceSyncService({
+      store,
+      provider: {
+        listSignatures: async () => ({ items: discovered ? [signature] : [] }),
+        listTemplates: async () => ({ items: [template] }),
+      } as never,
+      authorizer: { assert: () => undefined }, clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+      ids: { next: () => crypto.randomUUID() }, events: { emit: () => undefined },
+    });
+    const batchesBefore = (await pool.query("select count(*) from sms_kit.resource_sync")).rows;
+
+    await expect(sync.preview(actor, { templates: [{ externalKey: template.externalKey, signatureExternalKey: externalKey, templateKey, purpose: "notification" }] }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID" });
+
+    expect((await pool.query("select count(*) from sms_kit.resource_sync")).rows).toEqual(batchesBefore);
+    expect(await store.resources.findTemplateByKey({ templateKey })).toBeUndefined();
+  });
+
+  it("previews and commits templates with new and existing usable signatures in the current snapshot", async () => {
+    const signature = { externalKey: "aliyun:sign:selection-usable", externalName: "Usable", externalStatus: "AUDIT_STATE_PASS", externalType: "通用类型" };
+    const template = { externalKey: "aliyun:template:SMS_USABLE", externalCode: "SMS_USABLE", externalName: "Usable", externalStatus: "approved", templateType: "notification", variableNames: [] };
+    const sync = new ResourceSyncService({
+      store,
+      provider: { listSignatures: async () => ({ items: [signature] }), listTemplates: async () => ({ items: [template] }) } as never,
+      authorizer: { assert: () => undefined }, clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+      ids: { next: () => crypto.randomUUID() }, events: { emit: () => undefined },
+    });
+
+    for (const changeType of ["new", "unchanged"]) {
+      const preview = await sync.preview(actor, { templates: [{ externalKey: template.externalKey, signatureExternalKey: signature.externalKey, templateKey: "notice.usable", purpose: "notification" }] });
+      expect(preview.candidates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ resourceType: "template", externalKey: template.externalKey, changeType }),
+      ]));
+      const committed = await sync.commit(actor, { syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+      expect(committed.status).toBe("succeeded");
+      expect(await store.resources.findTemplateByKey({ templateKey: "notice.usable" })).toMatchObject({ enabled: true, externalStatus: "approved" });
+    }
   });
 });
