@@ -45,6 +45,8 @@ export type UpdateProviderConfigInput = Readonly<{
   receiptCallbackTokenRef: string;
   enabled: boolean;
   expectedVersion: number;
+  /** Credential changes are saved disabled until a new connection test succeeds. */
+  resetReadiness?: boolean;
 }>;
 
 export interface ConfigRepository {
@@ -240,6 +242,8 @@ export interface ResourceRepository {
   commitSync(input: Readonly<{
     syncId: string;
     candidates: readonly Readonly<{ id: string; checksum: string }>[];
+    /** Supplied by the application clock so expiry fencing is deterministic. */
+    now?: Date;
   }>, tx?: SmsTransaction): Promise<ResourceSyncPreview>;
 }
 

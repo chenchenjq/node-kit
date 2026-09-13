@@ -48,6 +48,10 @@ function safeSnapshot(candidate: ResourceSyncCandidate): object {
   return { kind: "template", externalCode: candidate.snapshot.externalCode, externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, templateType: candidate.snapshot.templateType, variableNames: [...candidate.snapshot.variableNames], signatureExternalKey: candidate.signatureExternalKey, templateKey: candidate.templateKey, purpose: candidate.purpose };
 }
 
+function isCloudApproved(status: string): boolean {
+  return status.toLowerCase() === "approved" || status.toUpperCase() === "AUDIT_STATE_PASS";
+}
+
 export class PgResourceRepository implements ResourceRepository {
   constructor(private readonly pool: Pool) {}
 
@@ -87,10 +91,10 @@ export class PgResourceRepository implements ResourceRepository {
     });
   }
 
-  async commitSync(input: Readonly<{ syncId: string; candidates: readonly Readonly<{ id: string; checksum: string }>[] }>, tx?: SmsTransaction): Promise<ResourceSyncPreview> {
+  async commitSync(input: Readonly<{ syncId: string; candidates: readonly Readonly<{ id: string; checksum: string }>[]; now?: Date }>, tx?: SmsTransaction): Promise<ResourceSyncPreview> {
     return transaction(this.pool, tx, async (db) => {
       const sync = await db.query<{ expires_at: Date; status: ResourceSyncPreview["status"] }>("select expires_at, status from sms_kit.resource_sync where id = $1 for update", [input.syncId]);
-      if (sync.rows[0] === undefined || sync.rows[0].status !== "running" || sync.rows[0].expires_at <= new Date()) throw new SmsKitError("CONCURRENT_MODIFICATION", "resource preview is no longer current");
+      if (sync.rows[0] === undefined || sync.rows[0].status !== "running" || sync.rows[0].expires_at <= (input.now ?? new Date())) throw new SmsKitError("CONCURRENT_MODIFICATION", "resource preview is no longer current");
       const ids = input.candidates.map((candidate) => candidate.id);
       const candidates = ids.length === 0 ? [] : (await db.query<CandidateRow>("select id, resource_type, external_key, change_type, checksum, snapshot from sms_kit.resource_sync_candidate where sync_id = $1 and id = any($2::uuid[]) order by case resource_type when 'signature' then 0 else 1 end, id for update", [input.syncId, ids])).rows;
       if (candidates.length !== input.candidates.length || candidates.some((candidate) => input.candidates.find((chosen) => chosen.id === candidate.id)?.checksum !== candidate.checksum)) {
@@ -99,6 +103,9 @@ export class PgResourceRepository implements ResourceRepository {
       for (const candidate of candidates) {
         if (candidate.resource_type === "signature") {
           const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "signature" }>["snapshot"];
+          if (!isCloudApproved(snapshot.externalStatus)) {
+            throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
+          }
           await db.query(
             `insert into sms_kit.signature (id, external_key, external_name, external_status, external_type, imported_at, last_synced_at, created_at, updated_at)
              values ($1, $2, $3, $4, $5, now(), now(), now(), now())
@@ -108,6 +115,9 @@ export class PgResourceRepository implements ResourceRepository {
           );
         } else {
           const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "template" }>["snapshot"] & { signatureExternalKey: string; templateKey: string; purpose: string };
+          if (!isCloudApproved(snapshot.externalStatus)) {
+            throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
+          }
           const signature = await db.query<{ id: string }>("select id from sms_kit.signature where external_key = $1", [snapshot.signatureExternalKey]);
           if (signature.rows[0] === undefined) throw new SmsKitError("CONFIG_INVALID", "template preview has no matching signature");
           await db.query(
