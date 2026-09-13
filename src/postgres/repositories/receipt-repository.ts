@@ -36,8 +36,9 @@ export class PgReceiptRepository implements ReceiptRepository {
       from sms_kit.send_message message
       where receipt.dedupe_key = $1 and receipt.match_status = 'unmatched'
         and message.id = $2 and message.tenant_id = $3
+        and receipt.provider_biz_id = $4 and message.provider_biz_id = $4
       returning receipt.id, receipt.tenant_id, receipt.message_id, receipt.match_status, receipt.dedupe_key, receipt.provider_biz_id, receipt.delivery_status, receipt.provider_code, receipt.provider_message, receipt.occurred_at, receipt.received_at, receipt.source`,
-    [input.dedupeKey, input.messageId, input.tenantId]);
+    [input.dedupeKey, input.messageId, input.tenantId, input.providerBizId]);
     if (promoted.rows[0] !== undefined) return { receipt: receipt(promoted.rows[0]), created: true };
     const existing = await client.query<Row>(`select ${fields} from sms_kit.delivery_receipt where dedupe_key = $1 and tenant_id = $2 and message_id = $3`, [input.dedupeKey, input.tenantId, input.messageId]);
     if (existing.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "receipt belongs to a different tenant");
