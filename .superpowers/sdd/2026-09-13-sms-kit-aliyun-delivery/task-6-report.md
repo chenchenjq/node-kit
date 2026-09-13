@@ -83,3 +83,28 @@ npm run typecheck --workspace sms-kit
 npm run build --workspace sms-kit
 # both exit 0
 ```
+
+## Fix round 2
+
+- Unmatched-row promotion is now constrained inside `PgReceiptRepository`, not
+  merely by `ReceiptService`: the candidate row's provider BizId and the target
+  message's persisted provider BizId must both equal the supplied opaque
+  reference while the message remains tenant-owned by the caller.
+- A direct PostgreSQL repository regression proves that an own-tenant message
+  cannot claim, return, or disclose an unrelated system-owned unmatched row
+  sharing only a dedupe key. The existing early-unmatched then accepted/message
+  redelivery flow remains covered and passes.
+
+Verification:
+
+```text
+npm run test:integration --workspace sms-kit -- message-job.test.ts
+# 1 file, 11 PostgreSQL integration tests passed
+
+npm run test:integration --workspace sms-kit -- receipt-service.test.ts
+# 1 file, 9 PostgreSQL integration tests passed
+
+npm run typecheck --workspace sms-kit
+npm run build --workspace sms-kit
+# both exit 0
+```

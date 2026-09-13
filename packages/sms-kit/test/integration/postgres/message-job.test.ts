@@ -168,6 +168,28 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
     expect(duplicateUnmatched.receipt).not.toHaveProperty("messageId");
   });
 
+  it("does not let an own-tenant message claim an unrelated unmatched receipt", async () => {
+    const created = await createMessage(messageFixture());
+    const attempt = await store.attempts.createStarted({
+      tenantId: tenantA, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: new Date("2026-09-13T00:00:22.000Z"),
+    });
+    await store.messages.completeAcceptance({
+      tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "accepted", evidence: "same-dispatch-response",
+      providerBizId: "biz-owned", occurredAt: new Date("2026-09-13T00:00:22.000Z"),
+    });
+    await store.receipts.record({
+      tenantId: tenantB, dedupeKey: "receipt:unrelated-unmatched", providerBizId: "biz-unrelated",
+      deliveryStatus: "failed", providerMessage: "must remain unclaimed", occurredAt: new Date("2026-09-13T00:00:23.000Z"), receivedAt: new Date("2026-09-13T00:00:23.000Z"), source: "callback",
+    });
+
+    await expect(store.receipts.record({
+      tenantId: tenantA, messageId: created.message.id, dedupeKey: "receipt:unrelated-unmatched", providerBizId: "biz-unrelated",
+      deliveryStatus: "failed", occurredAt: new Date("2026-09-13T00:00:23.000Z"), receivedAt: new Date("2026-09-13T00:00:23.000Z"), source: "callback",
+    })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+    await expect(pool.query<{ match_status: string; tenant_id: string | null; message_id: string | null; provider_message: string | null }>("select match_status, tenant_id, message_id, provider_message from sms_kit.delivery_receipt where dedupe_key = 'receipt:unrelated-unmatched'"))
+      .resolves.toMatchObject({ rows: [{ match_status: "unmatched", tenant_id: null, message_id: null, provider_message: "must remain unclaimed" }] });
+  });
+
   it("does not reverse a terminal receipt when the accepted response arrives later", async () => {
     const created = await createMessage(messageFixture());
     const attempt = await store.attempts.createStarted({
