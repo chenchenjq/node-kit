@@ -51,6 +51,18 @@ describe("sms-kit PostgreSQL migration", () => {
     await expect(allRequiredConstraintsExist(pool)).resolves.toBe(true);
   }, 60_000);
 
+  it("upgrades a valid v1 leased job without making a stale dispatch retryable", async () => {
+    const { pool } = postgres;
+    await pool.query(await readFile(previousSchemaFixture, "utf8"));
+    await pool.query(`insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, state, available_at, lease_owner, lease_until, attempt_count, max_attempts, payload, created_at, updated_at)
+      values ('00000000-0000-4000-8000-000000000001', 'tenant-v1', 'v1-leased', 'send', 'leased', now(), 'old-worker', now() + interval '1 hour', 1, 3, '{"kind":"none"}', now(), now())`);
+
+    await migrateSmsKit(pool);
+
+    await expect(pool.query<{ state: string; lease_token: string | null; last_error_code: string | null }>("select state, lease_token, last_error_code from sms_kit.send_job where dedupe_key = 'v1-leased'"))
+      .resolves.toMatchObject({ rows: [{ state: "dead", lease_token: null, last_error_code: "ACCEPTANCE_UNKNOWN" }] });
+  }, 60_000);
+
   it("rejects an applied migration whose checksum changed", async () => {
     const { pool } = postgres;
     await migrateSmsKit(pool);

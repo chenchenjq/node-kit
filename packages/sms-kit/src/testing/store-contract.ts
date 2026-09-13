@@ -208,8 +208,10 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       expect(recordedUnmatched).toMatchObject({ created: true, receipt: { matchStatus: "unmatched" } });
       expect(recordedUnmatched.receipt.tenantId).toBeUndefined();
       expect(recordedUnmatched.receipt.messageId).toBeUndefined();
-      await expect(store.receipts.record({ ...unmatched, tenantId: factory.tenantId(`tenant-unmatched-b-${factory.ids.next()}`) }))
-        .rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+      const duplicateUnmatched = await store.receipts.record({ ...unmatched, tenantId: factory.tenantId(`tenant-unmatched-b-${factory.ids.next()}`) });
+      expect(duplicateUnmatched).toMatchObject({ created: false, receipt: { matchStatus: "unmatched" } });
+      expect(duplicateUnmatched.receipt.tenantId).toBeUndefined();
+      expect(duplicateUnmatched.receipt.messageId).toBeUndefined();
 
       expect(await store.stats.rollupDirtyDates({ tenantId: tenant, limit: 10 })).toBeGreaterThan(0);
       expect(await store.stats.rollupDirtyDates({ tenantId: tenant, limit: 10 })).toBe(0);

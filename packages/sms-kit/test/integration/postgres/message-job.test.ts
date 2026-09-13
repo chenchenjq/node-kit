@@ -154,13 +154,85 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
       deliveryStatus: "delivered", occurredAt: new Date("2026-09-13T00:00:20.000Z"), receivedAt: new Date("2026-09-13T00:00:20.000Z"), source: "callback",
     })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
 
-    await store.receipts.record({
+    const firstUnmatched = await store.receipts.record({
       tenantId: tenantA, dedupeKey: "receipt:unmatched", providerBizId: "biz-unmatched",
       deliveryStatus: "failed", occurredAt: new Date("2026-09-13T00:00:21.000Z"), receivedAt: new Date("2026-09-13T00:00:21.000Z"), source: "callback",
     });
-    await expect(store.receipts.record({
+    expect(firstUnmatched).toMatchObject({ created: true, receipt: { matchStatus: "unmatched" } });
+    const duplicateUnmatched = await store.receipts.record({
       tenantId: tenantB, dedupeKey: "receipt:unmatched", providerBizId: "biz-unmatched",
       deliveryStatus: "failed", occurredAt: new Date("2026-09-13T00:00:21.000Z"), receivedAt: new Date("2026-09-13T00:00:21.000Z"), source: "callback",
-    })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
+    });
+    expect(duplicateUnmatched).toMatchObject({ created: false, receipt: { matchStatus: "unmatched" } });
+    expect(duplicateUnmatched.receipt).not.toHaveProperty("tenantId");
+    expect(duplicateUnmatched.receipt).not.toHaveProperty("messageId");
+  });
+
+  it("does not reverse a terminal receipt when the accepted response arrives later", async () => {
+    const created = await createMessage(messageFixture());
+    const attempt = await store.attempts.createStarted({
+      tenantId: tenantA, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: new Date("2026-09-13T00:01:00.000Z"),
+    });
+    await store.messages.completeDelivery({
+      tenantId: tenantA, id: created.message.id, status: "delivered", occurredAt: new Date("2026-09-13T00:01:01.000Z"),
+    });
+
+    const completed = await store.messages.completeAcceptance({
+      tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "accepted", evidence: "same-dispatch-response",
+      occurredAt: new Date("2026-09-13T00:01:02.000Z"),
+    });
+
+    expect(completed).toMatchObject({ acceptanceStatus: "accepted", deliveryStatus: "delivered" });
+    expect(completed.acceptedAt).toEqual(new Date("2026-09-13T00:01:02.000Z"));
+  });
+
+  it("preserves unknown-final delivery and only records accepted_at for acceptance", async () => {
+    const created = await createMessage(messageFixture());
+    const attempt = await store.attempts.createStarted({
+      tenantId: tenantA, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: new Date("2026-09-13T00:02:00.000Z"),
+    });
+    const unknown = await store.messages.completeAcceptance({
+      tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "unknown", evidence: "same-dispatch-response",
+      occurredAt: new Date("2026-09-13T00:02:01.000Z"),
+    });
+    expect(unknown.acceptedAt).toBeUndefined();
+    await store.messages.completeDelivery({
+      tenantId: tenantA, id: created.message.id, status: "unknown_final", occurredAt: new Date("2026-09-13T00:02:02.000Z"),
+    });
+    const accepted = await store.messages.completeAcceptance({
+      tenantId: tenantA, dispatchToken: attempt.dispatchToken, status: "accepted", evidence: "positive-provider-evidence",
+      occurredAt: new Date("2026-09-13T00:02:03.000Z"),
+    });
+    expect(accepted).toMatchObject({ acceptanceStatus: "accepted", deliveryStatus: "unknown_final" });
+    expect(accepted.acceptedAt).toEqual(new Date("2026-09-13T00:02:03.000Z"));
+
+    const rejectedMessage = await createMessage(messageFixture());
+    const rejectedAttempt = await store.attempts.createStarted({
+      tenantId: tenantA, messageId: rejectedMessage.message.id, dispatchMode: "direct", dispatchMarkedAt: new Date("2026-09-13T00:03:00.000Z"),
+    });
+    const rejected = await store.messages.completeAcceptance({
+      tenantId: tenantA, dispatchToken: rejectedAttempt.dispatchToken, status: "rejected", evidence: "same-dispatch-response",
+      occurredAt: new Date("2026-09-13T00:03:01.000Z"),
+    });
+    expect(rejected.acceptedAt).toBeUndefined();
+  });
+
+  it("projects message metadata and unmatched receipt payloads before JSON persistence", async () => {
+    const created = await createMessage(messageFixture({ metadata: {
+      redactedFields: ["phone", "not-allowed"],
+      counts: [{ name: "message", value: 1 }, { name: "receipt", value: Number.POSITIVE_INFINITY }],
+      phone: "+8613800138000",
+      nested: { secret: "must-not-persist" },
+    } as never }));
+    const storedMessage = await pool.query<{ metadata: unknown }>("select metadata from sms_kit.send_message where id = $1", [created.message.id]);
+    expect(storedMessage.rows[0]?.metadata).toEqual({ redactedFields: ["phone"], counts: [{ name: "message", value: 1 }] });
+
+    await store.receipts.record({
+      tenantId: tenantA, dedupeKey: `receipt:payload:${randomUUID()}`, providerBizId: "biz-payload", deliveryStatus: "failed",
+      occurredAt: new Date("2026-09-13T00:04:00.000Z"), receivedAt: new Date("2026-09-13T00:04:00.000Z"), source: "callback",
+      redactedPayload: { redactedFields: ["otp", "unknown"], reportCount: 3, nested: { phone: "+8613800138000" } } as never,
+    });
+    const storedReceipt = await pool.query<{ redacted_payload: unknown }>("select redacted_payload from sms_kit.delivery_receipt where provider_biz_id = 'biz-payload'");
+    expect(storedReceipt.rows[0]?.redacted_payload).toEqual({ redactedFields: ["otp"], reportCount: 3 });
   });
 });

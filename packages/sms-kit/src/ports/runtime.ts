@@ -11,6 +11,50 @@ export type SafeEventMetadata = Readonly<{
   counts?: readonly Readonly<{ name: SafeMetricName; value: number }>[];
 }>;
 
+export type SafeReceiptPayload = Readonly<{
+  redactedFields: readonly RedactedField[];
+  reportCount?: number;
+}>;
+
+const redactedFields = new Set<RedactedField>(["phone", "otp", "proof", "secret", "template-params"]);
+const metricNames = new Set<SafeMetricName>(["attempt", "job", "message", "receipt", "resource", "rate-limit"]);
+
+/** Projects untrusted diagnostics to the finite persistence-safe metadata schema. */
+export function projectSafeEventMetadata(input: unknown): SafeEventMetadata {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return {};
+  const source = input as Record<string, unknown>;
+  const safeFields = Array.isArray(source.redactedFields)
+    ? source.redactedFields.filter((field): field is RedactedField => typeof field === "string" && redactedFields.has(field as RedactedField))
+    : [];
+  const safeCounts = Array.isArray(source.counts)
+    ? source.counts.flatMap((count) => {
+      if (typeof count !== "object" || count === null || Array.isArray(count)) return [];
+      const value = count as Record<string, unknown>;
+      return typeof value.name === "string" && metricNames.has(value.name as SafeMetricName) &&
+        typeof value.value === "number" && Number.isFinite(value.value)
+        ? [{ name: value.name as SafeMetricName, value: value.value }]
+        : [];
+    })
+    : [];
+  return {
+    ...(safeFields.length === 0 ? {} : { redactedFields: safeFields }),
+    ...(safeCounts.length === 0 ? {} : { counts: safeCounts }),
+  };
+}
+
+/** Projects callback diagnostics before they enter JSONB, discarding nested or unknown values. */
+export function projectSafeReceiptPayload(input: unknown): SafeReceiptPayload {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return { redactedFields: [] };
+  const source = input as Record<string, unknown>;
+  const safeFields = Array.isArray(source.redactedFields)
+    ? source.redactedFields.filter((field): field is RedactedField => typeof field === "string" && redactedFields.has(field as RedactedField))
+    : [];
+  const reportCount = typeof source.reportCount === "number" && Number.isFinite(source.reportCount) && source.reportCount >= 0
+    ? source.reportCount
+    : undefined;
+  return { redactedFields: safeFields, ...(reportCount === undefined ? {} : { reportCount }) };
+}
+
 export interface TenantContext<Input = unknown> {
   /** Input is supplied by a trusted host-authentication boundary, never a request body. */
   resolve(input: Input): Promise<TenantId> | TenantId;
