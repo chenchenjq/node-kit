@@ -1,3 +1,24 @@
+-- A lease held across the v2-to-v3 deployment may already have reached the
+-- provider. Fence it permanently as uncertain instead of making it retryable.
+UPDATE sms_kit.send_message message
+   SET acceptance_status = 'unknown',
+       delivery_status = 'waiting',
+       final_error_code = coalesce(final_error_code, 'ACCEPTANCE_UNKNOWN'),
+       version = version + 1,
+       updated_at = now()
+  FROM sms_kit.send_job job
+ WHERE job.message_id = message.id
+   AND job.state = 'leased'
+   AND message.acceptance_status = 'pending';
+UPDATE sms_kit.send_job
+   SET state = 'dead',
+       lease_owner = null,
+       lease_token = null,
+       lease_until = null,
+       last_error_code = coalesce(last_error_code, 'ACCEPTANCE_UNKNOWN'),
+       updated_at = now()
+ WHERE state = 'leased';
+
 ALTER TABLE sms_kit.delivery_receipt ADD COLUMN tenant_id text;
 
 UPDATE sms_kit.delivery_receipt receipt
