@@ -17,7 +17,9 @@ import type { SecretResolver } from "../ports/security.js";
 import type { AliyunApi, AliyunQueryOutput } from "./api.js";
 import { AliyunSdkClientFactory, type AliyunClientFactory } from "./client.js";
 import { classifyAliyunError } from "./error-map.js";
-import { mapSignature, mapTemplate } from "./resource-map.js";
+import { listAllAliyunSignatures, listAllAliyunTemplates } from "./resource-map.js";
+import { parseAliyunReceiptBatch } from "./receipt.js";
+import { withProviderTimeout } from "../ports/provider-timeout.js";
 
 export type AliyunSmsProviderOptions = Readonly<{
   secretResolver: SecretResolver;
@@ -47,44 +49,26 @@ export class AliyunSmsProvider implements SmsProvider {
   }
 
   async listSignatures(input: ProviderListInput): Promise<ProviderPage<ProviderSignature>> {
-    const page = await this.withApi(input, (api) => api.querySmsSignList({
-      pageIndex: this.pageIndex(input.cursor),
-      pageSize: input.pageSize,
-    }));
-    this.assertSuccessfulResponse(page);
-    const currentPage = page.currentPage ?? this.pageIndex(input.cursor);
-    const totalCount = page.totalCount ?? 0;
-
-    return {
-      items: this.mapResources(page.smsSignList, mapSignature),
-      nextCursor: currentPage * input.pageSize < totalCount ? String(currentPage + 1) : undefined,
-    };
+    return this.withApi(input, (api) => listAllAliyunSignatures(api, { pageSize: input.pageSize }));
   }
 
   async listTemplates(input: ProviderListInput): Promise<ProviderPage<ProviderTemplate>> {
-    const page = await this.withApi(input, (api) => api.querySmsTemplateList({
-      pageIndex: this.pageIndex(input.cursor),
-      pageSize: input.pageSize,
-    }));
-    this.assertSuccessfulResponse(page);
-    const currentPage = page.currentPage ?? this.pageIndex(input.cursor);
-    const totalCount = page.totalCount ?? 0;
-
-    return {
-      items: this.mapResources(page.smsTemplateList, mapTemplate),
-      nextCursor: currentPage * input.pageSize < totalCount ? String(currentPage + 1) : undefined,
-    };
+    return this.withApi(input, (api) => listAllAliyunTemplates(api, { pageSize: input.pageSize }));
   }
 
   async send(input: ProviderSendInput): Promise<ProviderSendResult> {
     try {
-      const output = await this.withApi(input, (api) => api.sendSms({
-        phoneNumbers: input.phoneNumber,
-        signName: input.signatureName,
-        templateCode: input.templateCode,
-        templateParam: JSON.stringify(input.templateParams),
-        outId: input.outId,
-      }));
+      const output = await withProviderTimeout((signal) => this.withApi(input, (api) => {
+        signal.throwIfAborted();
+        return api.sendSms({
+          phoneNumbers: input.phoneNumber,
+          signName: input.signatureName,
+          templateCode: input.templateCode,
+          templateParam: JSON.stringify(input.templateParams),
+          outId: input.outId,
+          timeoutMs: input.timeoutMs,
+        });
+      }), input.timeoutMs);
       if (output.code === "OK" && output.bizId !== undefined && output.requestId !== undefined) {
         return { kind: "accepted", bizId: output.bizId, requestId: output.requestId };
       }
@@ -93,7 +77,7 @@ export class AliyunSmsProvider implements SmsProvider {
       }
       return { kind: "unknown", code: "ACCEPTANCE_UNKNOWN" };
     } catch (error) {
-      return this.toSendResult(classifyAliyunError(error));
+      return this.toSendResult(error instanceof SmsKitError ? error : classifyAliyunError(error));
     }
   }
 
@@ -113,19 +97,9 @@ export class AliyunSmsProvider implements SmsProvider {
     }
   }
 
-  parseReceipt(_input: unknown): ProviderReceiptBatch {
-    return { items: [], acknowledgement: { code: 0, msg: "OK" } };
-  }
-
-  private mapResources<TInput, TOutput>(
-    resources: readonly TInput[] | undefined,
-    map: (resource: TInput) => TOutput,
-  ): TOutput[] {
-    try {
-      return (resources ?? []).map(map);
-    } catch {
-      throw new SmsKitError("PROVIDER_UNAVAILABLE", "Alibaba Cloud SMS resources are unavailable", true);
-    }
+  parseReceipt(input: unknown): ProviderReceiptBatch {
+    if (typeof input !== "string" && !(input instanceof Uint8Array)) throw new SmsKitError("CONFIG_INVALID", "invalid Aliyun delivery receipt");
+    return { items: parseAliyunReceiptBatch(input).map(({ providerMessage: _message, ...receipt }) => receipt), acknowledgement: { code: 0, msg: "成功" } };
   }
 
   private async withApi<T>(input: ProviderAuthInput, operation: (api: AliyunApi) => Promise<T>): Promise<T> {
@@ -145,17 +119,9 @@ export class AliyunSmsProvider implements SmsProvider {
   }
 
   private assertSuccessfulResponse(response: { code?: string }): void {
-    if (response.code !== undefined && response.code !== "OK") {
+    if (response.code !== "OK") {
       throw classifyAliyunError(response);
     }
-  }
-
-  private pageIndex(cursor: string | undefined): number {
-    if (cursor === undefined) {
-      return 1;
-    }
-    const value = Number(cursor);
-    return Number.isSafeInteger(value) && value > 0 ? value : 1;
   }
 
   private toSendResult(error: ReturnType<typeof classifyAliyunError>): ProviderSendResult {

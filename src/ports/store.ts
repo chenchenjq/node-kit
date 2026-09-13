@@ -224,6 +224,8 @@ export type ResourceSyncPreview = Readonly<{
 }>;
 
 export interface ResourceRepository {
+  /** With a transaction, hold a shared row lock until dispatch eligibility has been committed. */
+  findSignatureById(input: Readonly<{ id: string }>, tx?: SmsTransaction): Promise<Signature | undefined>;
   listSignatures(input: Readonly<{ page: number; pageSize: number }>, tx?: SmsTransaction): Promise<{
     items: readonly Signature[];
     total: number;
@@ -232,6 +234,7 @@ export interface ResourceRepository {
     items: readonly Template[];
     total: number;
   }>;
+  /** With a transaction, hold a shared row lock until dispatch eligibility has been committed. */
   findTemplateByKey(input: Readonly<{ templateKey: string }>, tx?: SmsTransaction): Promise<Template | undefined>;
   createSyncPreview(input: Readonly<{
     id: string;
@@ -308,7 +311,10 @@ export type TenantMessageQuery = Readonly<{
 }>;
 
 export interface MessageRepository {
+  /** Reject only pending work with no potentially accepted dispatch; caller owns the job lock. */
+  rejectUndispatched(input: Readonly<{ tenantId: TenantId; id: MessageId; errorCode: string; occurredAt: Date }>, tx: SmsTransaction): Promise<void>;
   createWithSendJob(input: CreateMessageInput, tx?: SmsTransaction): Promise<{ message: Message; created: boolean }>;
+  /** A transactional read locks the message against concurrent dispatch and retention. */
   get(input: Readonly<{ tenantId: TenantId; id: MessageId }>, tx?: SmsTransaction): Promise<Message | undefined>;
   /** Locks the message and its authoritative dispatch attempt together. */
   lockByDispatchToken(input: Readonly<{ tenantId: TenantId; dispatchToken: string }>, tx: SmsTransaction): Promise<Message | undefined>;
@@ -586,6 +592,10 @@ export interface MaintenanceRepository {
 }
 
 export type HealthCounts = Readonly<{
+  usableTemplates?: number;
+  waitingMessages?: number;
+  oldestWaitingAt?: Date;
+  oldestPendingJobAt?: Date;
   pendingJobs: number;
   acceptanceUnknown: number;
   finalUnknown: number;

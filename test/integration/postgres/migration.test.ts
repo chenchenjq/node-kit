@@ -67,14 +67,14 @@ describe("sms-kit PostgreSQL migration", () => {
     ]);
     await expect(columnIsNotNull(pool, "send_message", "tenant_id")).resolves.toBe(true);
     await expect(columnIsNotNull(pool, "otp_challenge", "tenant_id")).resolves.toBe(true);
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(3);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(4);
   }, 60_000);
 
   it("upgrades the fixed previous-version fixture", async () => {
     const { pool } = postgres;
     await pool.query(await readFile(previousV2SchemaFixture, "utf8"));
     await migrateSmsKit(pool);
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(3);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(4);
     await migrateSmsKit(pool);
     await expect(allRequiredConstraintsExist(pool)).resolves.toBe(true);
   }, 60_000);
@@ -86,7 +86,7 @@ describe("sms-kit PostgreSQL migration", () => {
 
     await migrateSmsKit(pool);
 
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(3);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(4);
     await expect(pool.query<{ state: string; lease_token: string | null; last_error_code: string | null }>("select state, lease_token, last_error_code from sms_kit.send_job where dedupe_key = 'v1-leased'"))
       .resolves.toMatchObject({ rows: [{ state: "dead", lease_token: null, last_error_code: "ACCEPTANCE_UNKNOWN" }] });
     await expect(pool.query<{ acceptance_status: string; delivery_status: string }>("select acceptance_status, delivery_status from sms_kit.send_message where id = '00000000-0000-4000-8000-000000000012'"))

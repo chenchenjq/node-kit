@@ -1,4 +1,6 @@
 import { SmsKitError } from "../core/errors.js";
+import { isCloudApproved } from "../core/resource-usability.js";
+import { withProviderTimeout } from "../ports/provider-timeout.js";
 import { positiveTimeoutMs, type SmsProvider, type ProviderSendResult } from "../ports/provider.js";
 import type { Clock } from "../ports/runtime.js";
 import type { MessagePayloadProtector, PhoneNumberProtector } from "../ports/security.js";
@@ -70,6 +72,21 @@ export class SendWorker {
       if (renewed.leaseUntil === undefined || renewed.leaseUntil <= minimumLeaseUntil) {
         throw new SmsKitError("CONCURRENT_MODIFICATION", "job lease is insufficient for provider dispatch");
       }
+      const message = await this.dependencies.store.messages.get({ tenantId: job.tenantId, id: job.messageId! }, tx);
+      if (message === undefined || message.acceptanceStatus !== "pending") throw new SmsKitError("CONCURRENT_MODIFICATION", "message is not pending");
+      const template = await this.dependencies.store.resources.findTemplateByKey({ templateKey: message.templateKeySnapshot }, tx);
+      const signature = template === undefined ? undefined : await this.dependencies.store.resources.findSignatureById({ id: template.signatureId }, tx);
+      const templateUsable = template !== undefined && template.id === message.templateId && template.enabled && isCloudApproved(template.externalStatus) &&
+        template.templateType === "notification" && template.purpose === message.purpose && template.externalCode === message.externalTemplateCodeSnapshot &&
+        template.variables.length === message.variableNames.length && template.variables.every(({ name }) => message.variableNames.includes(name));
+      const signatureUsable = signature !== undefined && signature.enabled && isCloudApproved(signature.externalStatus) && signature.externalName === message.signatureNameSnapshot;
+      if (!templateUsable || !signatureUsable) {
+        const errorCode = !templateUsable ? "TEMPLATE_UNAVAILABLE" : "SIGNATURE_UNAVAILABLE";
+        await this.dependencies.store.messages.rejectUndispatched({ tenantId: job.tenantId, id: message.id, errorCode, occurredAt: this.dependencies.clock.now() }, tx);
+        await this.dependencies.store.policy.releaseBudget({ tenantId: job.tenantId, messageId: message.id }, tx);
+        await this.dependencies.store.jobs.fail({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken!, errorCode, terminal: true }, tx);
+        return undefined;
+      }
       // createStarted locks the message and proves this exact queued token owns
       // a leased send job. Budget holding is idempotent per message.
       await this.dependencies.store.policy.holdBudget({ tenantId: job.tenantId, messageId: job.messageId!, now: this.dependencies.clock.now() }, tx);
@@ -82,6 +99,7 @@ export class SendWorker {
         minimumLeaseUntil,
       }, tx);
     });
+    if (prepared === undefined) return;
 
     // Never extend the transaction across decryption, config lookup, or I/O.
     const providerInput = await this.openProviderInput(job, input.providerTimeoutMs);
@@ -94,7 +112,7 @@ export class SendWorker {
     const startedAt = this.dependencies.clock.now();
     let result: ProviderSendResult;
     try {
-      result = await this.dependencies.provider.send(providerInput);
+      result = await withProviderTimeout(() => this.dependencies.provider.send(providerInput), input.providerTimeoutMs);
     } catch {
       result = { kind: "unknown", code: "ACCEPTANCE_UNKNOWN" };
     }
@@ -151,6 +169,7 @@ export class SendWorker {
         const message = await messages.completeAcceptance({ tenantId: job.tenantId, dispatchToken, status: "accepted", evidence: "same-dispatch-response", providerBizId: result.bizId, providerRequestId: result.requestId, occurredAt }, tx);
         if (attempt.status !== "accepted") await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "accepted", providerRequestId: result.requestId, latencyMs, occurredAt }, tx);
         await messages.clearRenderParams({ tenantId: job.tenantId, id: message.id }, tx);
+        await jobs.ensureReconcile({ tenantId: job.tenantId, messageId: message.id, availableAt: occurredAt }, tx);
         if (ownsLease) await jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
         return;
       }

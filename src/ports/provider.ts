@@ -87,6 +87,7 @@ export type ProviderDeliveryResult =
 
 export type ProviderReceipt = Readonly<{
   bizId: string;
+  outId?: string;
   deliveryStatus: "delivered" | "failed";
   providerCode?: string;
   providerMessage?: string;
