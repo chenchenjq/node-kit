@@ -68,12 +68,24 @@ export class PgAttemptRepository implements AttemptRepository {
     const { rows } = await db(this.pool, tx).query<AttemptRow>(
       `select ${fields} from sms_kit.send_attempt a
         join sms_kit.send_message m on m.id = a.message_id
-        left join sms_kit.send_job j on j.message_id = a.message_id and j.job_type = 'send' and j.lease_token = a.lease_token
        where ($1::text is null or m.tenant_id = $1) and a.status = 'started'
-         and (a.dispatch_mode = 'direct' and a.dispatch_marked_at < $2
-           or a.dispatch_mode = 'queued' and j.state = 'leased' and j.lease_until < $2)
+         and a.dispatch_mode = 'direct' and a.dispatch_marked_at < $2
        order by a.dispatch_marked_at, a.id for update of a skip locked limit $3`,
       [input.tenantId ?? null, input.before, input.limit],
+    );
+    return rows.map(attempt);
+  }
+
+  async listStartedForLeasedJobs(input: Readonly<{ jobs: readonly Readonly<{ tenantId: Attempt["tenantId"]; id: string; leaseToken: string }>[]; limit: number }>, tx: SmsTransaction): Promise<readonly Attempt[]> {
+    if (input.jobs.length === 0) return [];
+    const { rows } = await db(this.pool, tx).query<AttemptRow>(
+      `select ${fields} from sms_kit.send_attempt a
+        join sms_kit.send_message m on m.id = a.message_id
+        join sms_kit.send_job j on j.message_id = a.message_id and j.job_type = 'send' and j.lease_token = a.lease_token
+        join unnest($1::uuid[], $2::uuid[]) locked(id, lease_token) on j.id = locked.id and j.lease_token = locked.lease_token
+       where a.status = 'started' and a.dispatch_mode = 'queued' and j.state = 'leased'
+       order by a.dispatch_marked_at, a.id for update of a skip locked limit $3`,
+      [input.jobs.map((job) => job.id), input.jobs.map((job) => job.leaseToken), input.limit],
     );
     return rows.map(attempt);
   }

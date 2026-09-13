@@ -9,6 +9,7 @@ import type { SmsProvider } from "../../../src/ports/provider.js";
 import type { TenantId } from "../../../src/core/types.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
+import type { SmsStore } from "../../../src/ports/store.js";
 import { startPostgres } from "../postgres/helpers.js";
 
 const tenantId = "recovery-tenant" as TenantId;
@@ -64,7 +65,7 @@ describe("DispatchRecoveryService", () => {
     const service = new SendService({ store, provider: provider as never, ...protectors, clock, ids: { next: () => crypto.randomUUID(), messageId: () => crypto.randomUUID() as never }, events: { emit: () => undefined }, providerTimeoutMs: 1_000 });
     return (await service.enqueueNotification({ tenantId, templateKey: "order.recovery", phone: "13800138000", variables: { orderNo: "A-200" }, purpose: "notification", idempotencyKey: key })).id;
   }
-  const worker = () => new SendWorker({ store, provider: provider as never, ...protectors, clock });
+  const worker = (currentStore: SmsStore = store) => new SendWorker({ store: currentStore, provider: provider as never, ...protectors, clock });
   const recovery = () => new DispatchRecoveryService({ store, clock });
 
   it("does not resend when an outstanding provider call outlives its lease and accepts its late same-token response", async () => {
@@ -111,6 +112,66 @@ describe("DispatchRecoveryService", () => {
     await expect(store.messages.get({ tenantId, id: messageId as never })).resolves.toMatchObject({ acceptanceStatus: "rejected", finalErrorCode: "MOBILE_INVALID" });
     expect(budget.rows).toEqual([{ state: "released" }]);
     expect(provider.calls.send).toBe(1);
+  });
+
+  it("does not let recovery lock a queued attempt when completion already holds its job fence", async () => {
+    clock = new Clock(); provider = new DeferredProvider(); provider.defer = true;
+    const messageId = await enqueue("completion-job-fence");
+    let releaseCompletion: (() => void) | undefined;
+    const completionReleased = new Promise<void>((resolve) => { releaseCompletion = resolve; });
+    let signalJobLocked: (() => void) | undefined;
+    const jobLocked = new Promise<void>((resolve) => { signalJobLocked = resolve; });
+    const pausedJobs = new Proxy(store.jobs, {
+      get(target, property) {
+        if (property === "getForUpdate") return async (input: Parameters<typeof target.getForUpdate>[0], tx: Parameters<typeof target.getForUpdate>[1]) => {
+          const locked = await target.getForUpdate(input, tx);
+          signalJobLocked?.();
+          await completionReleased;
+          return locked;
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const pausedStore = new Proxy(store, {
+      get(target, property) {
+        if (property === "jobs") return pausedJobs;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as SmsStore;
+    const original = worker(pausedStore).runBatch({ workerId: "w1", limit: 1, leaseMs: 30_000, providerTimeoutMs: 1_000 });
+    await provider.waitUntilSendCalled();
+    clock.advanceBy(31_000);
+    provider.resolveNext({ kind: "accepted", bizId: "fenced-biz", requestId: "fenced-request" });
+    await jobLocked;
+    const recoveryRun = recovery().runBatch({ limit: 10, abandonedBefore: clock.now() });
+    const recoveryResult = await Promise.race([
+      recoveryRun.then(() => "finished" as const),
+      new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+    ]);
+    expect(recoveryResult).toBe("finished");
+    releaseCompletion?.();
+    await expect(original).resolves.toBe(1);
+    const budget = await pool.query<{ state: string }>("select state from sms_kit.send_budget_reservation where message_id = $1", [messageId]);
+    await expect(store.messages.get({ tenantId, id: messageId as never })).resolves.toMatchObject({ acceptanceStatus: "accepted", providerBizId: "fenced-biz" });
+    expect(budget.rows).toEqual([{ state: "held" }]);
+  });
+
+  it("continues to recover expired direct attempts without a queued job fence", async () => {
+    clock = new Clock(); provider = new DeferredProvider();
+    const template = await store.resources.findTemplateByKey({ templateKey: "order.recovery" });
+    if (template === undefined) throw new Error("seed template missing");
+    const created = await store.messages.createWithSendJob({
+      id: crypto.randomUUID() as never, tenantId, idempotencyKey: "direct-recovery", templateId: template.id,
+      templateKeySnapshot: template.templateKey, externalTemplateCodeSnapshot: template.externalCode, signatureNameSnapshot: "Recovery",
+      purpose: "notification", phoneCiphertext: "phone", phoneKeyId: "phone-k1", phoneHash: "direct-hash", phoneLast4: "0000", phoneMasked: "138****0000",
+      variableNames: ["orderNo"], renderParamsCiphertext: "params", renderParamsKeyId: "params-k1", metadata: {}, submittedAt: clock.now(),
+    });
+    await store.attempts.createStarted({ tenantId, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: clock.now() });
+    clock.advanceBy(31_000);
+    await expect(recovery().runBatch({ limit: 10, abandonedBefore: clock.now() })).resolves.toBe(1);
+    await expect(store.messages.get({ tenantId, id: created.message.id })).resolves.toMatchObject({ acceptanceStatus: "unknown" });
   });
 
   it("locks an expired job before the fresh marker recheck so a blocked marker cannot be orphaned", async () => {
