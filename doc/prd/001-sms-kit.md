@@ -2,7 +2,7 @@
 
 ## 1. 文档信息
 
-- 状态：修订待复审
+- 状态：已批准，实施计划已生成
 - 日期：2026-09-13
 - 目标包：`sms-kit`
 - 目标目录：`packages/sms-kit/`
@@ -43,7 +43,7 @@
 | 包名 | `sms-kit`，初始设置 `"private": true` |
 | 技术基线 | TypeScript strict、Node.js 20+、ESM、类型声明、server-only |
 | 数据访问 | 核心 ORM 无关；提供 PostgreSQL DDL、迁移、可选 `pg` 适配器及契约测试 |
-| 部署模型 | 单系统实例、单活动短信配置 |
+| 部署模型 | 单系统实例、单活动短信配置；运行数据租户感知，单租户使用固定默认租户键 |
 | 供应商 | 阿里云国内短信 |
 | 凭据 | 只持久化密钥引用；内置环境变量解析器并允许自定义解析器 |
 | 模板调用 | 管理员录入本地稳定键，业务模块不依赖阿里云 TemplateCode |
@@ -57,26 +57,31 @@
 
 建议通过 `package.json` 的 `exports` 暴露以下子路径：
 
-- `sms-kit/core`：领域类型、发送服务、模板变量校验、状态机、错误模型。
+- `sms-kit/core`：领域类型、模板变量校验、状态机和错误模型。
+- `sms-kit/application`：配置、资源同步、发送、Challenge、回执、补查和维护服务。
 - `sms-kit/aliyun`：阿里云授权测试、签名/模板查询、发送、回执解析和发送详情查询。
-- `sms-kit/storage`：ORM 无关的 Store 接口、事务接口和存储契约测试。
+- `sms-kit/ports`：ORM 无关的 Provider、Store、事务、安全和运行时接口。
 - `sms-kit/postgres`：可选 `pg` 适配器、迁移器和测试数据工具。
 - `sms-kit/better-auth`：Better Auth Phone Number 插件发送回调适配器。
 - `sms-kit/next`：管理 API、回执和定时任务所需的 Route Handler 工厂。
+- `sms-kit/next/types`：可供宿主前端以 `import type` 使用的公开 DTO 类型。
 - `sms-kit/testing`：模拟 Provider、固定时钟、种子工厂和故障注入工具。
 
 核心模块不得依赖 Next.js、Better Auth、阿里云 SDK 或 PostgreSQL 驱动。所有运行时入口必须声明为仅服务端使用，避免凭据解析和数据库代码进入浏览器包。
 
+供应商配置、签名和模板属于系统级共享资源；消息、任务、Challenge、限流、审计和统计必须携带宿主可信来源提供的 `tenantId` 并按租户隔离。`tenantId` 不得从未认证的请求体或查询参数直接接受。单租户宿主使用一个固定默认租户键即可，不需要实现租户选择界面。
+
 ### 6.1 稳定端口
 
 - `SmsProvider`：测试授权、列出云端资源、发送、查询发送详情、解析回执。
-- `SmsStore`：配置、资源、消息、尝试、回执、任务、Challenge、限流、审计和统计的持久化。
+- `SmsStore`：配置、资源、消息、尝试、回执、任务、Challenge、限流、审计和统计的持久化；运行数据操作显式接收 `TenantId`。
 - `SecretResolver`：根据引用按需解析 Secret。
 - `PhoneNumberProtector`：规范化、加密、解密、检索哈希和脱敏。
 - `MessagePayloadProtector`：加密、解密普通异步短信的模板变量，并携带密钥版本用于轮换。
 - `Authorizer`：由宿主决定管理操作是否允许。
+- `TenantContext`：由宿主认证边界解析可信租户；单租户实现始终返回固定租户键。
 - `SmsTransaction`：允许 `pg` 适配器加入宿主现有事务，用于原子消费高风险证明。
-- `Clock`、`IdGenerator`、`EventSink`：支持确定性测试和可观测性。
+- `Clock`、`Sleeper`、`IdGenerator`、`EventSink`：支持确定性时间、响应时延测试和可观测性。
 
 ## 7. 功能需求
 
@@ -111,6 +116,7 @@
 
 业务模块使用稳定模板键调用，不直接传入签名名称或 TemplateCode。核心发送输入至少包含：
 
+- 可信宿主上下文解析的 `tenantId`
 - `templateKey`
 - 中国内地手机号
 - 模板变量对象
@@ -126,6 +132,7 @@
 - OTP 走优先直发路径，不进入持久化普通短信队列，也不做自动重复发送。Better Auth 宿主可使用 `waitUntil` 或等价机制在响应外完成这次直接调用，但必须保留发送任务的执行承诺，并统一外部响应时序以降低账号枚举和时序侧信道风险。
 - 普通事务短信先在同一事务中创建消息和任务；手机号密文及模板变量密文随消息保存，由 Worker 在租约期间按需解密后发送。OTP 变量不得进入该异步载荷。
 - 相同业务幂等键不得创建重复短信。
+- 业务幂等键在租户内唯一；同一键可被不同租户独立使用，所有读取、统计和人工补查均限制在当前租户。
 - 只有供应商明确拒绝受理且明确标识为可重试的限流或暂时不可用响应，才允许指数退避和抖动，默认最多三次供应商调用。
 - 网络超时、连接中断或进程崩溃导致“可能已经提交”的情况必须把 `acceptance_status` 标记为 `unknown`，先等待回执或补查，禁止自动重发。OutId 只用于业务关联，不视为供应商幂等键。
 - 永久失败不重试；每次调用均记录独立 Attempt。
@@ -148,8 +155,9 @@
 - 默认验证码长度为 6 位、有效期 5 分钟、最多验证 3 次。
 - 验证成功签发随机、短时、单次使用的证明；数据库保存证明哈希。
 - 证明绑定 `subjectId + action + challengeId`，不能跨用户、跨动作或重复使用。
+- 消费请求必须携带宿主生成的业务 `consumptionKey`。同一证明与同一 `consumptionKey` 的重复请求返回首次消费结果；不同 `consumptionKey` 再次消费必须失败。
 - 当宿主业务数据与 `sms-kit` 使用同一 PostgreSQL 数据库时，必须通过 `SmsTransaction` 复用同一 `pg` 事务，使用条件更新消费证明并执行实际高风险操作。
-- 不同数据库或无法共享事务时，宿主只能调用带业务幂等键的高风险操作，并采用“先条件消费证明、再执行幂等业务操作、失败可安全重放”的补偿契约。适配器必须显式声明所选模式，不能声称提供跨数据库原子性。
+- 不同数据库或无法共享事务时，宿主只能调用带同一 `consumptionKey` 的幂等高风险操作，并采用“幂等消费证明、执行同键业务操作、失败后以同键安全重放”的补偿契约。适配器必须显式声明所选模式，不能声称提供跨数据库原子性。
 
 ### 7.8 防刷与预算
 
@@ -260,7 +268,7 @@ UI 技术栈和交互规则见 `doc/前端开发规范.md`。可直接用于编�
 | `POST /config/test-connection` | `config.write` | `ConnectionTestResultDto` |
 | `POST /config/test-send` | `sms.test` | `TestSendInput`、`MessageDto` |
 | `POST /resources/sync-preview` | `resource.sync` | `ResourceSyncPreviewDto`，包含同步 ID、校验和和过期时间 |
-| `POST /resources/sync-commit` | `resource.sync` | `ResourceSyncCommitInput`，必须回传候选 ID 与校验和 |
+| `POST /resources/sync-commit` | `resource.sync` | `ResourceSyncCommitInput`、`ResourceSyncCommitResultDto`；请求必须回传候选 ID 与校验和 |
 | `GET /signatures`、`PATCH /signatures/:id` | `config.read/signature.manage` | `PageDto<SignatureDto>`、`UpdateSignatureInput` |
 | `GET /templates`、`POST /templates/import`、`PATCH /templates/:id` | `config.read/template.manage` | `PageDto<TemplateDto>`、`ImportTemplateInput`、`UpdateTemplateInput` |
 | `GET/PATCH /verification` | `config.read/config.write` | `VerificationSettingsDto` |
@@ -365,18 +373,20 @@ type MessageDto = {
 14. 未知手机号不会自动注册、不会触发真实短信，且外部响应不泄露账号存在性。
 15. 同步预览在过期或校验和变化后不能提交。
 16. 同库模式下高风险证明消费与业务操作共享事务；跨库模式只允许幂等补偿契约。
+17. 两个租户可使用相同业务幂等键独立发送，消息、Challenge、任务、手机号查询、审计和统计均不能跨租户读取或消费；固定默认租户实现通过同一契约测试。
 
 ## 15. 缺失功能分析结论
 
 原始需求未明确但已纳入首版的必要能力包括：供应商受理与最终送达分离、受理未知禁止自动重发、HTTP 回执入口保护与幂等、定时补查、同步候选快照、模板变量严格校验、异步变量加密、业务幂等、普通短信安全重试、OTP 防刷、未知手机号防枚举、每日预算与熔断、手机号加密与脱敏、数据保留与清理、宿主鉴权与审计、高风险证明事务契约、后台任务租约、可观测性、数据库版本检查和真实联调保护。
 
-以下能力明确推迟：多供应商、国际短信、多租户、批量营销、在线编辑云端模板、成本核算和内置告警渠道。未来增加这些能力时必须单独评审，不应破坏稳定模板键和核心 Ports。
+以下能力明确推迟：多供应商、国际短信、每租户独立短信配置/签名/模板、跨租户运营视图、批量营销、在线编辑云端模板、成本核算和内置告警渠道。首版已经要求运行数据租户隔离；未来扩展租户级资源配置时必须单独评审，不应破坏稳定模板键和核心 Ports。
 
 ## 16. 官方参考
 
 - 阿里云 SendSms：<https://api.aliyun.com/document/Dysmsapi/2017-05-25/SendSms>
 - 阿里云短信 OpenAPI 概览：<https://next.api.aliyun.com/document/Dysmsapi>
 - 阿里云短信回执配置：<https://help.aliyun.com/zh/sms/developer-reference/configure-delivery-receipts-1/>
+- 阿里云国内短信 HTTP 状态报告：<https://help.aliyun.com/zh/sms/developer-reference/smsreport-http>
 - 阿里云 QuerySendDetails：<https://next.api.aliyun.com/document/dysmsapi/2017-05-25/QuerySendDetails>
 - Better Auth Phone Number：<https://better-auth.com/docs/plugins/phone-number>
 - Better Auth 插件开发：<https://better-auth.com/docs/concepts/plugins>
