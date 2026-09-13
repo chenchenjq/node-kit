@@ -47,13 +47,15 @@ async function verifyRecordedChecksums(
   client: PoolClient,
   migrations: readonly (MigrationFile & { sql: string; checksum: string })[],
 ): Promise<void> {
-  const { rows } = await client.query<{ version: string; checksum: string }>(
-    "select version, checksum from sms_kit.schema_migration order by version",
+  const { rows } = await client.query<{ version: string; name: string; checksum: string }>(
+    "select version, name, checksum from sms_kit.schema_migration order by version",
   );
-  const known = new Map(migrations.map((migration) => [migration.version, migration]));
-  for (const row of rows) {
-    const migration = known.get(Number(row.version));
-    if (migration === undefined || migration.checksum !== row.checksum) {
+  for (const [index, row] of rows.entries()) {
+    const migration = migrations[index];
+    if (migration === undefined || migration.version !== Number(row.version)) {
+      throw new SmsKitError("STORAGE_FAILURE", "database migration ledger has a gap");
+    }
+    if (migration.name !== row.name || migration.checksum !== row.checksum) {
       throw new SmsKitError("STORAGE_FAILURE", "database migration checksum mismatch");
     }
   }

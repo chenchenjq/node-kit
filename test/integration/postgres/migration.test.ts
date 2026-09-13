@@ -57,4 +57,15 @@ describe("sms-kit PostgreSQL migration", () => {
     await pool.query("update sms_kit.schema_migration set checksum = 'tampered' where version = 1");
     await expect(migrateSmsKit(pool)).rejects.toThrow("checksum");
   }, 60_000);
+
+  it("rejects a ledger with a missing earlier migration", async () => {
+    const { pool } = postgres;
+    await migrateSmsKit(pool);
+    await pool.query("delete from sms_kit.schema_migration where version = 1");
+
+    await expect(migrateSmsKit(pool)).rejects.toMatchObject({
+      code: "STORAGE_FAILURE",
+      message: "database migration ledger has a gap",
+    });
+  }, 60_000);
 });
