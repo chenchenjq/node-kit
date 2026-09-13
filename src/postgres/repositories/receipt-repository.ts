@@ -27,6 +27,18 @@ export class PgReceiptRepository implements ReceiptRepository {
         [randomUUID(), input.dedupeKey, input.providerBizId, input.deliveryStatus, input.providerCode ?? null, input.providerMessage ?? null, input.occurredAt, input.receivedAt, input.source, redactedPayload, input.messageId, input.tenantId]);
     if (inserted.rows[0] !== undefined) return { receipt: receipt(inserted.rows[0]), created: true };
     if (input.messageId === undefined) return { receipt: unmatchedReceipt(input), created: false };
+    // A report can arrive before the accepted dispatch has persisted its
+    // references. Once the exact opaque pair subsequently locks a message,
+    // promote the system-owned row atomically instead of treating the shared
+    // provider dedupe identity as a cross-tenant conflict.
+    const promoted = await client.query<Row>(`update sms_kit.delivery_receipt receipt
+      set tenant_id = message.tenant_id, message_id = message.id, match_status = 'matched'
+      from sms_kit.send_message message
+      where receipt.dedupe_key = $1 and receipt.match_status = 'unmatched'
+        and message.id = $2 and message.tenant_id = $3
+      returning receipt.id, receipt.tenant_id, receipt.message_id, receipt.match_status, receipt.dedupe_key, receipt.provider_biz_id, receipt.delivery_status, receipt.provider_code, receipt.provider_message, receipt.occurred_at, receipt.received_at, receipt.source`,
+    [input.dedupeKey, input.messageId, input.tenantId]);
+    if (promoted.rows[0] !== undefined) return { receipt: receipt(promoted.rows[0]), created: true };
     const existing = await client.query<Row>(`select ${fields} from sms_kit.delivery_receipt where dedupe_key = $1 and tenant_id = $2 and message_id = $3`, [input.dedupeKey, input.tenantId, input.messageId]);
     if (existing.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "receipt belongs to a different tenant");
     return { receipt: receipt(existing.rows[0]), created: false };

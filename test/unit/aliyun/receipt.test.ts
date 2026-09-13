@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { parseAliyunReceiptBatch } from "../../../src/aliyun/receipt.js";
 
@@ -35,5 +35,20 @@ describe("parseAliyunReceiptBatch", () => {
 
   it("rejects callback fields beyond Alibaba's strict SmsReport shape", () => {
     expect(() => parseAliyunReceiptBatch(JSON.stringify([{ ...report, tenantId: "attacker" }]))).toThrow(/invalid Aliyun delivery receipt/);
+  });
+
+  it("checks Uint8Array byte length before allocating a decoding buffer", () => {
+    const from = vi.spyOn(Buffer, "from");
+
+    expect(() => parseAliyunReceiptBatch(new Uint8Array(65_537))).toThrow(/invalid Aliyun delivery receipt/);
+    expect(from).not.toHaveBeenCalled();
+    from.mockRestore();
+  });
+
+  it("rejects an impossible send_time calendar date rather than normalizing it", () => {
+    expect(() => parseAliyunReceiptBatch(JSON.stringify([{
+      ...report,
+      send_time: "2026-02-30 08:00:00",
+    }]))).toThrow(/invalid Aliyun delivery receipt/);
   });
 });
