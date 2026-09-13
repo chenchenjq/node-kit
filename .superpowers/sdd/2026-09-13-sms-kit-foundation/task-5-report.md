@@ -81,3 +81,53 @@ the concrete implementations and the AES keyring contract.
 ## Commit
 
 `feat: protect sms secrets and sensitive payloads`
+
+## Fix round 1 — Authenticated-inner-envelope tamper coverage
+
+### Requirement addressed
+
+Replaced the authentication-relevant portion of tamper coverage with a focused
+test that decodes a sealed outer base64url envelope, flips one bit in its
+16-byte inner GCM tag, then serializes the same envelope shape back to
+canonical base64url before calling `open()`.
+
+### TDD evidence
+
+1. Added `rejects a canonical envelope with a modified GCM authentication tag`
+   before changing production behavior. The test uses a real protector and
+   real AES-GCM output; it makes no assertions about mocks or implementation
+   text.
+2. To prove this test reaches the authentication finalization path rather than
+   only envelope parsing, temporarily removed `decipher.final()` after the
+   test was in place. RED command:
+
+   ```sh
+   npm test --workspace sms-kit -- test/unit/security/protectors.test.ts -t "canonical envelope"
+   ```
+
+   Result: exited 1. The test failed because `open()` resolved
+   `{ order: "A-100" }` instead of rejecting, demonstrating that an omitted
+   GCM final/authentication check is detected by this canonical-envelope test.
+3. Restored `decipher.final()`; no production behavior change was needed
+   because the implementation was already correctly authenticating the tag.
+   GREEN verification:
+
+   ```sh
+   npm test --workspace sms-kit -- test/unit/security
+   npm run typecheck --workspace sms-kit
+   ```
+
+   Result: both commands exited 0. Vitest reported 2 files and 10 tests
+   passed; typecheck completed without diagnostics.
+
+### Security self-review
+
+- The altered tag remains a correctly sized, canonical base64url field inside
+  a syntactically valid version-1 envelope, so parsing and envelope validation
+  cannot be the reason for rejection.
+- The RED mutation caused decryption update output to deserialize as the
+  original payload; only `decipher.final()` detects the altered GCM tag. This
+  demonstrates the test exercises authenticated decryption rather than a
+  parser-only failure path.
+- The final implementation still maps the authentication failure to the
+  stable, non-sensitive `STORAGE_FAILURE` error.

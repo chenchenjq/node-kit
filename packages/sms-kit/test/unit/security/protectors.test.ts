@@ -22,6 +22,19 @@ function keyring(key = aesKey) {
   };
 }
 
+function withTamperedGcmTag(ciphertext: string): string {
+  const envelope = JSON.parse(Buffer.from(ciphertext, "base64url").toString("utf8")) as {
+    v: 1;
+    iv: string;
+    tag: string;
+    data: string;
+  };
+  const tag = Buffer.from(envelope.tag, "base64url");
+  tag[0] = (tag[0] ?? 0) ^ 1;
+
+  return Buffer.from(JSON.stringify({ ...envelope, tag: tag.toString("base64url") }), "utf8").toString("base64url");
+}
+
 const payloadContext: ProtectionContext = {
   envelopeVersion: 1,
   purpose: "render-params",
@@ -91,6 +104,17 @@ describe("AES-GCM protectors", () => {
       purpose: "phone",
       fieldName: "phone_ciphertext",
     })).rejects.toMatchObject({ code: "STORAGE_FAILURE" });
+  });
+
+  it("rejects a canonical envelope with a modified GCM authentication tag", async () => {
+    const protector = new AesGcmMessagePayloadProtector(keyring());
+    const sealed = await protector.seal({ order: "A-100" }, payloadContext);
+    const tamperedCiphertext = withTamperedGcmTag(sealed.ciphertext);
+
+    await expect(protector.open({ ...sealed, ciphertext: tamperedCiphertext }, payloadContext)).rejects.toMatchObject({
+      code: "STORAGE_FAILURE",
+      message: "protected value could not be opened",
+    });
   });
 
   it("rejects ciphertext opened with different material for the same key id", async () => {
