@@ -92,10 +92,12 @@ async function fetchAll<TPage, TRaw, TMapped extends { externalKey: string }>(
   getItems: (page: TPage) => readonly TRaw[] | undefined,
   getTotal: (page: TPage) => number | undefined,
   getCode: (page: TPage) => string | undefined,
+  getCurrentPage: (page: TPage) => number | undefined,
   map: (resource: TRaw) => TMapped,
 ): Promise<ProviderPage<TMapped>> {
   validatePageSize(pageSize);
   const items: TMapped[] = [];
+  const externalKeys = new Set<string>();
   let expectedTotal: number | undefined;
   try {
     for (let pageIndex = 1; ; pageIndex += 1) {
@@ -104,6 +106,7 @@ async function fetchAll<TPage, TRaw, TMapped extends { externalKey: string }>(
       const totalCount = getTotal(page);
       if (
         getCode(page) !== "OK"
+        || (getCurrentPage(page) !== undefined && getCurrentPage(page) !== pageIndex)
         || (responseItems === undefined && totalCount !== 0)
         || (responseItems !== undefined && !Array.isArray(responseItems))
         || (totalCount !== undefined && (!Number.isSafeInteger(totalCount) || totalCount < 0))
@@ -120,7 +123,14 @@ async function fetchAll<TPage, TRaw, TMapped extends { externalKey: string }>(
         expectedTotal = totalCount;
       }
       const rawItems = responseItems ?? [];
-      items.push(...rawItems.map(map));
+      const mappedItems = rawItems.map(map);
+      for (const item of mappedItems) {
+        if (externalKeys.has(item.externalKey)) {
+          throw new Error("duplicate Aliyun resource key");
+        }
+        externalKeys.add(item.externalKey);
+      }
+      items.push(...mappedItems);
       if (totalCount !== undefined && items.length > totalCount) {
         throw new Error("inconsistent Aliyun resource total");
       }
@@ -159,6 +169,7 @@ export function listAllAliyunSignatures(
     (page: AliyunSignPage) => page.smsSignList,
     (page: AliyunSignPage) => page.totalCount,
     (page: AliyunSignPage) => page.code,
+    (page: AliyunSignPage) => page.currentPage,
     mapSignature,
   );
 }
@@ -173,6 +184,7 @@ export function listAllAliyunTemplates(
     (page: AliyunTemplatePage) => page.smsTemplateList,
     (page: AliyunTemplatePage) => page.totalCount,
     (page: AliyunTemplatePage) => page.code,
+    (page: AliyunTemplatePage) => page.currentPage,
     mapTemplate,
   );
 }

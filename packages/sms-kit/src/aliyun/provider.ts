@@ -56,7 +56,7 @@ export class AliyunSmsProvider implements SmsProvider {
     const totalCount = page.totalCount ?? 0;
 
     return {
-      items: (page.smsSignList ?? []).map(mapSignature),
+      items: this.mapResources(page.smsSignList, mapSignature),
       nextCursor: currentPage * input.pageSize < totalCount ? String(currentPage + 1) : undefined,
     };
   }
@@ -71,7 +71,7 @@ export class AliyunSmsProvider implements SmsProvider {
     const totalCount = page.totalCount ?? 0;
 
     return {
-      items: (page.smsTemplateList ?? []).map(mapTemplate),
+      items: this.mapResources(page.smsTemplateList, mapTemplate),
       nextCursor: currentPage * input.pageSize < totalCount ? String(currentPage + 1) : undefined,
     };
   }
@@ -115,6 +115,17 @@ export class AliyunSmsProvider implements SmsProvider {
 
   parseReceipt(_input: unknown): ProviderReceiptBatch {
     return { items: [], acknowledgement: { code: 0, msg: "OK" } };
+  }
+
+  private mapResources<TInput, TOutput>(
+    resources: readonly TInput[] | undefined,
+    map: (resource: TInput) => TOutput,
+  ): TOutput[] {
+    try {
+      return (resources ?? []).map(map);
+    } catch {
+      throw new SmsKitError("PROVIDER_UNAVAILABLE", "Alibaba Cloud SMS resources are unavailable", true);
+    }
   }
 
   private async withApi<T>(input: ProviderAuthInput, operation: (api: AliyunApi) => Promise<T>): Promise<T> {

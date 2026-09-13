@@ -19,3 +19,11 @@ Implemented complete paginated discovery and safe resource mapping for Aliyun SM
 - `git diff --check` passed.
 
 The tests use the installed SDK 4.6.0 response model types so relevant SDK field changes are checked by TypeScript.
+
+## Review fix round 1
+
+- Added RED regressions proving discovery previously accepted duplicate external keys and a second response that repeated page 1 despite requesting page 2. Both now reject with `PROVIDER_UNAVAILABLE`.
+- Complete discovery now verifies each present `currentPage` equals the requested page and rejects duplicate normalized external keys before returning a snapshot.
+- `SmsProvider.listSignatures()` and `listTemplates()` now translate mapper validation failures to `SmsKitError` with code `PROVIDER_UNAVAILABLE`.
+- Focused RED run: 4 expected failures across the new duplicate-key, page-number, and provider mapping error cases.
+- GREEN verification: Aliyun unit suite passed, 26 tests across 3 files; `npm run typecheck --workspace sms-kit` and `git diff --check` passed.
