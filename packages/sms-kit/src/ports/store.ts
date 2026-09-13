@@ -1,4 +1,4 @@
-import { SmsKitError } from "../core/errors.js";
+import { SmsKitError, type SmsErrorCode } from "../core/errors.js";
 import type { AcceptanceStatus, DeliveryStatus } from "../core/status.js";
 import { validateTemplateKey } from "../core/template.js";
 import type { ChallengeId, MessageId, TemplateId, TenantId } from "../core/types.js";
@@ -496,8 +496,9 @@ export type Challenge = Readonly<{
   verifiedAt?: Date;
   proofHash?: string;
   proofExpiresAt?: Date;
+  deliveryAcceptanceStatus: "pending" | "accepted" | "rejected" | "unknown";
   invalidatedAt?: Date;
-  terminalErrorCode?: "PROVIDER_REJECTED" | "ACCEPTANCE_UNKNOWN";
+  terminalErrorCode?: SmsErrorCode;
 }>;
 export type ConsumeProofResult =
   | { consumed: true; replay: boolean }
@@ -530,11 +531,17 @@ export interface ChallengeRepository {
     proofHash: string;
     proofExpiresAt: Date;
   }>, tx: SmsTransaction): Promise<Challenge>;
+  markDeliveryAcceptance(input: Readonly<{
+    tenantId: TenantId;
+    id: ChallengeId;
+    status: "accepted" | "rejected" | "unknown";
+  }>, tx?: SmsTransaction): Promise<Challenge>;
   invalidate(input: Readonly<{
     tenantId: TenantId;
     id: ChallengeId;
     invalidatedAt: Date;
-    terminalErrorCode: "PROVIDER_REJECTED" | "ACCEPTANCE_UNKNOWN";
+    terminalErrorCode: SmsErrorCode;
+    deliveryAcceptanceStatus: "rejected" | "unknown";
   }>, tx?: SmsTransaction): Promise<Challenge>;
   consumeProof(input: Readonly<{
     tenantId: TenantId;

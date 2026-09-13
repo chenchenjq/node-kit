@@ -11,6 +11,15 @@
 - Invalidated challenges after rejected or acceptance-unknown direct delivery. Unknown acceptance returns a fresh-request instruction and never auto-resends on idempotent replay.
 - Added migration 0005 and migration-test expectations for the new schema version.
 
+## Review remediation (round 1)
+
+- Added migration 0006, which persists `pending`/`accepted`/`rejected`/`unknown` direct-delivery acceptance state and safe terminal error codes. Terminal errors are no longer constrained to only provider-rejected/unknown, so throttling, configuration, rate, and budget outcomes can replay exactly.
+- A challenge is verifiable only after its direct message is accepted. Pending deferred dispatches, rejected/unknown acceptance, and invalidated challenges cannot issue or consume a proof.
+- Serialized challenge idempotency by a tenant-scoped PostgreSQL transaction advisory lock before lookup/create. Concurrent retries now observe the same persisted request outcome.
+- Persisted policy/rate/circuit terminal outcomes atomically with a non-OTP sentinel hash; no OTP is generated or retained for those rejected requests.
+- Loaded one selected policy snapshot for challenge enforcement and challenge recording, eliminating a second policy read.
+- Updated the store contract’s already-verified proof fixture to explicitly model accepted delivery.
+
 ## TDD evidence
 
 - RED: OTP unit test failed because `otp-generator` was absent.
@@ -21,5 +30,9 @@
 ## Verification
 
 - `npm test --workspace sms-kit` — 19 files, 108 tests passed.
-- `npm run test:integration --workspace sms-kit` — 15 files, 117 tests passed.
+- `npm run test:integration --workspace sms-kit` — 15 files, 122 tests passed.
 - `npm run typecheck --workspace sms-kit` — passed.
+- `npm run test:integration --workspace sms-kit -- challenge-service.test.ts` — 12 tests passed (real PostgreSQL, including deferred provider, concurrent retry, throttled replay, rate replay, and policy snapshot regressions).
+- `npm run test:integration --workspace sms-kit -- store-contract.test.ts` — 21 tests passed.
+- `npm test --workspace sms-kit` — 19 files, 108 tests passed.
+- `npm run build --workspace sms-kit` — passed.

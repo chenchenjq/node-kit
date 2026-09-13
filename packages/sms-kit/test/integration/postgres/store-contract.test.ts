@@ -61,8 +61,8 @@ describe("PostgreSQL SmsStore contract", () => {
       createVerifiedProof: async ({ tenantId: resolvedTenantId, subjectId, action, proof, now }) => {
         const id = randomUUID() as ChallengeId;
         await pool.query(
-          `insert into sms_kit.otp_challenge (id, tenant_id, subject_id, action, purpose, phone_hash, code_hash, proof_hash, expires_at, verified_at, proof_expires_at, created_at)
-           values ($1, $2, $3, $4, 'password_change', 'hash:phone', 'hash:code', $5, $6, $6, $7, $6)`,
+          `insert into sms_kit.otp_challenge (id, tenant_id, subject_id, action, purpose, phone_hash, code_hash, proof_hash, expires_at, verified_at, proof_expires_at, delivery_acceptance_status, created_at)
+           values ($1, $2, $3, $4, 'password_change', 'hash:phone', 'hash:code', $5, $6, $6, $7, 'accepted', $6)`,
           [id, resolvedTenantId, subjectId, action, proof, now, new Date(now.getTime() + 300_000)],
         );
         return id;

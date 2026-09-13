@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
-import { SmsKitError } from "../core/errors.js";
+import { SmsKitError, type SmsErrorCode } from "../core/errors.js";
+import type { VerificationPolicy } from "../ports/policy.js";
 import { normalizeMainlandPhone } from "../core/phone.js";
 import type { ChallengeId, TenantId } from "../core/types.js";
 import type { Clock, IdGenerator } from "../ports/runtime.js";
@@ -55,10 +56,13 @@ function requireNonEmpty(value: string, field: string): void {
 }
 
 function terminalError(challenge: Challenge): SmsKitError | undefined {
-  if (challenge.terminalErrorCode === "ACCEPTANCE_UNKNOWN") {
-    return new SmsKitError("ACCEPTANCE_UNKNOWN", "provider acceptance is unknown; request a fresh challenge");
-  }
-  return challenge.terminalErrorCode === undefined ? undefined : new SmsKitError(challenge.terminalErrorCode, "challenge delivery did not complete");
+  if (challenge.terminalErrorCode === undefined) return undefined;
+  if (challenge.terminalErrorCode === "ACCEPTANCE_UNKNOWN") return new SmsKitError("ACCEPTANCE_UNKNOWN", "provider acceptance is unknown; request a fresh challenge");
+  return new SmsKitError(challenge.terminalErrorCode, "challenge delivery did not complete");
+}
+
+function safeTerminalCode(error: unknown): SmsErrorCode {
+  return error instanceof SmsKitError ? error.code : "PROVIDER_REJECTED";
 }
 
 function proofBinding(tenantId: TenantId, subjectId: string, action: string, proof: string): string {
@@ -85,12 +89,28 @@ export class ChallengeService {
       envelopeVersion: 1, purpose: "phone", tenantId: input.tenantId, recordId: id as never, fieldName: "phone_ciphertext",
     });
     const created = await this.dependencies.store.transaction(async (tx) => {
+      await this.dependencies.store.rateLimits.lock({ tenantId: input.tenantId, scopeHash: `challenge:issue:${input.idempotencyKey}` }, tx);
       const existing = await this.dependencies.store.challenges.getByIdempotency({ tenantId: input.tenantId, idempotencyKey: input.idempotencyKey }, tx);
       if (existing !== undefined) return { challenge: existing, created: false, code: undefined as string | undefined, sendPurpose: purpose.send };
       const policy = await this.dependencies.store.policy.get(tx);
-      if (policy.circuitOpen) throw new SmsKitError("CIRCUIT_OPEN", "sending circuit is open");
       const now = this.dependencies.clock.now();
-      await this.enforceIssuePolicy({ input, purpose: purpose.send, phoneHash: protectedPhone.lookupHash, now, tx });
+      try {
+        if (policy.circuitOpen) throw new SmsKitError("CIRCUIT_OPEN", "sending circuit is open");
+        await this.enforceIssuePolicy({ input, policy, purpose: purpose.send, phoneHash: protectedPhone.lookupHash, now, tx });
+      } catch (error) {
+        if (!(error instanceof SmsKitError)) throw error;
+        const challenge = await this.dependencies.store.challenges.create({
+          id, tenantId: input.tenantId, idempotencyKey: input.idempotencyKey, subjectId: input.subjectId, action: input.action,
+          purpose: purpose.challenge, policyVersion: policy.version, otpLength: policy.otpLength, otpTtlSeconds: policy.otpTtlSeconds, proofTtlSeconds: policy.proofTtlSeconds, phoneHash: protectedPhone.lookupHash,
+          // This is a non-OTP sentinel. It lets an otherwise NOT NULL hash column retain a terminal request without ever generating or retaining an OTP.
+          codeHash: await this.dependencies.hasher.hash(`challenge-terminal:${id}`), maxAttempts: policy.otpMaxAttempts,
+          expiresAt: new Date(now.getTime() + policy.otpTtlSeconds * 1_000),
+        }, tx);
+        const terminal = await this.dependencies.store.challenges.invalidate({
+          tenantId: input.tenantId, id: challenge.id, invalidatedAt: now, terminalErrorCode: safeTerminalCode(error), deliveryAcceptanceStatus: "rejected",
+        }, tx);
+        return { challenge: terminal, created: false, code: undefined as string | undefined, sendPurpose: purpose.send };
+      }
       const code = this.otpGenerator.generate(policy.otpLength);
       const challenge = await this.dependencies.store.challenges.create({
         id, tenantId: input.tenantId, idempotencyKey: input.idempotencyKey, subjectId: input.subjectId, action: input.action,
@@ -105,20 +125,22 @@ export class ChallengeService {
     if (!created.created || created.code === undefined) return { id: created.challenge.id, expiresAt: created.challenge.expiresAt };
 
     try {
-      await this.dependencies.sendService.sendOtpNow({
+      const message = await this.dependencies.sendService.sendOtpNow({
         tenantId: input.tenantId, templateKey: created.sendPurpose, phone: input.phone, variables: { code: created.code },
         purpose: created.sendPurpose, idempotencyKey: `challenge:${created.challenge.id}`,
       });
-    } catch (error) {
-      const terminalErrorCode = error instanceof SmsKitError && error.code === "ACCEPTANCE_UNKNOWN" ? "ACCEPTANCE_UNKNOWN" : "PROVIDER_REJECTED";
-      await this.dependencies.store.transaction((tx) => this.dependencies.store.challenges.invalidate({
-        tenantId: input.tenantId, id: created.challenge.id, invalidatedAt: this.dependencies.clock.now(), terminalErrorCode,
-      }, tx));
-      if (terminalErrorCode === "ACCEPTANCE_UNKNOWN") {
-        throw new SmsKitError("ACCEPTANCE_UNKNOWN", "provider acceptance is unknown; request a fresh challenge");
+      if (message.acceptanceStatus === "accepted") {
+        await this.dependencies.store.transaction((tx) => this.dependencies.store.challenges.markDeliveryAcceptance({
+          tenantId: input.tenantId, id: created.challenge.id, status: "accepted",
+        }, tx));
       }
-      if (error instanceof SmsKitError) throw error;
-      throw new SmsKitError("PROVIDER_REJECTED", "provider rejected the SMS");
+    } catch (error) {
+      const terminalErrorCode = safeTerminalCode(error);
+      const invalidated = await this.dependencies.store.transaction((tx) => this.dependencies.store.challenges.invalidate({
+        tenantId: input.tenantId, id: created.challenge.id, invalidatedAt: this.dependencies.clock.now(), terminalErrorCode,
+        deliveryAcceptanceStatus: terminalErrorCode === "ACCEPTANCE_UNKNOWN" ? "unknown" : "rejected",
+      }, tx));
+      throw terminalError(invalidated)!;
     }
     return { id: created.challenge.id, expiresAt: created.challenge.expiresAt };
   }
@@ -128,7 +150,10 @@ export class ChallengeService {
     requireNonEmpty(input.code, "code");
     const result = await this.dependencies.store.transaction(async (tx) => {
       const challenge = await this.dependencies.store.challenges.getForUpdate({ tenantId: input.tenantId, id: input.challengeId }, tx);
-      if (challenge === undefined || challenge.invalidatedAt !== undefined || challenge.verifiedAt !== undefined) return { kind: "invalid" as const };
+      if (challenge === undefined || challenge.verifiedAt !== undefined) return { kind: "invalid" as const };
+      const deliveryError = terminalError(challenge);
+      if (deliveryError !== undefined) return { kind: "delivery" as const, error: deliveryError };
+      if (challenge.deliveryAcceptanceStatus !== "accepted") return { kind: "delivery" as const, error: new SmsKitError("ACCEPTANCE_UNKNOWN", "challenge delivery is not accepted") };
       const now = this.dependencies.clock.now();
       if (challenge.expiresAt <= now) return { kind: "expired" as const };
       if (challenge.attemptCount >= challenge.maxAttempts) return { kind: "attempts" as const };
@@ -144,6 +169,7 @@ export class ChallengeService {
       return { kind: "verified" as const, proof, proofExpiresAt };
     });
     if (result.kind === "verified") return { proof: result.proof, proofExpiresAt: result.proofExpiresAt };
+    if (result.kind === "delivery") throw result.error;
     if (result.kind === "expired") throw new SmsKitError("CHALLENGE_EXPIRED", "challenge has expired");
     if (result.kind === "attempts") throw new SmsKitError("CHALLENGE_ATTEMPTS_EXCEEDED", "challenge attempts are exhausted");
     throw new SmsKitError("PROOF_INVALID", "challenge verification is invalid");
@@ -151,26 +177,26 @@ export class ChallengeService {
 
   private async enforceIssuePolicy(input: Readonly<{
     input: IssueChallengeInput;
+    policy: VerificationPolicy;
     purpose: ChallengePurpose["send"];
     phoneHash: string;
     now: Date;
     tx: SmsTransaction;
   }>): Promise<void> {
-    const policy = await this.dependencies.store.policy.get(input.tx);
     await enforcePhoneSendPolicy({
-      policy, rateLimits: this.dependencies.store.rateLimits, tenantId: input.input.tenantId, phoneHash: input.phoneHash,
+      policy: input.policy, rateLimits: this.dependencies.store.rateLimits, tenantId: input.input.tenantId, phoneHash: input.phoneHash,
       purpose: `challenge:${input.purpose}`, now: input.now, tx: input.tx,
     });
-    const windowStart = new Date(Math.floor(input.now.getTime() / (policy.ipWindowSeconds * 1_000)) * policy.ipWindowSeconds * 1_000);
-    const expiresAt = new Date(windowStart.getTime() + policy.ipWindowSeconds * 1_000);
+    const windowStart = new Date(Math.floor(input.now.getTime() / (input.policy.ipWindowSeconds * 1_000)) * input.policy.ipWindowSeconds * 1_000);
+    const expiresAt = new Date(windowStart.getTime() + input.policy.ipWindowSeconds * 1_000);
     const tenantScope = `challenge:tenant:${input.purpose}`;
     await this.dependencies.store.rateLimits.lock({ tenantId: input.input.tenantId, scopeHash: tenantScope }, input.tx);
-    if (await this.dependencies.store.rateLimits.increment({ tenantId: input.input.tenantId, scope: "global", scopeHash: tenantScope, windowStart, windowSeconds: policy.ipWindowSeconds, expiresAt }, input.tx) > policy.ipWindowLimit) {
+    if (await this.dependencies.store.rateLimits.increment({ tenantId: input.input.tenantId, scope: "global", scopeHash: tenantScope, windowStart, windowSeconds: input.policy.ipWindowSeconds, expiresAt }, input.tx) > input.policy.ipWindowLimit) {
       throw new SmsKitError("RATE_LIMITED", "tenant challenge limit is exceeded");
     }
     if (input.input.ipAddress !== undefined) {
       const ipScope = await this.dependencies.hasher.hash(`challenge:ip:${input.purpose}:${input.input.ipAddress}`);
-      if (await this.dependencies.store.rateLimits.increment({ tenantId: input.input.tenantId, scope: "ip_purpose", scopeHash: ipScope, windowStart, windowSeconds: policy.ipWindowSeconds, expiresAt }, input.tx) > policy.ipWindowLimit) {
+      if (await this.dependencies.store.rateLimits.increment({ tenantId: input.input.tenantId, scope: "ip_purpose", scopeHash: ipScope, windowStart, windowSeconds: input.policy.ipWindowSeconds, expiresAt }, input.tx) > input.policy.ipWindowLimit) {
         throw new SmsKitError("RATE_LIMITED", "IP challenge limit is exceeded");
       }
     }
