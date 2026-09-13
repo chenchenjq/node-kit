@@ -6,11 +6,13 @@ import type { PgSmsTransaction } from "../transaction.js";
 
 type Queryable = Pool | PoolClient;
 type ChallengeRow = {
-  id: string; tenant_id: string; subject_id: string; action: string; purpose: Challenge["purpose"];
+  id: string; tenant_id: string; idempotency_key: string; subject_id: string; action: string; purpose: Challenge["purpose"];
+  policy_version: string; otp_length: number; otp_ttl_seconds: number; proof_ttl_seconds: number;
   phone_hash: string; code_hash: string; attempt_count: number; max_attempts: number; expires_at: Date;
-  verified_at: Date | null; proof_expires_at: Date | null; consumed_at: Date | null; consumed_by_key: string | null;
+  verified_at: Date | null; proof_hash: string | null; proof_expires_at: Date | null; invalidated_at: Date | null;
+  terminal_error_code: "PROVIDER_REJECTED" | "ACCEPTANCE_UNKNOWN" | null; consumed_at: Date | null; consumed_by_key: string | null;
 };
-const fields = "id, tenant_id, subject_id, action, purpose, phone_hash, code_hash, attempt_count, max_attempts, expires_at, verified_at, proof_expires_at, consumed_at, consumed_by_key";
+const fields = "id, tenant_id, idempotency_key, subject_id, action, purpose, policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds, phone_hash, code_hash, attempt_count, max_attempts, expires_at, verified_at, proof_hash, proof_expires_at, invalidated_at, terminal_error_code, consumed_at, consumed_by_key";
 
 function db(pool: Pool, tx?: SmsTransaction): Queryable {
   return tx === undefined ? pool : (tx as PgSmsTransaction).client;
@@ -18,11 +20,15 @@ function db(pool: Pool, tx?: SmsTransaction): Queryable {
 
 function challenge(row: ChallengeRow): Challenge {
   return {
-    id: row.id as Challenge["id"], tenantId: row.tenant_id as Challenge["tenantId"], subjectId: row.subject_id,
-    action: row.action, purpose: row.purpose, phoneHash: row.phone_hash, codeHash: row.code_hash,
+    id: row.id as Challenge["id"], tenantId: row.tenant_id as Challenge["tenantId"], idempotencyKey: row.idempotency_key,
+    subjectId: row.subject_id, action: row.action, purpose: row.purpose, policyVersion: Number(row.policy_version), otpLength: row.otp_length, otpTtlSeconds: row.otp_ttl_seconds, proofTtlSeconds: row.proof_ttl_seconds,
+    phoneHash: row.phone_hash, codeHash: row.code_hash,
     attemptCount: row.attempt_count, maxAttempts: row.max_attempts, expiresAt: row.expires_at,
     ...(row.verified_at === null ? {} : { verifiedAt: row.verified_at }),
+    ...(row.proof_hash === null ? {} : { proofHash: row.proof_hash }),
     ...(row.proof_expires_at === null ? {} : { proofExpiresAt: row.proof_expires_at }),
+    ...(row.invalidated_at === null ? {} : { invalidatedAt: row.invalidated_at }),
+    ...(row.terminal_error_code === null ? {} : { terminalErrorCode: row.terminal_error_code }),
   };
 }
 
@@ -31,9 +37,9 @@ export class PgChallengeRepository implements ChallengeRepository {
 
   async create(input: Parameters<ChallengeRepository["create"]>[0], tx?: SmsTransaction): Promise<Challenge> {
     const { rows } = await db(this.pool, tx).query<ChallengeRow>(
-      `insert into sms_kit.otp_challenge (id, tenant_id, subject_id, action, purpose, phone_hash, code_hash, max_attempts, expires_at, created_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) returning ${fields}`,
-      [input.id, input.tenantId, input.subjectId, input.action, input.purpose, input.phoneHash, input.codeHash, input.maxAttempts, input.expiresAt],
+      `insert into sms_kit.otp_challenge (id, tenant_id, idempotency_key, subject_id, action, purpose, policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds, phone_hash, code_hash, max_attempts, expires_at, created_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now()) returning ${fields}`,
+      [input.id, input.tenantId, input.idempotencyKey, input.subjectId, input.action, input.purpose, input.policyVersion, input.otpLength, input.otpTtlSeconds, input.proofTtlSeconds, input.phoneHash, input.codeHash, input.maxAttempts, input.expiresAt],
     );
     if (rows[0] === undefined) throw new SmsKitError("STORAGE_FAILURE", "challenge could not be created", true);
     return challenge(rows[0]);
@@ -42,6 +48,38 @@ export class PgChallengeRepository implements ChallengeRepository {
   async get(input: Parameters<ChallengeRepository["get"]>[0], tx?: SmsTransaction): Promise<Challenge | undefined> {
     const { rows } = await db(this.pool, tx).query<ChallengeRow>(`select ${fields} from sms_kit.otp_challenge where tenant_id = $1 and id = $2`, [input.tenantId, input.id]);
     return rows[0] === undefined ? undefined : challenge(rows[0]);
+  }
+
+  async getByIdempotency(input: Parameters<ChallengeRepository["getByIdempotency"]>[0], tx?: SmsTransaction): Promise<Challenge | undefined> {
+    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`select ${fields} from sms_kit.otp_challenge where tenant_id = $1 and idempotency_key = $2`, [input.tenantId, input.idempotencyKey]);
+    return rows[0] === undefined ? undefined : challenge(rows[0]);
+  }
+
+  async getForUpdate(input: Parameters<ChallengeRepository["getForUpdate"]>[0], tx: SmsTransaction): Promise<Challenge | undefined> {
+    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`select ${fields} from sms_kit.otp_challenge where tenant_id = $1 and id = $2 for update`, [input.tenantId, input.id]);
+    return rows[0] === undefined ? undefined : challenge(rows[0]);
+  }
+
+  async incrementAttempts(input: Parameters<ChallengeRepository["incrementAttempts"]>[0], tx: SmsTransaction): Promise<Challenge> {
+    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`update sms_kit.otp_challenge set attempt_count = attempt_count + 1 where tenant_id = $1 and id = $2 returning ${fields}`, [input.tenantId, input.id]);
+    if (rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "challenge is outside the trusted tenant");
+    return challenge(rows[0]);
+  }
+
+  async verify(input: Parameters<ChallengeRepository["verify"]>[0], tx: SmsTransaction): Promise<Challenge> {
+    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`update sms_kit.otp_challenge set verified_at = $3, proof_hash = $4, proof_expires_at = $5 where tenant_id = $1 and id = $2 and verified_at is null returning ${fields}`, [input.tenantId, input.id, input.verifiedAt, input.proofHash, input.proofExpiresAt]);
+    if (rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "challenge verification changed concurrently");
+    return challenge(rows[0]);
+  }
+
+  async invalidate(input: Parameters<ChallengeRepository["invalidate"]>[0], tx?: SmsTransaction): Promise<Challenge> {
+    const { rows } = await db(this.pool, tx).query<ChallengeRow>(`update sms_kit.otp_challenge set invalidated_at = $3, terminal_error_code = $4 where tenant_id = $1 and id = $2 and invalidated_at is null returning ${fields}`, [input.tenantId, input.id, input.invalidatedAt, input.terminalErrorCode]);
+    if (rows[0] === undefined) {
+      const existing = await this.get({ tenantId: input.tenantId, id: input.id }, tx);
+      if (existing === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "challenge is outside the trusted tenant");
+      return existing;
+    }
+    return challenge(rows[0]);
   }
 
   async consumeProof(input: Parameters<ChallengeRepository["consumeProof"]>[0], tx: SmsTransaction): Promise<ConsumeProofResult> {
