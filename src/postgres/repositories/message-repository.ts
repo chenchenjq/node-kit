@@ -4,6 +4,7 @@ import { SmsKitError } from "../../core/errors.js";
 import { assertAcceptanceTransition, assertDeliveryTransition } from "../../core/status.js";
 import type { CreateMessageInput, Message, MessageRepository, SmsTransaction, TenantMessageQuery } from "../../ports/store.js";
 import type { PgSmsTransaction } from "../transaction.js";
+import { markMessageStatsDirty } from "./stats-repository.js";
 
 type Queryable = Pool | PoolClient;
 type MessageRow = {
@@ -42,6 +43,7 @@ function message(row: MessageRow): Message {
   };
 }
 const selectMessage = "id, tenant_id, idempotency_key, template_id, template_key_snapshot, external_template_code_snapshot, signature_name_snapshot, purpose, phone_ciphertext, phone_key_id, phone_hash, phone_last4, phone_masked, variable_names, render_params_ciphertext, render_params_key_id, metadata, acceptance_status, delivery_status, provider_biz_id, provider_request_id, final_error_code, submitted_at, accepted_at, delivered_at, finalized_at, version";
+const selectMessageFromJoin = selectMessage.split(", ").map((field) => `m.${field}`).join(", ");
 
 export class PgMessageRepository implements MessageRepository {
   constructor(private readonly pool: Pool) {}
@@ -76,6 +78,7 @@ export class PgMessageRepository implements MessageRepository {
           }
         }
       }
+      await markMessageStatsDirty(db, input.tenantId, input.id);
       return { message: message(inserted.rows[0]), created: true };
     });
   }
@@ -108,13 +111,14 @@ export class PgMessageRepository implements MessageRepository {
 
   async completeAcceptance(input: Readonly<{ tenantId: Message["tenantId"]; dispatchToken: string; status: "accepted" | "rejected" | "unknown"; evidence: "same-dispatch-response" | "positive-provider-evidence" | "query-no-record"; providerBizId?: string; providerRequestId?: string; finalErrorCode?: string; occurredAt: Date }>, tx?: SmsTransaction): Promise<Message> {
     return transaction(this.pool, tx, async (db) => {
-      const current = await db.query<MessageRow>(`select ${selectMessage} from sms_kit.send_message m join sms_kit.send_attempt a on a.message_id = m.id where m.tenant_id = $1 and a.dispatch_token = $2 for update`, [input.tenantId, input.dispatchToken]);
+      const current = await db.query<MessageRow>(`select ${selectMessageFromJoin} from sms_kit.send_message m join sms_kit.send_attempt a on a.message_id = m.id where m.tenant_id = $1 and a.dispatch_token = $2 for update`, [input.tenantId, input.dispatchToken]);
       if (current.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "dispatch token is no longer current");
       assertAcceptanceTransition(current.rows[0].acceptance_status, input.status, input.evidence);
       const delivery = input.status === "accepted" ? "waiting" : input.status === "rejected" ? "not_applicable" : "waiting";
       const updated = await db.query<MessageRow>(`update sms_kit.send_message set acceptance_status = $1, delivery_status = $2, provider_biz_id = coalesce($3, provider_biz_id), provider_request_id = coalesce($4, provider_request_id), final_error_code = coalesce($5, final_error_code), accepted_at = $6, finalized_at = case when $1 = 'rejected' then $6 else finalized_at end, version = version + 1, updated_at = now() where tenant_id = $7 and id = $8 and acceptance_status = $9 returning ${selectMessage}`,
         [input.status, delivery, input.providerBizId ?? null, input.providerRequestId ?? null, input.finalErrorCode ?? null, input.occurredAt, input.tenantId, current.rows[0].id, current.rows[0].acceptance_status]);
       if (updated.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message acceptance changed concurrently");
+      await markMessageStatsDirty(db, input.tenantId, updated.rows[0].id);
       return message(updated.rows[0]);
     });
   }
@@ -127,6 +131,7 @@ export class PgMessageRepository implements MessageRepository {
       const updated = await db.query<MessageRow>(`update sms_kit.send_message set delivery_status = $1, delivered_at = case when $1 = 'delivered' then $2 else delivered_at end, finalized_at = $2, version = version + 1, updated_at = now() where tenant_id = $3 and id = $4 and delivery_status = $5 returning ${selectMessage}`,
         [input.status, input.occurredAt, input.tenantId, input.id, current.rows[0].delivery_status]);
       if (updated.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message delivery changed concurrently");
+      await markMessageStatsDirty(db, input.tenantId, updated.rows[0].id);
       return message(updated.rows[0]);
     });
   }
