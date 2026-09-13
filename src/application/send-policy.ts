@@ -26,6 +26,9 @@ export async function enforcePhoneSendPolicy(input: Readonly<{
 }>): Promise<void> {
   if (input.policy.circuitOpen) throw new SmsKitError("CIRCUIT_OPEN", "sending circuit is open");
   const base = `${input.phoneHash}:${input.purpose}`;
+  // This must precede both the cooldown read and event insert. Transaction-scoped
+  // advisory locking serializes exactly one trusted tenant/phone/purpose stream.
+  await input.rateLimits.lock({ tenantId: input.tenantId, scopeHash: base }, input.tx);
   if (input.policy.phoneMinIntervalSeconds > 0) {
     const cooldown = `cooldown:${base}`;
     // Store each event independently so the boundary is sliding, not epoch aligned.

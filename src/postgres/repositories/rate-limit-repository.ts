@@ -22,6 +22,10 @@ export class PgRateLimitRepository implements RateLimitRepository {
     return rows[0]!.count;
   }
 
+  async lock(input: Parameters<RateLimitRepository["lock"]>[0], tx: SmsTransaction): Promise<void> {
+    await db(this.pool, tx).query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`sms-kit:rate:${input.tenantId}:${input.scopeHash}`]);
+  }
+
   async countSince(input: Parameters<RateLimitRepository["countSince"]>[0], tx?: SmsTransaction): Promise<number> {
     const { rows } = await db(this.pool, tx).query<{ count: string }>(
       `select coalesce(sum(count), 0)::text as count from sms_kit.rate_limit_bucket
