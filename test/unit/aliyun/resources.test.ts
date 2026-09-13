@@ -5,12 +5,20 @@ import type {
 } from "@alicloud/dysmsapi20170525";
 
 import type { AliyunApi, AliyunQueryOutput, AliyunSendInput, AliyunSendOutput, AliyunSignPage, AliyunTemplatePage } from "../../../src/aliyun/api.js";
+import { createAliyunProvider } from "../../../src/aliyun/provider.js";
 import {
   listAllAliyunSignatures,
   listAllAliyunTemplates,
   mapTemplate,
   toAliyunExternalKey,
 } from "../../../src/aliyun/resource-map.js";
+import { FakeAliyunApi } from "../../../src/testing/fake-aliyun-api.js";
+
+const authInput = {
+  region: "cn-hangzhou",
+  accessKeyId: "access-key-id-reference",
+  accessKeySecret: "access-key-secret-reference",
+};
 
 function signFixture(
   signName: string,
@@ -27,9 +35,10 @@ function signFixture(
 
 function templateFixture(
   types: Pick<QuerySmsTemplateListResponseBodySmsTemplateList, "templateType" | "outerTemplateType">,
+  templateCode = "SMS_123456",
 ): Pick<QuerySmsTemplateListResponseBodySmsTemplateList, "templateCode" | "templateName" | "auditStatus" | "templateContent" | "templateType" | "outerTemplateType"> {
   return {
-    templateCode: "SMS_123456",
+    templateCode,
     templateName: "Example",
     auditStatus: "AUDIT_STATE_PASS",
     templateContent: "Your code is ${code}",
@@ -104,6 +113,51 @@ describe("Aliyun resource discovery", () => {
     expect(api.calls.signatures).toBe(2);
   });
 
+  it("rejects repeated external signature keys even when the reported total is reached", async () => {
+    const repeated = signFixture("Repeated", "通用类型", "order-duplicate");
+    const api = new PagedAliyunApi([
+      { code: "OK", currentPage: 1, totalCount: 2, smsSignList: [repeated] },
+      { code: "OK", currentPage: 2, totalCount: 2, smsSignList: [repeated] },
+    ]);
+
+    await expect(listAllAliyunSignatures(api, { pageSize: 1 })).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+    });
+  });
+
+  it("rejects a repeated or mismatched provider current page", async () => {
+    const api = new PagedAliyunApi([
+      { code: "OK", currentPage: 1, totalCount: 2, smsSignList: [signFixture("Alpha", "通用类型")] },
+      { code: "OK", currentPage: 1, totalCount: 2, smsSignList: [signFixture("Beta", "验证码类型")] },
+    ]);
+
+    await expect(listAllAliyunSignatures(api, { pageSize: 1 })).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+    });
+  });
+
+  it("maps unsupported signature resources in provider list methods to PROVIDER_UNAVAILABLE", async () => {
+    const provider = createAliyunProvider({
+      api: new FakeAliyunApi().withSignatures([{ ...signFixture("Unsupported", "General") }]),
+      secretResolver: { resolve: async (reference) => `resolved:${reference}` },
+    });
+
+    await expect(provider.listSignatures({ ...authInput, pageSize: 20 })).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+    });
+  });
+
+  it("maps unsupported template resources in provider list methods to PROVIDER_UNAVAILABLE", async () => {
+    const provider = createAliyunProvider({
+      api: new FakeAliyunApi().withTemplates([templateFixture({ templateType: 1, outerTemplateType: 2 })]),
+      secretResolver: { resolve: async (reference) => `resolved:${reference}` },
+    });
+
+    await expect(provider.listTemplates({ ...authInput, pageSize: 20 })).rejects.toMatchObject({
+      code: "PROVIDER_UNAVAILABLE",
+    });
+  });
+
   it("does not return a partial template snapshot when a later page fails", async () => {
     const api = new PagedAliyunApi([], [
       { code: "OK", currentPage: 1, totalCount: 2, smsTemplateList: [templateFixture({ templateType: 0, outerTemplateType: 1 })] },
@@ -129,8 +183,8 @@ describe("Aliyun resource discovery", () => {
 
   it("reads every template page before returning a snapshot", async () => {
     const api = new PagedAliyunApi([], [
-      { code: "OK", currentPage: 1, totalCount: 2, smsTemplateList: [templateFixture({ templateType: 0, outerTemplateType: 1 })] },
-      { code: "OK", currentPage: 2, totalCount: 2, smsTemplateList: [templateFixture({ templateType: 2, outerTemplateType: 0 })] },
+      { code: "OK", currentPage: 1, totalCount: 2, smsTemplateList: [templateFixture({ templateType: 0, outerTemplateType: 1 }, "SMS_1")] },
+      { code: "OK", currentPage: 2, totalCount: 2, smsTemplateList: [templateFixture({ templateType: 2, outerTemplateType: 0 }, "SMS_2")] },
     ]);
 
     const result = await listAllAliyunTemplates(api, { pageSize: 1 });
