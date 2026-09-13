@@ -42,6 +42,10 @@ const PREVIEW_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_PAGE_SIZE = 50;
 const SYSTEM_TENANT_ID = "__system__" as TenantId;
 
+function isCloudApproved(status: string): boolean {
+  return status.toLowerCase() === "approved" || status.toUpperCase() === "AUDIT_STATE_PASS";
+}
+
 function providerConfig(config: Awaited<ReturnType<SmsStore["config"]["get"]>>): ConfiguredProviderConfig {
   if (config.status === "unconfigured" || config.status !== "ready" || !config.enabled) {
     throw new SmsKitError("CONFIG_INVALID", "provider configuration is not ready");
@@ -158,7 +162,10 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     const localTemplatesByKey = new Map(localTemplates.map((template) => [template.templateKey, template]));
     const localSignaturesById = new Map(localSignatures.map((signature) => [signature.id, signature]));
     const discoveredSignatureKeys = new Set(signatures.map((signature) => signature.externalKey));
-    const knownSignatureKeys = new Set([...localSignaturesByKey.keys(), ...discoveredSignatureKeys]);
+    const selectableSignatureKeys = new Set([
+      ...signatures.filter((signature) => isCloudApproved(signature.externalStatus)).map((signature) => signature.externalKey),
+      ...localSignatures.filter((signature) => signature.enabled && isCloudApproved(signature.externalStatus)).map((signature) => signature.externalKey),
+    ]);
     const templateByExternalKey = new Map(templates.map((template) => [template.externalKey, template]));
     const selections = input.templates ?? [];
     const selectionsByExternalKey = new Map<string, ResourceSyncTemplateSelection>();
@@ -167,7 +174,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       const remoteTemplate = templateByExternalKey.get(selection.externalKey);
       const priorByKey = localTemplatesByKey.get(selection.templateKey);
       const priorByCode = remoteTemplate === undefined ? undefined : localTemplatesByCode.get(remoteTemplate.externalCode);
-      if (remoteTemplate === undefined || selectionsByExternalKey.has(selection.externalKey) || !knownSignatureKeys.has(selection.signatureExternalKey) ||
+      if (remoteTemplate === undefined || selectionsByExternalKey.has(selection.externalKey) || !selectableSignatureKeys.has(selection.signatureExternalKey) ||
           (priorByKey !== undefined && priorByKey.externalCode !== remoteTemplate.externalCode) ||
           (priorByCode !== undefined && priorByCode.templateKey !== selection.templateKey)) {
         throw new SmsKitError("CONFIG_INVALID", "invalid template selection");

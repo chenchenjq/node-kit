@@ -26,3 +26,7 @@
 ## Review fix round 2
 
 - Retiring a signature now atomically marks every dependent local template unavailable and disabled, including templates that remain in a provider snapshot but were not selected for refresh. The PostgreSQL resource-sync regression covers this parent-resource retirement path.
+
+## Review fix round 3
+
+- Template selections now require a locally or currently discovered signature that is enabled and cloud-approved. The commit transaction independently verifies this immediately before importing a template, preventing a selected template from bypassing an unavailable, unapproved, or disabled signature.

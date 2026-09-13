@@ -140,8 +140,10 @@ export class PgResourceRepository implements ResourceRepository {
           if (!isCloudApproved(snapshot.externalStatus)) {
             throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
           }
-          const signature = await db.query<{ id: string }>("select id from sms_kit.signature where external_key = $1", [snapshot.signatureExternalKey]);
-          if (signature.rows[0] === undefined) throw new SmsKitError("CONFIG_INVALID", "template preview has no matching signature");
+          const signature = await db.query<{ id: string; enabled: boolean; external_status: string }>("select id, enabled, external_status from sms_kit.signature where external_key = $1", [snapshot.signatureExternalKey]);
+          if (signature.rows[0] === undefined || !signature.rows[0].enabled || !isCloudApproved(signature.rows[0].external_status)) {
+            throw new SmsKitError("CONFIG_INVALID", "template preview has no usable signature");
+          }
           await db.query(
             `insert into sms_kit.template (id, signature_id, template_key, external_code, external_name, external_status, template_type, purpose, content_snapshot, variable_schema, imported_at, last_synced_at, created_at, updated_at)
              values ($1, $2, $3, $4, $5, $6, $7, $8, '', $9::jsonb, now(), now(), now(), now())
