@@ -20,7 +20,15 @@ export type SmsErrorCode =
   | "DELIVERY_UNKNOWN"
   | "STORAGE_FAILURE";
 
-export type SmsFieldErrors = Readonly<Record<string, string>>;
+export type SmsFieldErrors = Readonly<Record<string, readonly string[]>>;
+
+function toImmutableFieldErrors(fieldErrors: SmsFieldErrors): SmsFieldErrors {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(fieldErrors).map(([field, messages]) => [field, Object.freeze([...messages])]),
+    ),
+  );
+}
 
 export class SmsKitError extends Error {
   readonly code: SmsErrorCode;
@@ -40,7 +48,7 @@ export class SmsKitError extends Error {
     this.code = code;
     this.retryable = retryable;
     if (fieldErrors !== undefined) {
-      this.fieldErrors = fieldErrors;
+      this.fieldErrors = toImmutableFieldErrors(fieldErrors);
     }
     if (causeCode !== undefined) {
       this.causeCode = causeCode;
