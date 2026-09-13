@@ -8,6 +8,8 @@ import { createResourceSyncCandidate, type SmsStore } from "../ports/store.js";
 import { createSafeMessageFixture, FakeClock, SequenceIdGenerator } from "./fakes.js";
 
 export type SmsStoreContractFactory = Readonly<{
+  name?: string;
+  tenantMode?: "multiple" | "fixed";
   createStore(): Promise<SmsStore>;
   clock: FakeClock;
   ids: SequenceIdGenerator;
@@ -36,7 +38,7 @@ function messageInput(factory: SmsStoreContractFactory, tenantId: TenantId, key:
  * and an already verified proof).
  */
 export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
-  describe("SmsStore contract", () => {
+  describe(factory.name === undefined ? "SmsStore contract" : `SmsStore contract (${factory.name})`, () => {
     it("fences singleton configuration and policy updates independently", async () => {
       const store = await factory.createStore();
       const config = await store.config.get();
@@ -68,7 +70,7 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
         .rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
     });
 
-    it("keeps tenant message idempotency and reads isolated", async () => {
+    it("keeps message idempotency scoped to the resolved tenant", async () => {
       const store = await factory.createStore();
       const tenantA = factory.tenantId(`tenant-a-${factory.ids.next()}`);
       const tenantB = factory.tenantId(`tenant-b-${factory.ids.next()}`);
@@ -78,8 +80,15 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const otherTenant = await store.messages.createWithSendJob(messageInput(factory, tenantB, key));
 
       expect(replay).toMatchObject({ created: false, message: { id: first.message.id } });
-      expect(otherTenant.message.id).not.toBe(first.message.id);
-      expect(await store.messages.get({ tenantId: tenantB, id: first.message.id })).toBeUndefined();
+      expect(tenantB === tenantA).toBe(factory.tenantMode === "fixed");
+      if (factory.tenantMode === "fixed") {
+        expect(otherTenant).toMatchObject({ created: false, message: { id: first.message.id } });
+        await expect(store.messages.get({ tenantId: tenantB, id: first.message.id }))
+          .resolves.toMatchObject({ id: first.message.id });
+      } else {
+        expect(otherTenant.message.id).not.toBe(first.message.id);
+        expect(await store.messages.get({ tenantId: tenantB, id: first.message.id })).toBeUndefined();
+      }
       expect(await store.messages.list({ tenantId: tenantB, page: 1, pageSize: 10 })).toMatchObject({ total: 1 });
     });
 
@@ -183,7 +192,12 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       expect(event.metadata).toEqual({ redactedFields: ["phone"], counts: [{ name: "message", value: 1 }] });
       expect((await store.audits.list({ tenantId: tenantA, page: 1, pageSize: 10 })).items[0]?.metadata)
         .toEqual({ redactedFields: ["phone"], counts: [{ name: "message", value: 1 }] });
-      expect(await store.audits.list({ tenantId: tenantB, page: 1, pageSize: 10 })).toEqual({ items: [], total: 0 });
+      const tenantBEvents = await store.audits.list({ tenantId: tenantB, page: 1, pageSize: 10 });
+      if (factory.tenantMode === "fixed") {
+        expect(tenantBEvents).toMatchObject({ items: [{ id: event.id }], total: 1 });
+      } else {
+        expect(tenantBEvents).toEqual({ items: [], total: 0 });
+      }
     });
 
     it("recomputes dirty statistics without double counting acceptance or delivery", async () => {

@@ -47,7 +47,7 @@ async function ensureMigrationLedger(client: PoolClient): Promise<void> {
 async function verifyRecordedChecksums(
   client: PoolClient,
   migrations: readonly (MigrationFile & { sql: string; checksum: string })[],
-): Promise<void> {
+): Promise<readonly number[]> {
   const { rows } = await client.query<{ version: string; name: string; checksum: string }>(
     "select version, name, checksum from sms_kit.schema_migration order by version",
   );
@@ -60,6 +60,30 @@ async function verifyRecordedChecksums(
       throw new SmsKitError("STORAGE_FAILURE", "database migration checksum mismatch");
     }
   }
+  return rows.map((row) => Number(row.version));
+}
+
+async function normalizeLegacyV1Leases(client: PoolClient, appliedVersions: readonly number[]): Promise<void> {
+  if (appliedVersions.length !== 1 || appliedVersions[0] !== 1) return;
+  await client.query(`
+    update sms_kit.send_message message
+       set acceptance_status = 'unknown',
+           delivery_status = case when delivery_status = 'not_applicable' then 'waiting' else delivery_status end,
+           final_error_code = coalesce(final_error_code, 'ACCEPTANCE_UNKNOWN'),
+           version = version + 1,
+           updated_at = now()
+      from sms_kit.send_job job
+     where job.message_id = message.id
+       and job.state = 'leased'
+       and message.acceptance_status = 'pending';
+    update sms_kit.send_job
+       set state = 'dead',
+           lease_owner = null,
+           lease_until = null,
+           last_error_code = coalesce(last_error_code, 'ACCEPTANCE_UNKNOWN'),
+           updated_at = now()
+     where state = 'leased';
+  `);
 }
 
 async function applyMigrations(
@@ -85,7 +109,8 @@ export async function migrateSmsKit(pool: Pool): Promise<void> {
     await client.query("begin");
     await client.query("select pg_advisory_xact_lock(hashtext('sms-kit-migrate'))");
     await ensureMigrationLedger(client);
-    await verifyRecordedChecksums(client, migrations);
+    const appliedVersions = await verifyRecordedChecksums(client, migrations);
+    await normalizeLegacyV1Leases(client, appliedVersions);
     await applyMigrations(client, migrations);
     await client.query("commit");
   } catch (error) {
