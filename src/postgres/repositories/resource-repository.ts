@@ -92,7 +92,7 @@ export class PgResourceRepository implements ResourceRepository {
       const sync = await db.query<{ expires_at: Date; status: ResourceSyncPreview["status"] }>("select expires_at, status from sms_kit.resource_sync where id = $1 for update", [input.syncId]);
       if (sync.rows[0] === undefined || sync.rows[0].status !== "running" || sync.rows[0].expires_at <= new Date()) throw new SmsKitError("CONCURRENT_MODIFICATION", "resource preview is no longer current");
       const ids = input.candidates.map((candidate) => candidate.id);
-      const candidates = ids.length === 0 ? [] : (await db.query<CandidateRow>("select id, resource_type, external_key, change_type, checksum, snapshot from sms_kit.resource_sync_candidate where sync_id = $1 and id = any($2::uuid[]) for update", [input.syncId, ids])).rows;
+      const candidates = ids.length === 0 ? [] : (await db.query<CandidateRow>("select id, resource_type, external_key, change_type, checksum, snapshot from sms_kit.resource_sync_candidate where sync_id = $1 and id = any($2::uuid[]) order by case resource_type when 'signature' then 0 else 1 end, id for update", [input.syncId, ids])).rows;
       if (candidates.length !== input.candidates.length || candidates.some((candidate) => input.candidates.find((chosen) => chosen.id === candidate.id)?.checksum !== candidate.checksum)) {
         throw new SmsKitError("CONCURRENT_MODIFICATION", "resource preview checksum changed");
       }

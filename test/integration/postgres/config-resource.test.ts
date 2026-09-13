@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { SmsKitError } from "../../../src/core/errors.js";
+import { createResourceSyncCandidate } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "./helpers.js";
@@ -54,12 +55,12 @@ describe("PostgreSQL configuration and resources", () => {
       id,
       actorId: "operator-1",
       expiresAt: new Date("2020-01-01T00:00:00.000Z"),
-      resources: [{
+      resources: [createResourceSyncCandidate({
         id: randomUUID(), externalKey: "sign:one", changeType: "new", checksum: "signature-checksum",
         resourceType: "signature", snapshot: {
           kind: "signature", externalName: "Production", externalStatus: "approved", externalType: "text",
         },
-      }] as never,
+      })],
     });
 
     await expect(store.resources.commitSync({
@@ -72,12 +73,12 @@ describe("PostgreSQL configuration and resources", () => {
   it("rejects a checksum conflict without importing a partial preview", async () => {
     const preview = await store.resources.createSyncPreview({
       id: randomUUID(), actorId: "operator-2", expiresAt: new Date("2030-01-01T00:00:00.000Z"),
-      resources: [{
+      resources: [createResourceSyncCandidate({
         id: randomUUID(), externalKey: "sign:two", changeType: "new", checksum: "expected",
         resourceType: "signature", snapshot: {
           kind: "signature", externalName: "Secondary", externalStatus: "approved", externalType: "text",
         },
-      }] as never,
+      })],
     });
 
     await expect(store.resources.commitSync({
@@ -88,27 +89,28 @@ describe("PostgreSQL configuration and resources", () => {
   });
 
   it("imports a template through its signature identity and preserves local template controls on refresh", async () => {
-    const signature = {
+    const signature = createResourceSyncCandidate({
       id: randomUUID(), externalKey: "signature:template-owner", changeType: "new", checksum: "signature-template",
       resourceType: "signature", snapshot: { kind: "signature", externalName: "Template owner", externalStatus: "approved", externalType: "text" },
-    };
-    const template = {
+    });
+    const template = createResourceSyncCandidate({
       id: randomUUID(), externalKey: "provider-template:42", changeType: "new", checksum: "template-v1",
       resourceType: "template", signatureExternalKey: "signature:template-owner", templateKey: "notice.stable", purpose: "shipping",
       snapshot: { kind: "template", externalCode: "SMS_42", externalName: "Shipping", externalStatus: "approved", templateType: "notification", variableNames: ["order"] },
-    };
+    });
     const preview = await store.resources.createSyncPreview({
-      id: randomUUID(), actorId: "operator-3", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] as never,
+      id: randomUUID(), actorId: "operator-3", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [template, signature],
     });
     await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
     const first = await store.resources.findTemplateByKey({ templateKey: "notice.stable" });
     expect(first?.signatureId).toBeDefined();
     expect(first?.purpose).toBe("shipping");
     const refreshedPreview = await store.resources.createSyncPreview({
-      id: randomUUID(), actorId: "operator-5", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [{
-        ...template, id: randomUUID(), checksum: "template-v3", changeType: "changed", templateKey: "illegal.change", purpose: "illegal-change",
-        snapshot: { ...template.snapshot, externalName: "Shipping refreshed" },
-      }] as never,
+      id: randomUUID(), actorId: "operator-5", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [createResourceSyncCandidate({
+        id: randomUUID(), externalKey: "provider-template:42", changeType: "changed", checksum: "template-v3",
+        resourceType: "template", signatureExternalKey: "signature:template-owner", templateKey: "illegal.change", purpose: "illegal-change",
+        snapshot: { kind: "template", externalCode: "SMS_42", externalName: "Shipping refreshed", externalStatus: "approved", templateType: "notification", variableNames: ["order"] },
+      })],
     });
     await store.resources.commitSync({ syncId: refreshedPreview.id, candidates: refreshedPreview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
     const refreshed = await store.resources.findTemplateByKey({ templateKey: "notice.stable" });

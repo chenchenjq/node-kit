@@ -135,6 +135,9 @@ describe("public port contracts", () => {
       id: "candidate-template",
       resourceType: "template",
       externalKey: "aliyun:template:1",
+      signatureExternalKey: "aliyun:sign:1",
+      templateKey: "verification.code",
+      purpose: "verification",
       changeType: "changed",
       checksum: "checksum-template",
       snapshot: {
@@ -167,6 +170,9 @@ describe("public port contracts", () => {
       id: "candidate-template",
       resourceType: "template" as const,
       externalKey: "aliyun:template:1",
+      signatureExternalKey: "aliyun:sign:1",
+      templateKey: "verification.code",
+      purpose: "verification",
       changeType: "new" as const,
       checksum: "checksum-template",
       snapshot: {
@@ -192,5 +198,26 @@ describe("public port contracts", () => {
     });
     expect("phone" in candidate.snapshot).toBe(false);
     expect(Object.isFrozen(candidate)).toBe(true);
+  });
+
+  it.each(["a..b", ".start", "end-"])("uses the core template-key grammar for resource selections: %s", (templateKey) => {
+    expect(() => createResourceSyncCandidate({
+      id: "candidate-template-invalid",
+      resourceType: "template",
+      externalKey: "aliyun:template:invalid",
+      signatureExternalKey: "aliyun:sign:1",
+      templateKey,
+      purpose: "verification",
+      changeType: "new",
+      checksum: "checksum-invalid",
+      snapshot: {
+        kind: "template",
+        externalCode: "SMS_INVALID",
+        externalName: "Invalid",
+        externalStatus: "approved",
+        templateType: "verification",
+        variableNames: ["code"],
+      },
+    })).toThrow(expect.objectContaining({ code: "CONFIG_INVALID" }));
   });
 });

@@ -1,5 +1,6 @@
 import { SmsKitError } from "../core/errors.js";
 import type { AcceptanceStatus, DeliveryStatus } from "../core/status.js";
+import { validateTemplateKey } from "../core/template.js";
 import type { ChallengeId, MessageId, TemplateId, TenantId } from "../core/types.js";
 import type { PolicyStore } from "./policy.js";
 import type { RedactedField, SafeEventMetadata } from "./runtime.js";
@@ -147,7 +148,11 @@ function requireStringArray(source: object, key: string): readonly string[] {
 
 function requireTemplateKey(source: object): string {
   const value = requireString(source, "templateKey");
-  if (!/^[a-z0-9._-]+$/.test(value)) return invalidResourceSyncCandidate();
+  try {
+    validateTemplateKey(value);
+  } catch {
+    return invalidResourceSyncCandidate();
+  }
   return value;
 }
 
