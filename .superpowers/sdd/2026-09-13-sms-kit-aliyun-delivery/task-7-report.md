@@ -70,3 +70,17 @@ git diff --check
   and rate buckets at their own expiry; message phones after 90 days; receipt
   payloads, audit events, and released reservations after 180 days. Anonymous
   statistics and held budget enforcement remain intact.
+
+## Fix round 2
+
+- Reconciliation renews its exact lease token inside the same transaction
+  before recording a query receipt or changing acceptance/delivery state;
+  success is also token-fenced in that transaction.
+- The 90-day message scrub now removes all stored phone derivatives and
+  message metadata, including rows already missing ciphertext/key fields.
+- Retention now uses challenge `created_at` (7 days), query receipt payload
+  (90 days), ineligible old budget reservations (90 days), and audit rows
+  (180 days).
+- Query receipts without a provider BizId are durable matched rows containing
+  the returned persisted OutId in `provider_out_id`; no synthetic provider ID
+  is treated as a trusted identity.

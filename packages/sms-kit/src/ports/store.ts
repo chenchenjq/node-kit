@@ -401,7 +401,8 @@ export type DeliveryReceipt = Readonly<{
   messageId?: MessageId;
   matchStatus: "matched" | "unmatched";
   dedupeKey: string;
-  providerBizId: string;
+  providerBizId?: string;
+  providerOutId?: string;
   deliveryStatus: "delivered" | "failed";
   providerCode?: string;
   providerMessage?: string;
@@ -414,7 +415,8 @@ export interface ReceiptRepository {
     tenantId: TenantId;
     messageId?: MessageId;
     dedupeKey: string;
-    providerBizId: string;
+    providerBizId?: string;
+    providerOutId?: string;
     deliveryStatus: "delivered" | "failed";
     providerCode?: string;
     providerMessage?: string;

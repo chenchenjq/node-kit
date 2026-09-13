@@ -121,22 +121,21 @@ export class ReconcileService {
     if (leaseToken === undefined) return;
     try {
       await this.dependencies.store.transaction(async (tx) => {
+        // Fence before any durable receipt or state change. A reclaimed lease
+        // rolls this whole transaction back rather than leaving stale effects.
+        await this.dependencies.store.jobs.renew({ tenantId: job.tenantId, id: job.id, leaseToken, leaseMs: this.leaseMs, now: this.dependencies.clock.now() }, tx);
         // Query endpoints do not echo BizId. A receipt is only valid when the
         // queried message already has its provider reference; never invent one.
-        if (message.providerBizId !== undefined) {
+        {
           await this.dependencies.store.receipts.record({
-            tenantId: message.tenantId, messageId: message.id, dedupeKey: receiptKey(message, message.providerBizId, status, occurredAt), providerBizId: message.providerBizId,
+            tenantId: message.tenantId, messageId: message.id, dedupeKey: receiptKey(message, message.providerBizId ?? message.id, status, occurredAt), ...(message.providerBizId === undefined ? { providerOutId: message.id } : { providerBizId: message.providerBizId }),
             deliveryStatus: status, ...(providerCode === undefined ? {} : { providerCode }), occurredAt, receivedAt: this.dependencies.clock.now(), source: "query", redactedPayload: { redactedFields: ["phone"], reportCount: 1 },
           }, tx);
         }
         await this.dependencies.store.messages.completeQueryDelivery({ tenantId: message.tenantId, id: message.id, status, occurredAt }, tx);
-        await this.dependencies.store.jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken }, tx);
+        await this.dependencies.store.jobs.succeed({ tenantId: job.tenantId, id: job.id, leaseToken }, tx);
       });
     } catch (error) {
-      if (error instanceof SmsKitError && error.code === "CONCURRENT_MODIFICATION") {
-        await this.dependencies.store.jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken });
-        return;
-      }
       throw error;
     }
   }
@@ -144,8 +143,11 @@ export class ReconcileService {
   private async finalizeUnknown(job: Job, message: Message, now: Date): Promise<void> {
     try {
       await this.dependencies.store.transaction(async (tx) => {
+        const leaseToken = job.leaseToken;
+        if (leaseToken === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "reconciliation lease is missing");
+        await this.dependencies.store.jobs.renew({ tenantId: job.tenantId, id: job.id, leaseToken, leaseMs: this.leaseMs, now: this.dependencies.clock.now() }, tx);
         await this.dependencies.store.messages.completeDelivery({ tenantId: message.tenantId, id: message.id, status: "unknown_final", occurredAt: now }, tx);
-        await this.dependencies.store.jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
+        await this.dependencies.store.jobs.succeed({ tenantId: job.tenantId, id: job.id, leaseToken }, tx);
       });
     } catch (error) {
       if (!(error instanceof SmsKitError) || error.code !== "CONCURRENT_MODIFICATION") throw error;
