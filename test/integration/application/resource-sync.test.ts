@@ -181,4 +181,38 @@ describe("ResourceSyncService with PostgreSQL", () => {
     expect((await store.resources.listSignatures({ page: 1, pageSize: 10 })).items.find((item) => item.id === signature.id)).toMatchObject({ enabled: false, externalStatus: "unavailable" });
     expect((await store.resources.findTemplateByKey({ templateKey: "notice.removed" }))).toMatchObject({ enabled: false, externalStatus: "unavailable" });
   });
+
+  it("retires templates when their signature disappears even if the template remains in the provider snapshot", async () => {
+    const signature = createResourceSyncCandidate({
+      id: crypto.randomUUID(), externalKey: "aliyun:sign:retired-parent", changeType: "new", checksum: "retired-signature",
+      resourceType: "signature", snapshot: { kind: "signature", externalName: "Retired parent", externalStatus: "approved", externalType: "通用类型" },
+    });
+    const template = createResourceSyncCandidate({
+      id: crypto.randomUUID(), externalKey: "aliyun:template:SMS_STILL_LISTED", changeType: "new", checksum: "still-listed-template",
+      resourceType: "template", signatureExternalKey: signature.externalKey, templateKey: "notice.still-listed", purpose: "still-listed",
+      snapshot: { kind: "template", externalCode: "SMS_STILL_LISTED", externalName: "Still listed", externalStatus: "approved", templateType: "notification", variableNames: [] },
+    });
+    const seed = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
+    await store.resources.commitSync({ syncId: seed.id, candidates: seed.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+    const sync = new ResourceSyncService({
+      store,
+      provider: {
+        listSignatures: async () => ({ items: [] }),
+        listTemplates: async () => ({ items: [{ externalKey: "aliyun:template:SMS_STILL_LISTED", externalCode: "SMS_STILL_LISTED", externalName: "Still listed", externalStatus: "approved", templateType: "notification", variableNames: [] }] }),
+      } as never,
+      authorizer: { assert: () => undefined }, clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+      ids: { next: () => crypto.randomUUID() }, events: { emit: () => undefined },
+    });
+
+    const preview = await sync.preview(actor);
+    expect(preview.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ externalKey: signature.externalKey, resourceType: "signature", changeType: "unavailable" }),
+    ]));
+    expect(preview.candidates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ externalKey: template.externalKey, resourceType: "template" }),
+    ]));
+    await sync.commit(actor, { syncId: preview.id, candidates: preview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+
+    expect((await store.resources.findTemplateByKey({ templateKey: "notice.still-listed" }))).toMatchObject({ enabled: false, externalStatus: "unavailable" });
+  });
 });
