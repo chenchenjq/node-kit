@@ -20,15 +20,17 @@ export class PgJobRepository implements JobRepository {
     return rows[0] === undefined ? undefined : job(rows[0]);
   }
 
-  async lease(input: Readonly<{ tenantId: Job["tenantId"]; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]> {
+  async lease(input: Readonly<{ tenantId?: Job["tenantId"]; jobType?: Job["jobType"]; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]> {
     const { rows } = await db(this.pool, tx).query<Row>(
       `with candidate as (
-         select id from sms_kit.send_job where tenant_id = $1 and state = 'pending' and available_at <= $2
-         order by available_at, id for update skip locked limit $3
-       ) update sms_kit.send_job j set state = 'leased', lease_owner = $4, lease_token = $5,
-         lease_generation = lease_generation + 1, lease_until = $2 + ($6 * interval '1 millisecond'), updated_at = now()
+         select id from sms_kit.send_job where ($1::text is null or tenant_id = $1) and ($2::text is null or job_type = $2)
+           and state = 'pending' and available_at <= $3
+         order by available_at, id for update skip locked limit $4
+       ) update sms_kit.send_job j set state = 'leased', lease_owner = $5,
+         lease_token = md5(random()::text || clock_timestamp()::text || j.id::text)::uuid,
+         lease_generation = lease_generation + 1, lease_until = $3 + ($6 * interval '1 millisecond'), updated_at = now()
        from candidate c where j.id = c.id returning j.id, j.tenant_id, j.dedupe_key, j.job_type, j.message_id, j.state, j.available_at, j.lease_owner, j.lease_token, j.lease_generation, j.lease_until, j.attempt_count, j.max_attempts, j.last_error_code, j.payload`,
-      [input.tenantId, input.now, input.limit, input.owner, randomUUID(), input.leaseMs],
+      [input.tenantId ?? null, input.jobType ?? null, input.now, input.limit, input.owner, input.leaseMs],
     );
     return rows.map(job);
   }
@@ -55,5 +57,60 @@ export class PgJobRepository implements JobRepository {
     const { rows } = await db(this.pool, tx).query<Row>(`update sms_kit.send_job set state = $1, lease_owner = null, lease_token = null, lease_until = null, last_error_code = $2, updated_at = now() where tenant_id = $3 and id = $4 and state = 'leased' and lease_token = $5 returning ${fields}`, [input.terminal ? "dead" : "failed", input.errorCode, input.tenantId, input.id, input.leaseToken]);
     if (rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "job lease is no longer current");
     return job(rows[0]);
+  }
+
+  async trySucceed(input: Readonly<{ tenantId: Job["tenantId"]; id: string; leaseToken: string }>, tx?: SmsTransaction): Promise<boolean> {
+    const result = await db(this.pool, tx).query(
+      "update sms_kit.send_job set state = 'succeeded', lease_owner = null, lease_token = null, lease_until = null, updated_at = now() where tenant_id = $1 and id = $2 and state = 'leased' and lease_token = $3",
+      [input.tenantId, input.id, input.leaseToken],
+    );
+    return result.rowCount === 1;
+  }
+
+  async trySucceedByLeaseToken(input: Readonly<{ tenantId: Job["tenantId"]; messageId: MessageId; leaseToken: string }>, tx?: SmsTransaction): Promise<boolean> {
+    const result = await db(this.pool, tx).query(
+      "update sms_kit.send_job set state = 'succeeded', lease_owner = null, lease_token = null, lease_until = null, updated_at = now() where tenant_id = $1 and message_id = $2 and job_type = 'send' and state = 'leased' and lease_token = $3",
+      [input.tenantId, input.messageId, input.leaseToken],
+    );
+    return result.rowCount === 1;
+  }
+
+  async tryReschedule(input: Readonly<{ tenantId: Job["tenantId"]; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<boolean> {
+    const result = await db(this.pool, tx).query(
+      "update sms_kit.send_job set state = 'pending', available_at = $1, lease_owner = null, lease_token = null, lease_until = null, attempt_count = attempt_count + 1, last_error_code = $2, updated_at = now() where tenant_id = $3 and id = $4 and state = 'leased' and lease_token = $5",
+      [input.availableAt, input.errorCode ?? null, input.tenantId, input.id, input.leaseToken],
+    );
+    return result.rowCount === 1;
+  }
+
+  async tryFail(input: Readonly<{ tenantId: Job["tenantId"]; id: string; leaseToken: string; errorCode: string; terminal: boolean }>, tx?: SmsTransaction): Promise<boolean> {
+    const result = await db(this.pool, tx).query(
+      "update sms_kit.send_job set state = $1, lease_owner = null, lease_token = null, lease_until = null, last_error_code = $2, updated_at = now() where tenant_id = $3 and id = $4 and state = 'leased' and lease_token = $5",
+      [input.terminal ? "dead" : "failed", input.errorCode, input.tenantId, input.id, input.leaseToken],
+    );
+    return result.rowCount === 1;
+  }
+
+  async ensureReconcile(input: Readonly<{ tenantId: Job["tenantId"]; messageId: MessageId; availableAt: Date }>, tx?: SmsTransaction): Promise<void> {
+    await db(this.pool, tx).query(
+      `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, payload, created_at, updated_at)
+       values ($1, $2, $3, 'reconcile', $4, 'pending', $5, 0, 1, '{"kind":"reconcile"}'::jsonb, now(), now())
+       on conflict (tenant_id, job_type, dedupe_key) do nothing`,
+      [randomUUID(), input.tenantId, `reconcile:${input.messageId}`, input.messageId, input.availableAt],
+    );
+  }
+
+  async recoverExpiredUnstarted(input: Readonly<{ before: Date; limit: number }>, tx?: SmsTransaction): Promise<number> {
+    const result = await db(this.pool, tx).query(
+      `with candidate as (
+         select j.id from sms_kit.send_job j
+          where j.job_type = 'send' and j.state = 'leased' and j.lease_until < $1
+            and not exists (select 1 from sms_kit.send_attempt a where a.message_id = j.message_id and a.status = 'started')
+          order by j.lease_until, j.id for update skip locked limit $2
+       ) update sms_kit.send_job j set state = 'pending', lease_owner = null, lease_token = null, lease_until = null, updated_at = now()
+         from candidate c where j.id = c.id`,
+      [input.before, input.limit],
+    );
+    return result.rowCount ?? 0;
   }
 }

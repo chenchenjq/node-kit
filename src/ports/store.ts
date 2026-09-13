@@ -365,7 +365,14 @@ export interface AttemptRepository {
     latencyMs?: number;
     occurredAt: Date;
   }>, tx?: SmsTransaction): Promise<Attempt>;
-  listExpiredStarted(input: Readonly<{ tenantId: TenantId; before: Date; limit: number }>, tx?: SmsTransaction): Promise<readonly Attempt[]>;
+  /**
+   * Lists started attempts that can no longer safely be dispatched. Direct
+   * attempts use their marker deadline; queued attempts additionally require
+   * their owning send-job lease to have expired. A background recovery worker
+   * intentionally scans every tenant, while tenant-scoped callers can retain
+   * their isolation by supplying tenantId.
+   */
+  listExpiredStarted(input: Readonly<{ tenantId?: TenantId; before: Date; limit: number }>, tx?: SmsTransaction): Promise<readonly Attempt[]>;
 }
 
 export type DeliveryReceipt = Readonly<{
@@ -423,11 +430,20 @@ export type JobPayload =
   | Readonly<{ kind: "rollup"; statDate?: string }>;
 export interface JobRepository {
   get(input: Readonly<{ tenantId: TenantId; id: string }>, tx?: SmsTransaction): Promise<Job | undefined>;
-  lease(input: Readonly<{ tenantId: TenantId; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
+  lease(input: Readonly<{ tenantId?: TenantId; jobType?: Job["jobType"]; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
   renew(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; leaseMs: number; now: Date }>, tx?: SmsTransaction): Promise<Job>;
   reschedule(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<Job>;
   succeed(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string }>, tx?: SmsTransaction): Promise<Job>;
   fail(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; errorCode: string; terminal: boolean }>, tx?: SmsTransaction): Promise<Job>;
+  /** Non-throwing fenced variants let a late provider response complete its attempt without taking over a new lease. */
+  trySucceed(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string }>, tx?: SmsTransaction): Promise<boolean>;
+  trySucceedByLeaseToken(input: Readonly<{ tenantId: TenantId; messageId: MessageId; leaseToken: string }>, tx?: SmsTransaction): Promise<boolean>;
+  tryReschedule(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<boolean>;
+  tryFail(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; errorCode: string; terminal: boolean }>, tx?: SmsTransaction): Promise<boolean>;
+  /** Creates at most one reconciliation job per message, even under concurrent recovery. */
+  ensureReconcile(input: Readonly<{ tenantId: TenantId; messageId: MessageId; availableAt: Date }>, tx?: SmsTransaction): Promise<void>;
+  /** Releases expired queued work only when no durable dispatch marker exists. */
+  recoverExpiredUnstarted(input: Readonly<{ before: Date; limit: number }>, tx?: SmsTransaction): Promise<number>;
 }
 
 export type Challenge = Readonly<{

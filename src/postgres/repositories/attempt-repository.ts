@@ -54,8 +54,17 @@ export class PgAttemptRepository implements AttemptRepository {
     return attempt(rows[0]);
   }
 
-  async listExpiredStarted(input: Readonly<{ tenantId: Attempt["tenantId"]; before: Date; limit: number }>, tx?: SmsTransaction): Promise<readonly Attempt[]> {
-    const { rows } = await db(this.pool, tx).query<AttemptRow>(`select ${fields} from sms_kit.send_attempt a join sms_kit.send_message m on m.id = a.message_id where m.tenant_id = $1 and a.status = 'started' and a.dispatch_marked_at < $2 order by a.dispatch_marked_at limit $3`, [input.tenantId, input.before, input.limit]);
+  async listExpiredStarted(input: Readonly<{ tenantId?: Attempt["tenantId"]; before: Date; limit: number }>, tx?: SmsTransaction): Promise<readonly Attempt[]> {
+    const { rows } = await db(this.pool, tx).query<AttemptRow>(
+      `select ${fields} from sms_kit.send_attempt a
+        join sms_kit.send_message m on m.id = a.message_id
+        left join sms_kit.send_job j on j.message_id = a.message_id and j.job_type = 'send' and j.lease_token = a.lease_token
+       where ($1::text is null or m.tenant_id = $1) and a.status = 'started'
+         and (a.dispatch_mode = 'direct' and a.dispatch_marked_at < $2
+           or a.dispatch_mode = 'queued' and j.state = 'leased' and j.lease_until < $2)
+       order by a.dispatch_marked_at, a.id for update of a skip locked limit $3`,
+      [input.tenantId ?? null, input.before, input.limit],
+    );
     return rows.map(attempt);
   }
 }

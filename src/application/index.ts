@@ -12,4 +12,8 @@ export type {
 } from "./resource-sync-service.js";
 export { SendService } from "./send-service.js";
 export type { EnqueueNotificationInput, SendInput, SendServiceDependencies } from "./send-service.js";
+export { SendWorker } from "./send-worker.js";
+export type { SendWorkerDependencies, SendWorkerRunInput } from "./send-worker.js";
+export { DispatchRecoveryService } from "./dispatch-recovery-service.js";
+export type { DispatchRecoveryRunInput, DispatchRecoveryServiceDependencies } from "./dispatch-recovery-service.js";
 export { enforcePhoneSendPolicy } from "./send-policy.js";
