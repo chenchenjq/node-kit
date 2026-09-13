@@ -17,8 +17,12 @@ export class PgMaintenanceRepository implements MaintenanceRepository {
       client.query(`delete from sms_kit.otp_challenge where id in (select id from sms_kit.otp_challenge where created_at < $1 order by created_at limit $2)`, [input.challengeBefore, batch]),
       client.query(`delete from sms_kit.resource_sync_candidate where id in (select id from sms_kit.resource_sync_candidate where expires_at < $1 order by expires_at limit $2)`, [input.now, batch]),
       client.query(`delete from sms_kit.rate_limit_bucket where ctid in (select ctid from sms_kit.rate_limit_bucket where expires_at < $1 order by expires_at limit $2)`, [input.now, batch]),
-      client.query(`delete from sms_kit.send_budget_reservation reservation using sms_kit.send_message message where reservation.message_id = message.id
-        and reservation.held_at < $1 and (reservation.state = 'released' or message.acceptance_status in ('accepted','rejected','unknown') or message.delivery_status = 'unknown_final')`, [input.reservationBefore]),
+      client.query(`delete from sms_kit.send_budget_reservation where id in (
+        select reservation.id from sms_kit.send_budget_reservation reservation
+          join sms_kit.send_message message on message.id = reservation.message_id
+         where reservation.held_at < $1 and (reservation.state = 'released' or message.acceptance_status in ('accepted','rejected','unknown') or message.delivery_status = 'unknown_final')
+         order by reservation.held_at, reservation.id limit $2
+      )`, [input.reservationBefore, batch]),
       client.query(`update sms_kit.send_message set phone_ciphertext = null, phone_key_id = null, phone_hash = null, phone_last4 = null, phone_masked = null, metadata = '{}'::jsonb, version = version + 1, updated_at = now()
         where id in (select id from sms_kit.send_message where submitted_at < $1 and (phone_ciphertext is not null or phone_key_id is not null or phone_hash is not null or phone_last4 is not null or phone_masked is not null or metadata <> '{}'::jsonb)
           order by submitted_at limit $2)`, [input.messagePhoneBefore, batch]),
