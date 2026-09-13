@@ -2,7 +2,7 @@
 
 ## 1. 文档信息
 
-- 状态：已完成设计评审
+- 状态：修订待复审
 - 日期：2026-09-13
 - 目标包：`sms-kit`
 - 目标目录：`packages/sms-kit/`
@@ -47,7 +47,7 @@
 | 供应商 | 阿里云国内短信 |
 | 凭据 | 只持久化密钥引用；内置环境变量解析器并允许自定义解析器 |
 | 模板调用 | 管理员录入本地稳定键，业务模块不依赖阿里云 TemplateCode |
-| 发送模式 | OTP 同步发送；普通事务短信异步发送 |
+| 发送模式 | OTP 优先直发；普通事务短信异步发送；受理结果未知时禁止自动重发 |
 | 送达状态 | HTTP 回调为主，`QuerySendDetails` 定时补查 |
 | 认证 | Better Auth 为可选适配器；短信验证码免密登录 |
 | 前端 | 资源标签页；Next.js + Tailwind CSS + shadcn/ui 规范 |
@@ -73,7 +73,9 @@
 - `SmsStore`：配置、资源、消息、尝试、回执、任务、Challenge、限流、审计和统计的持久化。
 - `SecretResolver`：根据引用按需解析 Secret。
 - `PhoneNumberProtector`：规范化、加密、解密、检索哈希和脱敏。
+- `MessagePayloadProtector`：加密、解密普通异步短信的模板变量，并携带密钥版本用于轮换。
 - `Authorizer`：由宿主决定管理操作是否允许。
+- `SmsTransaction`：允许 `pg` 适配器加入宿主现有事务，用于原子消费高风险证明。
 - `Clock`、`IdGenerator`、`EventSink`：支持确定性测试和可观测性。
 
 ## 7. 功能需求
@@ -96,9 +98,10 @@
 
 ### 7.3 签名与模板同步
 
-- 调用阿里云 `QuerySmsSignList` 和 `QuerySmsTemplateList` 获取云端资源。
-- 同步结果保存为一次资源同步批次，可展示新增、变更、不可用和错误数量。
+- 调用阿里云 `QuerySmsSignList` 和 `QuerySmsTemplateList` 获取云端资源，必须完整处理分页；任一页失败时同步批次标记为部分失败，不把不完整结果解释为云端删除。
+- 同步结果保存为一次资源同步批次，并为每个候选资源保存脱敏快照、供应商稳定键、校验和和过期时间，可展示新增、变更、不可用和错误数量。
 - 只有管理员明确选择的资源才能导入本地系统。
+- 提交导入时必须校验同步批次未过期且候选校验和一致；不一致时要求重新同步，不能静默导入已变化资源。
 - 导入模板时管理员必须录入符合约束的稳定键，如 `auth.login_otp`。
 - 本地启停、用途和稳定键不被后续同步覆盖。
 - 云端审核状态不再可用时，禁止新发送并产生可观测事件。
@@ -121,9 +124,10 @@
 
 - 每次调用只允许一个接收手机号。
 - OTP 走优先直发路径，不进入持久化普通短信队列，也不做自动重复发送。Better Auth 宿主可使用 `waitUntil` 或等价机制在响应外完成这次直接调用，但必须保留发送任务的执行承诺，并统一外部响应时序以降低账号枚举和时序侧信道风险。
-- 普通事务短信先创建消息和任务，由 Worker 获取租约后发送。
+- 普通事务短信先在同一事务中创建消息和任务；手机号密文及模板变量密文随消息保存，由 Worker 在租约期间按需解密后发送。OTP 变量不得进入该异步载荷。
 - 相同业务幂等键不得创建重复短信。
-- 暂时失败采用指数退避和抖动，默认最多三次供应商调用。
+- 只有供应商明确拒绝受理且明确标识为可重试的限流或暂时不可用响应，才允许指数退避和抖动，默认最多三次供应商调用。
+- 网络超时、连接中断或进程崩溃导致“可能已经提交”的情况必须把 `acceptance_status` 标记为 `unknown`，先等待回执或补查，禁止自动重发。OutId 只用于业务关联，不视为供应商幂等键。
 - 永久失败不重试；每次调用均记录独立 Attempt。
 
 ### 7.6 Better Auth 适配
@@ -131,6 +135,8 @@
 - `sms-kit/better-auth` 是可选入口，Better Auth 作为可选 peer dependency。
 - 适配 Better Auth Phone Number 插件的 `sendOTP` 和 `sendPasswordResetOTP`。
 - 登录验证码映射到 `auth.login_otp`，找回密码映射到 `auth.password_reset`；映射允许宿主配置。
+- 首版只允许已有账号登录，宿主不得启用 `signUpOnVerification`；手机号注册不属于本项目范围。
+- 适配器要求宿主提供 `isExistingPhone` 服务端回调。未知手机号不发送真实短信，执行等价的固定成本处理并返回与已存在手机号相同的外部响应；安全审计不得暴露号码是否存在。
 - Better Auth 自己生成并验证登录/找回密码 OTP，管理用户和会话。
 - `sms-kit` 负责模板选择、发送、限流、脱敏记录、审计和统计。
 - Better Auth 与宿主认证流程必须对不存在的手机号返回一致响应；`sms-kit` 适配器不得通过发送错误泄露账号是否存在。
@@ -142,7 +148,8 @@
 - 默认验证码长度为 6 位、有效期 5 分钟、最多验证 3 次。
 - 验证成功签发随机、短时、单次使用的证明；数据库保存证明哈希。
 - 证明绑定 `subjectId + action + challengeId`，不能跨用户、跨动作或重复使用。
-- 消费证明与实际高风险操作应由宿主放在同一事务或等价原子边界中。
+- 当宿主业务数据与 `sms-kit` 使用同一 PostgreSQL 数据库时，必须通过 `SmsTransaction` 复用同一 `pg` 事务，使用条件更新消费证明并执行实际高风险操作。
+- 不同数据库或无法共享事务时，宿主只能调用带业务幂等键的高风险操作，并采用“先条件消费证明、再执行幂等业务操作、失败可安全重放”的补偿契约。适配器必须显式声明所选模式，不能声称提供跨数据库原子性。
 
 ### 7.8 防刷与预算
 
@@ -155,7 +162,9 @@
 ### 7.9 受理、送达回执与补查
 
 - 供应商 API 返回成功只记为 `accepted`，不能计为最终送达。
-- HTTP 回调 Route Handler 支持阿里云连通性检查和批量状态推送，并快速响应。
+- HTTP 回调 Route Handler 支持阿里云连通性检查和批量状态推送，在 700ms 限制内返回要求的确认结构。
+- 回调 URL 必须使用 HTTPS，并携带由宿主 Secret 引用提供的高熵路径令牌；处理器使用常量时间比较验证令牌，反向代理和应用日志必须屏蔽该路径段。令牌只降低非授权调用风险，不把回调提升为强来源证明。
+- Handler 必须分别限制请求体字节数、批次数量、字段长度和解析时间。需要强确认的部署可以把回调视为状态提示，再通过 `QuerySendDetails` 复核终态。
 - 回执先执行严格结构校验、字段限制、BizId/消息关联和幂等落库，再更新送达状态。
 - 回调可能重复或乱序，状态机不得从终态回退到非终态。
 - 无回执和处理异常的记录进入 `QuerySendDetails` 定时补查。
@@ -210,9 +219,9 @@
 - `PROVIDER_REJECTED`、`PROVIDER_THROTTLED`、`PROVIDER_UNAVAILABLE`
 - `IDEMPOTENCY_CONFLICT`、`CONCURRENT_MODIFICATION`
 - `CHALLENGE_EXPIRED`、`CHALLENGE_ATTEMPTS_EXCEEDED`、`PROOF_INVALID`
-- `DELIVERY_UNKNOWN`、`STORAGE_FAILURE`
+- `ACCEPTANCE_UNKNOWN`、`DELIVERY_UNKNOWN`、`STORAGE_FAILURE`
 
-只有超时、供应商限流和可判定为暂时不可用的错误允许自动重试。配置、权限、模板、参数和预算错误不得重试。
+只有供应商明确返回“未受理且可重试”的限流或暂时不可用错误允许自动重试。网络超时、连接中断和进程崩溃造成的受理未知不得自动重发，而是进入回执等待与补查。配置、权限、模板、参数和预算错误不得重试。
 
 ## 10. 后台任务
 
@@ -240,12 +249,89 @@
 
 UI 技术栈和交互规则见 `doc/前端开发规范.md`。可直接用于编码 Agent 的指令见 `doc/prompts/sms-kit-admin-ui.md`。
 
+### 11.1 管理 API 与 DTO 契约
+
+`sms-kit/next` 导出 Route Handler 工厂和 `sms-kit/next/types` DTO。宿主可以修改路由前缀，但不得改变 DTO 语义。建议路由前缀为 `/api/admin/sms`：
+
+| 方法与路径 | 权限 | 主要 DTO |
+| --- | --- | --- |
+| `GET /overview` | 任一读取权限 | `SmsOverviewDto` |
+| `GET/PATCH /config` | `config.read/config.write` | `ProviderConfigDto`、`UpdateProviderConfigInput` |
+| `POST /config/test-connection` | `config.write` | `ConnectionTestResultDto` |
+| `POST /config/test-send` | `sms.test` | `TestSendInput`、`MessageDto` |
+| `POST /resources/sync-preview` | `resource.sync` | `ResourceSyncPreviewDto`，包含同步 ID、校验和和过期时间 |
+| `POST /resources/sync-commit` | `resource.sync` | `ResourceSyncCommitInput`，必须回传候选 ID 与校验和 |
+| `GET /signatures`、`PATCH /signatures/:id` | `config.read/signature.manage` | `PageDto<SignatureDto>`、`UpdateSignatureInput` |
+| `GET /templates`、`POST /templates/import`、`PATCH /templates/:id` | `config.read/template.manage` | `PageDto<TemplateDto>`、`ImportTemplateInput`、`UpdateTemplateInput` |
+| `GET/PATCH /verification` | `config.read/config.write` | `VerificationSettingsDto` |
+| `GET /receipt-health` | `message.read` | `ReceiptHealthDto` |
+| `POST /reconcile` | `receipt.reconcile` | `ReconcileInput`、`JobDto` |
+| `GET /messages`、`GET /messages/:id` | `message.read` | `PageDto<MessageDto>`、`MessageDetailDto` |
+| `GET /stats` | `stats.read` | `SmsStatsDto` |
+| `GET /jobs/:id` | 发起操作对应权限 | `JobDto` |
+
+所有成功响应使用 `{ data, requestId }`；列表使用 `{ data: { items, page, pageSize, total }, requestId }`。错误响应使用 `{ error: { code, message, fieldErrors?, retryable }, requestId }`，其中 `code` 必须来自稳定领域错误集合。写请求携带 `version` 和操作级 `idempotencyKey`；服务端拒绝未知字段。
+
+Secret 引用 DTO 只包含 `{ scheme, maskedName, configured }`。手机号 DTO 只返回 `{ masked, last4Available }`。管理员在浏览器主动输入的完整测试号码或精确查询号码可以作为一次性 HTTPS 请求字段发送，但服务端不得回显，客户端不得持久化、缓存、分析或记录该值。
+
+以下最小 TypeScript 结构是公共契约的一部分；具体资源 DTO 可以增加向后兼容字段，但不得改变已有字段语义：
+
+```ts
+type ApiSuccess<T> = { data: T; requestId: string };
+type ApiFailure = {
+  error: {
+    code: SmsErrorCode;
+    message: string;
+    fieldErrors?: Record<string, string[]>;
+    retryable: boolean;
+  };
+  requestId: string;
+};
+type PageDto<T> = {
+  items: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+};
+type SecretRefDto = {
+  scheme: string;
+  maskedName: string;
+  configured: boolean;
+};
+type VersionedWrite = {
+  version: number;
+  idempotencyKey: string;
+};
+type ResourceCandidateDto = {
+  id: string;
+  resourceType: "signature" | "template";
+  externalKey: string;
+  changeType: "new" | "changed" | "unavailable" | "unchanged";
+  checksum: string;
+  expiresAt: string;
+};
+type MessageDto = {
+  id: string;
+  phone: { masked: string | null; last4Available: boolean };
+  templateKey: string;
+  purpose: string;
+  acceptanceStatus: "pending" | "accepted" | "rejected" | "unknown";
+  deliveryStatus: "not_applicable" | "waiting" | "delivered" | "failed" | "unknown_final";
+  submittedAt: string;
+  attemptCount: number;
+  providerBizId?: string;
+  finalErrorCode?: SmsErrorCode;
+};
+```
+
+日期时间字段使用 ISO 8601 UTC 字符串；计数在 JSON 中使用安全整数范围内的 number，超出范围时改为十进制字符串并发布兼容版本说明。`SmsErrorCode`、资源状态、配置状态和 Job 状态由 `sms-kit/next/types` 集中导出。
+
 ## 12. 测试策略
 
 ### 12.1 默认测试
 
 - Vitest 单元测试：变量校验、状态机、错误映射、幂等、限流、Challenge、脱敏和清理选择。
-- Provider 契约测试：正常响应、拒绝、限流、超时、重复/乱序回执和详情补查。
+- Provider 契约测试：正常响应、明确拒绝、可安全重试的限流、受理未知的超时、重复/乱序回执和详情补查。
 - Store 契约测试：事务、唯一约束、乐观锁、Worker 租约和原子限流。
 - PostgreSQL 集成测试：Docker/Testcontainers 启动临时实例，执行迁移和种子数据。
 - Better Auth 适配契约测试：确保输入映射和错误边界正确，不创建或修改认证会话。
@@ -267,7 +353,7 @@ UI 技术栈和交互规则见 `doc/前端开发规范.md`。可直接用于编�
 2. 模拟环境可完成配置、权限测试、资源同步、导入、稳定键设置和启停。
 3. 模板变量缺失、多余、模板停用和云端状态异常均在调用供应商前被拒绝。
 4. 相同幂等键的并发请求只产生一条业务消息。
-5. OTP 同步发送，普通短信由 Worker 异步发送并只重试暂时错误。
+5. OTP 优先直发；普通短信由 Worker 使用加密模板变量异步发送，只重试明确未受理的暂时错误，受理未知不自动重发。
 6. 重复或乱序回执不会重复计数，也不会让终态回退。
 7. 补查可把等待状态更新为最终送达、最终失败或最终未知。
 8. Better Auth 适配器可用于验证码免密登录与手机号找回密码的发送回调。
@@ -276,10 +362,13 @@ UI 技术栈和交互规则见 `doc/前端开发规范.md`。可直接用于编�
 11. 日志、API 和管理端不泄露完整手机号、Secret 或 OTP。
 12. 清理任务符合 7/90/180 天默认策略，匿名日统计保持可用。
 13. 前端规范和 Prompt 能生成覆盖全部七个标签页、状态和权限的 Next.js 管理端。
+14. 未知手机号不会自动注册、不会触发真实短信，且外部响应不泄露账号存在性。
+15. 同步预览在过期或校验和变化后不能提交。
+16. 同库模式下高风险证明消费与业务操作共享事务；跨库模式只允许幂等补偿契约。
 
 ## 15. 缺失功能分析结论
 
-原始需求未明确但已纳入首版的必要能力包括：供应商受理与最终送达分离、HTTP 回执幂等、定时补查、模板变量严格校验、业务幂等、普通短信任务重试、OTP 防刷、每日预算与熔断、手机号加密与脱敏、数据保留与清理、宿主鉴权与审计、后台任务租约、可观测性、数据库版本检查和真实联调保护。
+原始需求未明确但已纳入首版的必要能力包括：供应商受理与最终送达分离、受理未知禁止自动重发、HTTP 回执入口保护与幂等、定时补查、同步候选快照、模板变量严格校验、异步变量加密、业务幂等、普通短信安全重试、OTP 防刷、未知手机号防枚举、每日预算与熔断、手机号加密与脱敏、数据保留与清理、宿主鉴权与审计、高风险证明事务契约、后台任务租约、可观测性、数据库版本检查和真实联调保护。
 
 以下能力明确推迟：多供应商、国际短信、多租户、批量营销、在线编辑云端模板、成本核算和内置告警渠道。未来增加这些能力时必须单独评审，不应破坏稳定模板键和核心 Ports。
 

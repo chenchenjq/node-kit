@@ -1,6 +1,6 @@
 # sms-kit 管理端 AI 开发 Prompt
 
-将以下 Prompt 交给能够读取宿主 Next.js 仓库的编码 Agent。使用前确保后端已经实现 `sms-kit` 管理 API，或为前端开发提供严格遵循同一 DTO 的模拟服务。
+将以下 Prompt 交给能够读取宿主 Next.js 仓库的编码 Agent。使用前确保后端已经实现 `sms-kit` 管理 API 和 `sms-kit/next/types`，或提供导入同一类型并通过类型检查的模拟服务。不得在缺少 DTO 时自行猜测接口。
 
 ---
 
@@ -15,10 +15,15 @@
 - 使用当前项目的 Next.js App Router、TypeScript strict、Tailwind CSS 和 shadcn/ui。
 - 遵循项目现有数据请求与表单方案；若项目没有约定，使用 React Hook Form 和 Zod。
 - 调用阿里云 SDK、PostgreSQL、SecretResolver、PhoneNumberProtector 或 sms-kit server-only 入口的代码只能在 Node.js Runtime 服务端；不要部署到 Edge Runtime。
-- 客户端绝不能接收或记录 AccessKey、AccessKey Secret、OTP、完整手机号、未过滤模板变量或供应商原始回执。
+- 服务端绝不能向客户端回传 AccessKey、AccessKey Secret、OTP、完整手机号、未过滤模板变量或供应商原始回执。管理员主动输入的测试号码或精确查询号码只作为一次性 HTTPS 请求字段，客户端不得持久化、缓存、分析或记录，操作结束后清除输入状态。
 - 不创建短信领域状态机，不自行判断是否允许重试；渲染服务端 DTO 返回的状态、权限和稳定错误码。
 - 所有写操作必须由服务端鉴权。前端的隐藏或禁用不能替代服务端权限检查。
 - 不增加营销群发、联系人管理、国际短信、多供应商或在线编辑云端模板功能。
+- 从 `sms-kit/next/types` 导入 API DTO、分页类型和错误码。若该入口不存在，停止并报告后端前置条件，不得自建猜测版本。
+
+## API 契约
+
+默认前缀为 `/api/admin/sms`。使用以下端点：`GET /overview`、`GET/PATCH /config`、`POST /config/test-connection`、`POST /config/test-send`、`POST /resources/sync-preview`、`POST /resources/sync-commit`、`GET /signatures`、`PATCH /signatures/:id`、`GET /templates`、`POST /templates/import`、`PATCH /templates/:id`、`GET/PATCH /verification`、`GET /receipt-health`、`POST /reconcile`、`GET /messages`、`GET /messages/:id`、`GET /stats` 和 `GET /jobs/:id`。成功、分页、错误、版本和幂等结构以 `sms-kit/next/types` 为唯一事实来源。
 
 ## 页面结构
 
@@ -47,8 +52,8 @@
 
 ### 签名和模板
 
-- 同步前展示新增、变化、不可用和未导入资源的差异预览。
-- 管理员确认后才提交同步结果。
+- 同步前展示新增、变化、不可用和未导入资源的差异预览，以及同步 ID、候选 ID、校验和与过期时间。
+- 管理员确认后才提交同步结果；过期或校验冲突时禁止提交并要求重新同步。
 - 模板导入必须填写稳定模板键、签名和用途，并检查变量集合。
 - 停用签名或模板前展示影响范围。
 - 云端不可用与本地停用使用不同状态徽标。
@@ -57,6 +62,7 @@
 
 - 分开显示 Better Auth 登录/找回密码模板映射和高风险 Challenge 设置。
 - 明确标注 Better Auth 负责用户、验证码验证和会话，sms-kit 仅适配发送。
+- 标注首版只允许已有账号登录，`signUpOnVerification` 必须禁用，不提供手机号注册入口。
 - 展示验证码长度、有效期、最大尝试次数、证明有效期及 60 秒/5 次/10 次默认限流。
 
 ### 回执与补查
@@ -79,7 +85,7 @@
 
 ## 状态完整性
 
-每个查询区域必须实现加载骨架、空状态、错误状态、重试、部分成功和无权限状态。后台任务不能用成功 Toast 冒充已完成；提交后展示任务 ID 和可查询状态。稳定错误码可复制，供应商原始消息只显示服务端脱敏后的内容。
+每个查询区域必须实现加载骨架、空状态、错误状态、重试、部分成功和无权限状态。后台任务不能用成功 Toast 冒充已完成；提交后展示任务 ID 和可查询状态。稳定错误码可复制，供应商原始消息只显示服务端脱敏后的内容。使用 PRD 第 11.1 节定义的响应封装、分页和写请求并发语义。
 
 ## 权限
 
@@ -105,6 +111,7 @@
 - 验证键盘导航、焦点恢复、错误摘要和无权限状态。
 - 编写关键 E2E：首次配置 → 权限测试 → 同步资源 → 导入并启用模板 → 模拟发送 → 接收模拟回执 → 统计更新。
 - 只使用虚构手机号和模拟 Provider；测试 fixture 禁止出现真实 Secret。
+- 模拟服务必须导入并满足 `sms-kit/next/types`，测试同步预览过期、校验冲突和 API 未知字段拒绝。
 
 ## 完成标准
 
