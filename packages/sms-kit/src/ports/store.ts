@@ -332,6 +332,13 @@ export interface MessageRepository {
     status: Exclude<DeliveryStatus, "not_applicable" | "waiting">;
     occurredAt: Date;
   }>, tx?: SmsTransaction): Promise<Message>;
+  /** Query evidence is correlated by this message's stored OutId before this atomic promotion. */
+  completeQueryDelivery(input: Readonly<{
+    tenantId: TenantId;
+    id: MessageId;
+    status: "delivered" | "failed";
+    occurredAt: Date;
+  }>, tx?: SmsTransaction): Promise<Message>;
   clearRenderParams(input: Readonly<{ tenantId: TenantId; id: MessageId }>, tx?: SmsTransaction): Promise<void>;
 }
 
@@ -565,7 +572,15 @@ export interface StatsRepository {
 
 export interface MaintenanceRepository {
   /** Applies only time-expired data lifecycle operations and returns affected rows. */
-  applyRetention(input: Readonly<{ before: Date; batchSize: number }>, tx?: SmsTransaction): Promise<number>;
+  applyRetention(input: Readonly<{
+    now: Date;
+    challengeBefore: Date;
+    messagePhoneBefore: Date;
+    receiptBefore: Date;
+    auditBefore: Date;
+    reservationBefore: Date;
+    batchSize: number;
+  }>, tx?: SmsTransaction): Promise<number>;
 }
 
 export type HealthCounts = Readonly<{

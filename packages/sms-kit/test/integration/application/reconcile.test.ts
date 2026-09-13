@@ -14,6 +14,7 @@ const tenantId = "reconcile-tenant" as TenantId;
 class Clock {
   constructor(private value = new Date("2026-09-14T00:00:00.000Z")) {}
   now(): Date { return new Date(this.value); }
+  advance(ms: number): void { this.value = new Date(this.value.getTime() + ms); }
 }
 
 class PagedProvider implements SmsProvider {
@@ -22,7 +23,7 @@ class PagedProvider implements SmsProvider {
   withPages(pages: Awaited<ReturnType<SmsProvider["queryDelivery"]>>[]): this { this.pages = pages; return this; }
   async queryDelivery(input: Parameters<SmsProvider["queryDelivery"]>[0]): Promise<Awaited<ReturnType<SmsProvider["queryDelivery"]>>> {
     this.calls.push(input);
-    return this.pages[this.calls.length - 1] ?? { kind: "waiting", hasNextPage: false };
+    return this.pages[this.calls.length - 1] ?? { kind: "page", items: [], hasNextPage: false };
   }
   async testConnection(): Promise<never> { throw new Error("not used"); }
   async listSignatures(): Promise<never> { throw new Error("not used"); }
@@ -51,21 +52,25 @@ describe("ReconcileService", () => {
   }, 120_000);
   afterAll(async () => stop?.());
 
-  async function seedUnknown(): Promise<string> {
+  async function seedUnknown(providerBizId?: string): Promise<string> {
     const created = await store.messages.createWithSendJob({
       id: crypto.randomUUID() as never, tenantId, idempotencyKey: crypto.randomUUID(), templateId: templateId as never,
       templateKeySnapshot: "reconcile.delivery", externalTemplateCodeSnapshot: "SMS_RECONCILE", signatureNameSnapshot: "Reconcile",
       purpose: "notification", phoneCiphertext: "ciphertext", phoneKeyId: "phone-k1", phoneHash: "phone-hash", phoneLast4: "0000", phoneMasked: "138****0000", variableNames: [], submittedAt: clock.now(),
     });
     const attempt = await store.attempts.createStarted({ tenantId, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: clock.now() });
-    await store.messages.completeAcceptance({ tenantId, dispatchToken: attempt.dispatchToken, status: "unknown", evidence: "same-dispatch-response", finalErrorCode: "ACCEPTANCE_UNKNOWN", occurredAt: clock.now() });
+    await store.messages.completeAcceptance({ tenantId, dispatchToken: attempt.dispatchToken, status: "unknown", evidence: "same-dispatch-response", ...(providerBizId === undefined ? {} : { providerBizId }), finalErrorCode: "ACCEPTANCE_UNKNOWN", occurredAt: clock.now() });
     await store.jobs.ensureReconcile({ tenantId, messageId: created.message.id, availableAt: clock.now() });
     return created.message.id;
   }
 
+  async function clearPendingReconciliation(): Promise<void> {
+    await pool.query("update sms_kit.send_job set state = 'succeeded', lease_owner = null, lease_token = null, lease_until = null where tenant_id = $1 and job_type = 'reconcile' and state in ('pending', 'leased')", [tenantId]);
+  }
+
   it("queries every delivery page with required Alibaba fields without resending", async () => {
     await seedUnknown();
-    const provider = new PagedProvider().withPages([{ kind: "waiting", hasNextPage: true }, { kind: "waiting", hasNextPage: false }]);
+    const provider = new PagedProvider().withPages([{ kind: "page", items: [], hasNextPage: true }, { kind: "page", items: [], hasNextPage: false }]);
     const reconcile = new ReconcileService({ store, provider, phoneProtector: { unprotect: async () => "13800138000" as never }, clock, events: { emit: () => undefined } });
 
     await reconcile.runBatch({ limit: 10 });
@@ -94,5 +99,50 @@ describe("ReconcileService", () => {
 
     await expect(store.jobs.get({ tenantId, id: jobId })).resolves.toMatchObject({ state: "pending" });
     expect(provider.calls).toHaveLength(0);
+  });
+
+  it("uses only a matching OutId from every provider page and atomically promotes unknown acceptance", async () => {
+    await clearPendingReconciliation();
+    const targetId = await seedUnknown("target-biz");
+    const otherId = await seedUnknown("other-biz");
+    await pool.query("update sms_kit.send_job set available_at = $1 where tenant_id = $2 and message_id = $3 and job_type = 'reconcile'", [new Date(clock.now().getTime() - 1), tenantId, targetId]);
+    const provider = new PagedProvider().withPages([{
+      kind: "page", hasNextPage: true, items: [
+        { outId: otherId, status: "delivered", occurredAt: clock.now() },
+        { outId: targetId, status: "waiting" },
+      ],
+    }, {
+      kind: "page", hasNextPage: false, items: [
+        { outId: targetId, status: "delivered", occurredAt: clock.now() },
+      ],
+    }] as never);
+    const reconcile = new ReconcileService({ store, provider, phoneProtector: { unprotect: async () => "13800138000" as never }, clock, events: { emit: () => undefined } });
+
+    await reconcile.runBatch({ limit: 1 });
+
+    await expect(store.messages.get({ tenantId, id: targetId as never })).resolves.toMatchObject({ acceptanceStatus: "accepted", deliveryStatus: "delivered", providerBizId: "target-biz" });
+    await expect(store.messages.get({ tenantId, id: otherId as never })).resolves.toMatchObject({ acceptanceStatus: "unknown", deliveryStatus: "waiting" });
+    await expect(pool.query<{ count: string }>("select count(*)::text as count from sms_kit.delivery_receipt where message_id = $1 and tenant_id = $2", [targetId, tenantId])).resolves.toMatchObject({ rows: [{ count: "1" }] });
+    await store.stats.rollupDirtyDates({ tenantId, limit: 10 });
+    const [stats] = await store.stats.query({ tenantId, from: new Date("2026-09-14T00:00:00.000Z"), to: new Date("2026-09-15T00:00:00.000Z") });
+    expect(stats).toBeDefined();
+    expect(stats!.acceptedCount).toBeLessThanOrEqual(stats!.submittedCount);
+    expect(stats!.deliveredCount).toBeLessThanOrEqual(stats!.acceptedCount);
+    expect(stats!.deliveryWaitingCount + stats!.deliveredCount + stats!.deliveryFailedCount + stats!.deliveryUnknownFinalCount).toBeLessThanOrEqual(stats!.submittedCount);
+  });
+
+  it("reclaims an expired reconciliation lease and fences its former token", async () => {
+    await clearPendingReconciliation();
+    const targetId = await seedUnknown("reclaim-biz");
+    const [first] = await store.jobs.leaseReconciliation({ owner: "crashed-worker", limit: 1, leaseMs: 1_000, now: clock.now() });
+    if (first?.leaseToken === undefined) throw new Error("reconciliation job was not leased");
+    clock.advance(1_001);
+    const provider = new PagedProvider().withPages([{ kind: "page", hasNextPage: false, items: [{ outId: targetId, status: "delivered", occurredAt: clock.now() }] }] as never);
+    const reconcile = new ReconcileService({ store, provider, phoneProtector: { unprotect: async () => "13800138000" as never }, clock, events: { emit: () => undefined } });
+
+    await reconcile.runBatch({ limit: 1 });
+
+    await expect(store.messages.get({ tenantId, id: targetId as never })).resolves.toMatchObject({ deliveryStatus: "delivered" });
+    await expect(store.jobs.trySucceed({ tenantId, id: first.id, leaseToken: first.leaseToken })).resolves.toBe(false);
   });
 });

@@ -170,22 +170,13 @@ export class AliyunSmsProvider implements SmsProvider {
   }
 
   private toDeliveryResult(output: AliyunQueryOutput, currentPage: number, pageSize: number): ProviderDeliveryResult {
-    const detail = output.smsSendDetailDTOs?.smsSendDetailDTO?.[0];
     const hasNextPage = Number(output.totalCount ?? 0) > currentPage * pageSize;
-    if (detail === undefined || detail.sendStatus === undefined) {
-      return { kind: "waiting", hasNextPage };
-    }
-    if (detail.sendStatus === 3) {
-      return { kind: "delivered", ...(detail.outId === undefined ? {} : { bizId: detail.outId }), hasNextPage };
-    }
-    if (detail.sendStatus === 2) {
-      return {
-        kind: "failed",
-        code: detail.errCode ?? "PROVIDER_FAILED",
-        ...(detail.outId === undefined ? {} : { bizId: detail.outId }), hasNextPage,
-      };
-    }
-    return { kind: "waiting", hasNextPage };
+    const items = (output.smsSendDetailDTOs?.smsSendDetailDTO ?? []).map((detail) => ({
+      ...(detail.outId === undefined ? {} : { outId: detail.outId }),
+      status: detail.sendStatus === 3 ? "delivered" as const : detail.sendStatus === 2 ? "failed" as const : "waiting" as const,
+      ...(detail.errCode === undefined ? {} : { providerCode: detail.errCode }),
+    }));
+    return { kind: "page", items, hasNextPage };
   }
 }
 

@@ -53,3 +53,20 @@ npm run build --workspace sms-kit
 git diff --check
 # all exit 0
 ```
+
+## Fix round 1
+
+- Delivery queries now preserve all Alibaba detail items for each page. The
+  reconciler accepts terminal evidence only when its returned `outId` exactly
+  equals the leased message ID; unrelated same-phone/date records cannot move
+  another message or tenant.
+- Expired reconciliation leases are reclaimable, and every completion remains
+  fenced by the current lease token. A stale worker cannot complete reclaimed
+  work.
+- A positively correlated terminal query atomically promotes an `unknown`
+  acceptance to `accepted`, records the query receipt when the persisted BizId
+  exists, and updates delivery plus dirty statistics in one transaction.
+- Retention now has explicit boundaries: challenges after 7 days; candidates
+  and rate buckets at their own expiry; message phones after 90 days; receipt
+  payloads, audit events, and released reservations after 180 days. Anonymous
+  statistics and held budget enforcement remain intact.

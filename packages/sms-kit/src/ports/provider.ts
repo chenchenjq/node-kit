@@ -74,11 +74,16 @@ export type ProviderSendResult =
   | { kind: "rejected"; code: string; retryable: boolean; requestId?: string }
   | { kind: "unknown"; code: "ACCEPTANCE_UNKNOWN" };
 
+export type ProviderDeliveryItem = Readonly<{
+  /** The caller's opaque OutId is the only response identity trusted for reconciliation. */
+  outId?: string;
+  status: "waiting" | "delivered" | "failed";
+  occurredAt?: Date;
+  providerCode?: string;
+}>;
 export type ProviderDeliveryResult =
-  | { kind: "waiting"; hasNextPage?: boolean }
-  | { kind: "delivered"; bizId?: string; deliveredAt?: Date; hasNextPage?: boolean }
-  | { kind: "failed"; code: string; bizId?: string; occurredAt?: Date; hasNextPage?: boolean }
-  | { kind: "unknown"; code: "DELIVERY_UNKNOWN"; hasNextPage?: boolean };
+  | Readonly<{ kind: "page"; items: readonly ProviderDeliveryItem[]; hasNextPage: boolean }>
+  | Readonly<{ kind: "unknown"; code: "DELIVERY_UNKNOWN" }>;
 
 export type ProviderReceipt = Readonly<{
   bizId: string;

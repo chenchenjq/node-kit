@@ -158,6 +158,26 @@ export class PgMessageRepository implements MessageRepository {
     });
   }
 
+  async completeQueryDelivery(input: Parameters<MessageRepository["completeQueryDelivery"]>[0], tx?: SmsTransaction): Promise<Message> {
+    return transaction(this.pool, tx, async (db) => {
+      const current = await db.query<MessageRow>(`select ${selectMessage} from sms_kit.send_message where tenant_id = $1 and id = $2 for update`, [input.tenantId, input.id]);
+      const row = current.rows[0];
+      if (row === undefined || row.delivery_status !== "waiting" || !["accepted", "unknown"].includes(row.acceptance_status)) {
+        throw new SmsKitError("CONCURRENT_MODIFICATION", "message is no longer query-reconcilable");
+      }
+      const updated = await db.query<MessageRow>(`update sms_kit.send_message
+        set acceptance_status = case when acceptance_status = 'unknown' then 'accepted' else acceptance_status end,
+            accepted_at = case when acceptance_status = 'unknown' then coalesce(accepted_at, $1) else accepted_at end,
+            delivery_status = $2, delivered_at = case when $2 = 'delivered' then $1 else delivered_at end,
+            finalized_at = $1, version = version + 1, updated_at = now()
+        where tenant_id = $3 and id = $4 and version = $5 returning ${selectMessage}`,
+      [input.occurredAt, input.status, input.tenantId, input.id, row.version]);
+      if (updated.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message query reconciliation changed concurrently");
+      await markMessageStatsDirty(db, input.tenantId, input.id);
+      return message(updated.rows[0]);
+    });
+  }
+
   async clearRenderParams(input: Readonly<{ tenantId: Message["tenantId"]; id: Message["id"] }>, tx?: SmsTransaction): Promise<void> {
     await queryable(this.pool, tx).query("update sms_kit.send_message set render_params_ciphertext = null, render_params_key_id = null, version = version + 1, updated_at = now() where tenant_id = $1 and id = $2", [input.tenantId, input.id]);
   }

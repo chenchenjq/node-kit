@@ -46,7 +46,10 @@ export class PgJobRepository implements JobRepository {
       `with candidate as (
          select job.id from sms_kit.send_job job
            join sms_kit.send_message message on message.id = job.message_id and message.tenant_id = job.tenant_id
-          where job.job_type = 'reconcile' and job.state = 'pending' and job.available_at <= $1
+          where job.job_type = 'reconcile' and (
+              (job.state = 'pending' and job.available_at <= $1)
+              or (job.state = 'leased' and job.lease_until < $1)
+            )
             and message.delivery_status = 'waiting' and message.acceptance_status in ('accepted', 'unknown')
           order by job.available_at, job.id for update of job, message skip locked limit $2
        ) update sms_kit.send_job job set state = 'leased', lease_owner = $3,

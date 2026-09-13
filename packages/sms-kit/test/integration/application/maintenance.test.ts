@@ -53,9 +53,39 @@ describe("MaintenanceService", () => {
 
   it("removes sensitive payloads at their approved lifecycle boundaries", async () => {
     const messageId = await acceptedMessage();
-    const maintenance = new MaintenanceService({ store, clock: { now: () => new Date("2026-10-20T00:00:00.000Z") } });
+    const maintenance = new MaintenanceService({ store, clock: { now: () => new Date("2027-01-20T00:00:00.000Z") } });
     await maintenance.applyRetention({ batchSize: 100 });
 
     await expect(pool.query<{ phone_ciphertext: string | null; phone_key_id: string | null }>("select phone_ciphertext, phone_key_id from sms_kit.send_message where id = $1", [messageId])).resolves.toMatchObject({ rows: [{ phone_ciphertext: null, phone_key_id: null }] });
+  });
+
+  it("uses distinct lifecycle cutoffs without deleting anonymous statistics or budget enforcement", async () => {
+    const oldPhone = await acceptedMessage();
+    const retainedPhone = await acceptedMessage();
+    const now = new Date("2026-12-31T00:00:00.000Z");
+    await pool.query("update sms_kit.send_message set submitted_at = $1 where id = $2", [new Date("2026-10-01T00:00:00.000Z"), oldPhone]);
+    await pool.query("update sms_kit.send_message set submitted_at = $1 where id = $2", [new Date("2026-10-03T00:00:00.000Z"), retainedPhone]);
+    await pool.query(`insert into sms_kit.otp_challenge (id, tenant_id, subject_id, action, purpose, phone_hash, code_hash, max_attempts, expires_at, created_at)
+      values ($1,$2,'subject','action','step_up','phone','code',3,$3,$3), ($4,$2,'subject','action','step_up','phone','code',3,$5,$5)`, [crypto.randomUUID(), tenantId, new Date("2026-12-23T00:00:00.000Z"), crypto.randomUUID(), new Date("2026-12-25T00:00:00.000Z")]);
+    const auditId = crypto.randomUUID();
+    await pool.query(`insert into sms_kit.audit_event (id, tenant_id, actor_id, action, target_type, result, metadata, occurred_at)
+      values ($1,$2,'actor','sensitive.action','message','succeeded','{"redactedFields":["phone"]}'::jsonb,$3)`, [auditId, tenantId, new Date("2026-06-01T00:00:00.000Z")]);
+    await pool.query(`insert into sms_kit.delivery_receipt (id, tenant_id, message_id, match_status, dedupe_key, provider_biz_id, delivery_status, occurred_at, received_at, source, redacted_payload)
+      values ($1,$2,$3,'matched',$4,'retention-biz','delivered',$5,$5,'query','{"redactedFields":["phone"]}'::jsonb)`, [crypto.randomUUID(), tenantId, oldPhone, `retention-${crypto.randomUUID()}`, new Date("2026-06-01T00:00:00.000Z")]);
+    await pool.query(`insert into sms_kit.rate_limit_bucket (tenant_id, scope, scope_hash, window_start, window_seconds, count, expires_at)
+      values ($1,'global','expired', $2, 60, 1, $2)`, [tenantId, new Date("2026-12-01T00:00:00.000Z")]);
+    await pool.query(`insert into sms_kit.daily_stat (tenant_id, stat_date, template_key, purpose, submitted_count, accepted_count, acceptance_rejected_count, acceptance_unknown_count, delivery_waiting_count, delivered_count, delivery_failed_count, delivery_unknown_final_count, retry_count, updated_at)
+      values ($1,'2026-06-01','anonymous','notification',1,1,0,0,0,1,0,0,0,now()) on conflict do nothing`, [tenantId]);
+    const maintenance = new MaintenanceService({ store, clock: { now: () => now } });
+
+    await maintenance.applyRetention({ batchSize: 100 });
+
+    await expect(pool.query("select id from sms_kit.otp_challenge where tenant_id = $1", [tenantId])).resolves.toMatchObject({ rowCount: 1 });
+    await expect(pool.query<{ phone_ciphertext: string | null }>("select phone_ciphertext from sms_kit.send_message where id = $1", [oldPhone])).resolves.toMatchObject({ rows: [{ phone_ciphertext: null }] });
+    await expect(pool.query<{ phone_ciphertext: string | null }>("select phone_ciphertext from sms_kit.send_message where id = $1", [retainedPhone])).resolves.toMatchObject({ rows: [{ phone_ciphertext: "phone-ciphertext" }] });
+    await expect(pool.query("select id from sms_kit.audit_event where id = $1", [auditId])).resolves.toMatchObject({ rowCount: 0 });
+    await expect(pool.query<{ redacted_payload: unknown }>("select redacted_payload from sms_kit.delivery_receipt where provider_biz_id = 'retention-biz'")).resolves.toMatchObject({ rows: [{ redacted_payload: null }] });
+    await expect(pool.query("select * from sms_kit.rate_limit_bucket where scope_hash = 'expired'")).resolves.toMatchObject({ rowCount: 0 });
+    await expect(pool.query("select * from sms_kit.daily_stat where tenant_id = $1 and template_key = 'anonymous'", [tenantId])).resolves.toMatchObject({ rowCount: 1 });
   });
 });
