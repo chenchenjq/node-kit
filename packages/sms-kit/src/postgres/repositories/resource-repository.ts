@@ -103,6 +103,14 @@ export class PgResourceRepository implements ResourceRepository {
       for (const candidate of candidates) {
         if (candidate.resource_type === "signature") {
           const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "signature" }>["snapshot"];
+          if (candidate.change_type === "unavailable") {
+            await db.query(
+              "update sms_kit.signature set external_status = 'unavailable', enabled = false, last_synced_at = now(), version = version + 1, updated_at = now() where external_key = $1",
+              [candidate.external_key],
+            );
+            await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
+            continue;
+          }
           if (!isCloudApproved(snapshot.externalStatus)) {
             throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
           }
@@ -115,6 +123,14 @@ export class PgResourceRepository implements ResourceRepository {
           );
         } else {
           const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "template" }>["snapshot"] & { signatureExternalKey: string; templateKey: string; purpose: string };
+          if (candidate.change_type === "unavailable") {
+            await db.query(
+              "update sms_kit.template set external_status = 'unavailable', enabled = false, last_synced_at = now(), version = version + 1, updated_at = now() where external_code = $1",
+              [snapshot.externalCode],
+            );
+            await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
+            continue;
+          }
           if (!isCloudApproved(snapshot.externalStatus)) {
             throw new SmsKitError("CONFIG_INVALID", "resource is not cloud-approved");
           }

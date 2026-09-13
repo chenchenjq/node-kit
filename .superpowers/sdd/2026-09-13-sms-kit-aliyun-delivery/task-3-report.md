@@ -15,3 +15,10 @@
 - `npm run test:integration --workspace sms-kit -- resource-sync.test.ts` — 4 passing tests, including PostgreSQL preview/commit, audit, checksum/expiry fence, and rejected-cloud-resource coverage.
 - `npm run test:integration --workspace sms-kit -- config-resource.test.ts` — 5 passing tests.
 - `npm run typecheck --workspace sms-kit` and `git diff --check` passed.
+
+## Review fix round 1
+
+- Global configuration, verification-policy, and resource-sync preview/commit audits now use the system tenant `__system__`, while retaining the trusted actor ID. Policy updates and persisted sync previews write their audit record in the same transaction as their state change.
+- Complete discovery emits checksum-bound `unavailable` candidates for locally imported signatures and templates that are absent from a complete provider snapshot. Applying one marks the local resource `unavailable` and disables it, preventing use of stale cloud approval.
+- Connection-test resolver and provider failures are reduced to fixed `SmsKitError` values and audit only that stable code; arbitrary source messages and resolved values never propagate.
+- RED: global-audit, safe-error, and removed-resource tests failed against the prior implementation. GREEN: focused application unit tests passed (6 tests), typecheck passed, and the resource-sync PostgreSQL integration suite was rerun.

@@ -3,11 +3,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ResourceSyncService } from "../../../src/application/resource-sync-service.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 import { SmsKitError } from "../../../src/core/errors.js";
+import { createResourceSyncCandidate } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "../postgres/helpers.js";
 
-const actor = { id: "operator", tenantId: "system" } as AuthorizationActor;
+const actor = { id: "operator", tenantId: "tenant-a" } as AuthorizationActor;
 
 describe("ResourceSyncService", () => {
   it("requires exact candidate checksums at commit", async () => {
@@ -88,7 +89,7 @@ describe("ResourceSyncService", () => {
     await expect(sync.commit(actor, { syncId: preview.id, candidates: [{ id: preview.candidates[0]!.id, checksum: preview.candidates[0]!.checksum }] }))
       .rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" });
 
-    expect(audits).toEqual([]);
+    expect(audits).toEqual([expect.objectContaining({ action: "resource.sync.preview", result: "succeeded" })]);
   });
 });
 
@@ -127,7 +128,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
 
     expect(committed.status).toBe("succeeded");
     expect((await store.resources.listSignatures({ page: 1, pageSize: 10 })).items).toHaveLength(1);
-    expect((await store.audits.list({ tenantId: actor.tenantId, page: 1, pageSize: 10 })).items).toEqual(expect.arrayContaining([
+    expect((await store.audits.list({ tenantId: "__system__" as AuthorizationActor["tenantId"], page: 1, pageSize: 10 })).items).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "resource.sync.commit", targetId: preview.id, result: "succeeded" }),
     ]));
   });
@@ -148,5 +149,36 @@ describe("ResourceSyncService with PostgreSQL", () => {
       .rejects.toMatchObject({ code: "CONFIG_INVALID" });
 
     expect((await store.resources.listSignatures({ page: 1, pageSize: 10 })).items.map((signature) => signature.externalKey)).not.toContain("aliyun:sign:rejected");
+  });
+
+  it("creates unavailable candidates for removed local resources and disables them on commit", async () => {
+    const signatures = await store.resources.listSignatures({ page: 1, pageSize: 10 });
+    const signature = signatures.items.find((item) => item.externalKey === "aliyun:sign:approved");
+    if (signature === undefined) throw new Error("approved signature fixture missing");
+    const templatePreview = await store.resources.createSyncPreview({
+      id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+      resources: [createResourceSyncCandidate({
+        id: crypto.randomUUID(), externalKey: "aliyun:template:removed", changeType: "new", checksum: "seed-template",
+        resourceType: "template", signatureExternalKey: signature.externalKey, templateKey: "notice.removed", purpose: "removed",
+        snapshot: { kind: "template", externalCode: "SMS_REMOVED", externalName: "Removed", externalStatus: "approved", templateType: "notification", variableNames: [] },
+      })],
+    });
+    await store.resources.commitSync({ syncId: templatePreview.id, candidates: templatePreview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+    const sync = new ResourceSyncService({
+      store,
+      provider: { listSignatures: async () => ({ items: [] }), listTemplates: async () => ({ items: [] }) } as never,
+      authorizer: { assert: () => undefined }, clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+      ids: { next: () => crypto.randomUUID() }, events: { emit: () => undefined },
+    });
+
+    const preview = await sync.preview(actor);
+    expect(preview.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceType: "signature", externalKey: "aliyun:sign:approved", changeType: "unavailable" }),
+      expect.objectContaining({ resourceType: "template", externalKey: "aliyun:template:SMS_REMOVED", changeType: "unavailable" }),
+    ]));
+    await sync.commit(actor, { syncId: preview.id, candidates: preview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+
+    expect((await store.resources.listSignatures({ page: 1, pageSize: 10 })).items.find((item) => item.id === signature.id)).toMatchObject({ enabled: false, externalStatus: "unavailable" });
+    expect((await store.resources.findTemplateByKey({ templateKey: "notice.removed" }))).toMatchObject({ enabled: false, externalStatus: "unavailable" });
   });
 });

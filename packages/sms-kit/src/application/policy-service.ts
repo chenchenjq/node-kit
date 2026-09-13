@@ -2,10 +2,16 @@ import { SmsKitError } from "../core/errors.js";
 import type { VerificationPolicy, VerificationPolicyUpdate } from "../ports/policy.js";
 import type { Authorizer, AuthorizationActor } from "../ports/security.js";
 import type { SmsStore } from "../ports/store.js";
+import type { Clock, IdGenerator } from "../ports/runtime.js";
+import type { TenantId } from "../core/types.js";
+
+const SYSTEM_TENANT_ID = "__system__" as TenantId;
 
 export type PolicyServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
   store: SmsStore;
   authorizer: Authorizer<Actor>;
+  clock: Clock;
+  ids: Pick<IdGenerator, "next">;
 }>;
 
 function isIntegerInRange(value: number, lower: number, upper: number): boolean {
@@ -44,6 +50,13 @@ export class PolicyService<Actor extends AuthorizationActor = AuthorizationActor
   async update(actor: Actor, input: VerificationPolicyUpdate): Promise<VerificationPolicy> {
     await this.dependencies.authorizer.assert(actor, "config.write");
     validateVerificationPolicy(input);
-    return this.dependencies.store.policy.update(input);
+    return this.dependencies.store.transaction(async (tx) => {
+      const updated = await this.dependencies.store.policy.update(input, tx);
+      await this.dependencies.store.audits.append({
+        id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
+        action: "policy.update", targetType: "verification_policy", result: "succeeded", occurredAt: this.dependencies.clock.now(),
+      }, tx);
+      return updated;
+    });
   }
 }
