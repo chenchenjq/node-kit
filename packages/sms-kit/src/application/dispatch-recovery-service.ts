@@ -12,10 +12,17 @@ export class DispatchRecoveryService {
     if (!Number.isInteger(input.limit) || input.limit <= 0 || Number.isNaN(input.abandonedBefore.getTime())) {
       throw new RangeError("recovery limit and cutoff are required");
     }
-    // A lease with no marker was lost before its first irreversible boundary;
-    // returning it to pending is safe. A marker is always recovered as unknown.
-    await this.dependencies.store.jobs.recoverExpiredUnstarted({ before: input.abandonedBefore, limit: input.limit });
     return this.dependencies.store.transaction(async (tx) => {
+      // Lock jobs before looking for a marker. The next command gets a fresh
+      // MVCC snapshot while holding that fence, so a marker cannot be orphaned
+      // by a worker that committed between an earlier scan and the job lock.
+      const expiredJobs = await this.dependencies.store.jobs.lockExpiredSendJobs({ before: input.abandonedBefore, limit: input.limit }, tx);
+      let returnedToPending = 0;
+      for (const job of expiredJobs) {
+        if (job.leaseToken !== undefined && await this.dependencies.store.jobs.returnToPendingIfNoStarted({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken }, tx)) {
+          returnedToPending += 1;
+        }
+      }
       const attempts = await this.dependencies.store.attempts.listExpiredStarted({ before: input.abandonedBefore, limit: input.limit }, tx);
       for (const attempt of attempts) {
         const occurredAt = this.dependencies.clock.now();
@@ -44,7 +51,7 @@ export class DispatchRecoveryService {
           }, tx);
         }
       }
-      return attempts.length;
+      return returnedToPending + attempts.length;
     });
   }
 }
