@@ -22,3 +22,7 @@
 - Complete discovery emits checksum-bound `unavailable` candidates for locally imported signatures and templates that are absent from a complete provider snapshot. Applying one marks the local resource `unavailable` and disables it, preventing use of stale cloud approval.
 - Connection-test resolver and provider failures are reduced to fixed `SmsKitError` values and audit only that stable code; arbitrary source messages and resolved values never propagate.
 - RED: global-audit, safe-error, and removed-resource tests failed against the prior implementation. GREEN: focused application unit tests passed (6 tests), typecheck passed, and the resource-sync PostgreSQL integration suite was rerun.
+
+## Review fix round 2
+
+- Retiring a signature now atomically marks every dependent local template unavailable and disabled, including templates that remain in a provider snapshot but were not selected for refresh. The PostgreSQL resource-sync regression covers this parent-resource retirement path.
