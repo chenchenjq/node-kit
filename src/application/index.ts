@@ -10,3 +10,6 @@ export type {
   ResourceSyncServiceDependencies,
   ResourceSyncTemplateSelection,
 } from "./resource-sync-service.js";
+export { SendService } from "./send-service.js";
+export type { EnqueueNotificationInput, SendInput, SendServiceDependencies } from "./send-service.js";
+export { enforcePhoneSendPolicy } from "./send-policy.js";
