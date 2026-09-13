@@ -459,7 +459,7 @@ export interface JobRepository {
   get(input: Readonly<{ tenantId: TenantId; id: string }>, tx?: SmsTransaction): Promise<Job | undefined>;
   getForUpdate(input: Readonly<{ tenantId: TenantId; id: string }>, tx: SmsTransaction): Promise<Job | undefined>;
   lease(input: Readonly<{ tenantId?: TenantId; jobType?: Job["jobType"]; owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
-  /** Leases only reconciliation jobs whose tenant-owned messages remain queryable. */
+  /** Leases tenant-owned queryable messages and terminal messages whose reconciliation jobs only need retirement. */
   leaseReconciliation(input: Readonly<{ owner: string; leaseMs: number; limit: number; now: Date }>, tx?: SmsTransaction): Promise<readonly Job[]>;
   renew(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; leaseMs: number; now: Date }>, tx?: SmsTransaction): Promise<Job>;
   reschedule(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<Job>;
