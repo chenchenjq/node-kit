@@ -11,7 +11,7 @@ export function signFixture(): NonNullable<AliyunSignPage["smsSignList"]>[number
   return {
     signName: "Example",
     auditStatus: "AUDIT_STATE_PASS",
-    businessType: "General",
+    businessType: "通用类型",
   };
 }
 
@@ -21,6 +21,7 @@ export function templateFixture(): NonNullable<AliyunTemplatePage["smsTemplateLi
     templateName: "Example",
     auditStatus: "AUDIT_STATE_PASS",
     templateType: 2,
+    outerTemplateType: 0,
     templateContent: "Your code is ${code}",
   };
 }

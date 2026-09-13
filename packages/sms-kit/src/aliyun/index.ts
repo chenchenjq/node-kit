@@ -12,3 +12,11 @@ export { classifyAliyunError, classifyAliyunFailure } from "./error-map.js";
 export type { AliyunFailureClass } from "./error-map.js";
 export { AliyunSmsProvider, createAliyunProvider } from "./provider.js";
 export type { AliyunSmsProviderOptions } from "./provider.js";
+export {
+  listAllAliyunSignatures,
+  listAllAliyunTemplates,
+  mapSignature,
+  mapTemplate,
+  toAliyunExternalKey,
+} from "./resource-map.js";
+export type { AliyunResourceListOptions } from "./resource-map.js";
