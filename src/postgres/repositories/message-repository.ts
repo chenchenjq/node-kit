@@ -120,6 +120,15 @@ export class PgMessageRepository implements MessageRepository {
     return rows[0] === undefined ? undefined : message(rows[0]);
   }
 
+  async lockByReceiptReference(input: Readonly<{ outId: string; bizId: string }>, tx: SmsTransaction): Promise<Message | undefined> {
+    const { rows } = await queryable(this.pool, tx).query<MessageRow>(
+      `select ${selectMessage} from sms_kit.send_message
+        where id::text = $1 and provider_biz_id = $2 for update`,
+      [input.outId, input.bizId],
+    );
+    return rows[0] === undefined ? undefined : message(rows[0]);
+  }
+
   async completeAcceptance(input: Readonly<{ tenantId: Message["tenantId"]; dispatchToken: string; status: "accepted" | "rejected" | "unknown"; evidence: "same-dispatch-response" | "positive-provider-evidence" | "query-no-record"; providerBizId?: string; providerRequestId?: string; finalErrorCode?: string; occurredAt: Date }>, tx?: SmsTransaction): Promise<Message> {
     return transaction(this.pool, tx, async (db) => {
       const current = await db.query<MessageRow>(`select ${selectMessageFromJoin} from sms_kit.send_message m join sms_kit.send_attempt a on a.message_id = m.id where m.tenant_id = $1 and a.dispatch_token = $2 for update`, [input.tenantId, input.dispatchToken]);

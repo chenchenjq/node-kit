@@ -20,3 +20,5 @@ export {
   toAliyunExternalKey,
 } from "./resource-map.js";
 export type { AliyunResourceListOptions } from "./resource-map.js";
+export { parseAliyunReceiptBatch } from "./receipt.js";
+export type { AliyunReceipt } from "./receipt.js";

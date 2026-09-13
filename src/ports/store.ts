@@ -314,6 +314,8 @@ export interface MessageRepository {
   lockByDispatchToken(input: Readonly<{ tenantId: TenantId; dispatchToken: string }>, tx: SmsTransaction): Promise<Message | undefined>;
   list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number }>;
   findByProviderBizId(input: Readonly<{ tenantId: TenantId; bizId: string }>, tx?: SmsTransaction): Promise<Message | undefined>;
+  /** Callback-only lookup: both opaque provider references must name one message. */
+  lockByReceiptReference(input: Readonly<{ outId: string; bizId: string }>, tx: SmsTransaction): Promise<Message | undefined>;
   completeAcceptance(input: Readonly<{
     tenantId: TenantId;
     dispatchToken: string;
