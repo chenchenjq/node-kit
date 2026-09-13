@@ -215,4 +215,22 @@ describe("ResourceSyncService with PostgreSQL", () => {
 
     expect((await store.resources.findTemplateByKey({ templateKey: "notice.still-listed" }))).toMatchObject({ enabled: false, externalStatus: "unavailable" });
   });
+
+  it("rejects a selected approved template when its signature is unavailable", async () => {
+    const unavailableSignature = (await store.resources.listSignatures({ page: 1, pageSize: 20 })).items
+      .find((item) => item.externalKey === "aliyun:sign:retired-parent");
+    if (unavailableSignature === undefined) throw new Error("retired signature fixture missing");
+    const preview = await store.resources.createSyncPreview({
+      id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+      resources: [createResourceSyncCandidate({
+        id: crypto.randomUUID(), externalKey: "aliyun:template:SMS_BLOCKED", changeType: "new", checksum: "blocked-template",
+        resourceType: "template", signatureExternalKey: unavailableSignature.externalKey, templateKey: "notice.blocked", purpose: "blocked",
+        snapshot: { kind: "template", externalCode: "SMS_BLOCKED", externalName: "Blocked", externalStatus: "approved", templateType: "notification", variableNames: [] },
+      })],
+    });
+
+    await expect(store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(await store.resources.findTemplateByKey({ templateKey: "notice.blocked" })).toBeUndefined();
+  });
 });
