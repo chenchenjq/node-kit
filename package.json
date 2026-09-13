@@ -23,7 +23,9 @@
     "test": "vitest run --exclude 'test/integration/**'",
     "test:unit": "vitest run --exclude 'test/contract/**' --exclude 'test/integration/**'",
     "test:contract": "vitest run test/contract",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:live": "vitest run test/live",
+    "test:live:connection": "vitest run test/live/aliyun.connection.live.test.ts"
   },
   "dependencies": {
     "@alicloud/dysmsapi20170525": "4.6.0",
