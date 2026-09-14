@@ -4,7 +4,10 @@ import { idempotencyKeySchema, identifierSchema, isoDateTimeSchema, pageSchema, 
 
 export const acceptanceStatusSchema = z.enum(["pending", "accepted", "rejected", "unknown"]);
 export const deliveryStatusSchema = z.enum(["not_applicable", "waiting", "delivered", "failed", "unknown_final"]);
-export const phoneDtoSchema = z.strictObject({ masked: z.string().nullable(), last4Available: z.boolean() });
+export const phoneDtoSchema = z.strictObject({
+  masked: z.string().regex(/^(?:1[3-9][0-9])?\*{3,}[0-9]{4}$/).nullable(),
+  last4Available: z.boolean(),
+});
 
 export const messageDtoSchema = z.strictObject({
   id: identifierSchema,

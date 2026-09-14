@@ -4,7 +4,8 @@ import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeS
 
 export const secretRefDtoSchema = z.strictObject({
   scheme: z.string().trim().min(1),
-  maskedName: z.string().trim().min(1),
+  maskedName: z.string().trim().min(3).max(256)
+    .regex(/^[!-~]*\*{3,}[!-~]*$/, "secret reference name must be masked"),
   configured: z.boolean(),
 });
 
