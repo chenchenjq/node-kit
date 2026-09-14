@@ -1,0 +1,195 @@
+import { randomUUID } from "node:crypto";
+
+import { ChallengeService } from "../../src/application/challenge-service.js";
+import { ProofService } from "../../src/application/proof-service.js";
+import { SendService } from "../../src/application/send-service.js";
+import {
+  createBetterAuthPasswordResetPreRouteGuard,
+  createBetterAuthSmsAdapter,
+  type BetterAuthCallbackContext,
+} from "../../src/better-auth/index.js";
+import type { TenantId } from "../../src/core/types.js";
+import { createResourceSyncCandidate, type SmsTransaction } from "../../src/ports/store.js";
+import { migrateSmsKit } from "../../src/postgres/migrator.js";
+import { withPgProofTransaction } from "../../src/postgres/proof-transaction.js";
+import { PgSmsStore } from "../../src/postgres/store.js";
+import { HmacHasher } from "../../src/security/hmac-hasher.js";
+import { startPostgres } from "../integration/postgres/helpers.js";
+
+const tenantId = "tenant-auth-flow" as TenantId;
+const otpCode = "654321";
+const knownPhone = "+8613800138000";
+const templateByCode = new Map([
+  ["SMS_AUTH_LOGIN", { templateKey: "auth.login_otp", purpose: "better-auth:login" }],
+  ["SMS_AUTH_RESET", { templateKey: "auth.password_reset", purpose: "better-auth:passwordReset" }],
+  ["SMS_AUTH_CHANGE", { templateKey: "auth.password_change", purpose: "auth.password_change" }],
+  ["SMS_AUTH_STEP_UP", { templateKey: "auth.step_up", purpose: "auth.step_up" }],
+]);
+
+class QueuedScheduler {
+  private readonly tasks: Array<() => Promise<void>> = [];
+
+  schedule(task: () => Promise<void>, _context: BetterAuthCallbackContext): void {
+    this.tasks.push(task);
+  }
+
+  async drain(): Promise<void> {
+    for (const task of this.tasks.splice(0)) await task();
+  }
+}
+
+export type BetterAuthTestHost = Readonly<{
+  fakeProvider: Readonly<{ calls: { send: Array<{ templateKey: string; purpose: string }> } }>;
+  requestLoginOtp(phoneNumber: string): Promise<void>;
+  requestPasswordResetOtp(phoneNumber: string): Promise<void>;
+  issueAndVerifyPasswordChallenge(): Promise<string>;
+  changePassword(userId: string, proof: string, consumptionKey: string): Promise<void>;
+  passwordVersion(userId: string): Promise<number | undefined>;
+  issueAndVerifyStepUpChallenge(): Promise<string>;
+  consumeStepUp(userId: string, proof: string, consumptionKey: string): Promise<{ consumed: true; replay: boolean }>;
+  clearProviderCalls(): void;
+  stop(): Promise<void>;
+}>;
+
+async function seedResources(store: PgSmsStore): Promise<void> {
+  const signatureKey = "auth-flow-signature";
+  const signature = createResourceSyncCandidate({
+    id: randomUUID(), externalKey: signatureKey, changeType: "new", checksum: "auth-flow-signature-v1", resourceType: "signature",
+    snapshot: { kind: "signature", externalName: "Auth Flow", externalStatus: "approved", externalType: "text" },
+  });
+  const templates = [
+    ["auth.login_otp", "better-auth:login", "SMS_AUTH_LOGIN"],
+    ["auth.password_reset", "better-auth:passwordReset", "SMS_AUTH_RESET"],
+    ["auth.password_change", "auth.password_change", "SMS_AUTH_CHANGE"],
+    ["auth.step_up", "auth.step_up", "SMS_AUTH_STEP_UP"],
+  ].map(([templateKey, purpose, externalCode]) => createResourceSyncCandidate({
+    id: randomUUID(), externalKey: `auth-flow:${templateKey}`, changeType: "new", checksum: `auth-flow:${templateKey}:v1`, resourceType: "template",
+    signatureExternalKey: signatureKey, templateKey, purpose,
+    snapshot: { kind: "template", externalCode, externalName: templateKey, externalStatus: "approved", templateType: "verification", variableNames: ["code"] },
+  }));
+  const preview = await store.resources.createSyncPreview({
+    id: randomUUID(), actorId: "auth-flow-fixture", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, ...templates],
+  });
+  await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+}
+
+async function configureProvider(store: PgSmsStore): Promise<void> {
+  const config = await store.config.update({
+    provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://TEST_ID", accessKeySecretRef: "env://TEST_SECRET",
+    receiptCallbackTokenRef: "env://TEST_RECEIPT", enabled: true, expectedVersion: 0,
+  });
+  await store.config.recordConnectionTest({ status: "succeeded", summary: {}, testedAt: new Date("2026-09-14T00:00:00.000Z"), expectedVersion: config.version });
+}
+
+/** A no-network host composition used as executable documentation for authentication integration. */
+export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
+  const postgres = await startPostgres();
+  const pool = postgres.pool;
+  const store = new PgSmsStore(pool);
+  await migrateSmsKit(pool);
+  await seedResources(store);
+  await configureProvider(store);
+  await pool.query("create table auth_flow_user (id text primary key, phone_number text not null unique, password_version integer not null)");
+  await pool.query("insert into auth_flow_user (id, phone_number, password_version) values ($1, $2, 1)", ["user-1", knownPhone]);
+
+  const hasher = new HmacHasher(Buffer.alloc(32, 41));
+  const clock = { now: () => new Date("2026-09-14T00:00:00.000Z") };
+  const fakeProvider = { calls: { send: [] as Array<{ templateKey: string; purpose: string }> } };
+  const phoneProtector = {
+    protect: async (phone: string) => ({
+      ciphertext: "fixture-phone", keyId: "fixture-phone-key", lookupHash: await hasher.hash(`fixture-phone:${phone}`),
+      last4: phone.slice(-4), masked: "***0000",
+    }),
+  };
+  const sendService = new SendService({
+    store,
+    provider: {
+      send: async (input: { templateCode: string }) => {
+        const call = templateByCode.get(input.templateCode);
+        if (call === undefined) throw new Error("fixture template mapping is missing");
+        fakeProvider.calls.send.push(call);
+        return { kind: "accepted" as const, bizId: `fixture-${fakeProvider.calls.send.length}`, requestId: "fixture-request" };
+      },
+    } as never,
+    phoneProtector: phoneProtector as never,
+    payloadProtector: { seal: async () => ({ ciphertext: "fixture-params", keyId: "fixture-params-key" }) } as never,
+    clock,
+    ids: { next: () => randomUUID(), messageId: () => randomUUID() as never },
+    events: { emit: async () => undefined },
+    providerTimeoutMs: 1_000,
+  });
+  const challengeService = new ChallengeService({
+    store,
+    sendService,
+    phoneProtector: phoneProtector as never,
+    hasher,
+    clock,
+    ids: { next: () => randomUUID() },
+    otpGenerator: { generate: () => otpCode },
+  });
+  const proofService = new ProofService({ store, hasher, clock });
+  const scheduler = new QueuedScheduler();
+  const isExistingPhone = async (_tenantId: TenantId, phone: string): Promise<boolean> =>
+    (await pool.query("select 1 from auth_flow_user where phone_number = $1", [phone])).rowCount === 1;
+  const adapterOptions = {
+    sendService,
+    isExistingPhone,
+    resolveTenant: async () => tenantId,
+    resolveTrustedIp: async () => "203.0.113.42",
+    scheduler,
+    transaction: async <T>(work: (tx: SmsTransaction) => Promise<T>) => store.transaction(work),
+    rateLimits: store.rateLimits,
+    policy: store.policy,
+    hasher,
+    clock,
+    sleeper: { sleep: async () => undefined },
+    events: { emit: async () => undefined },
+  };
+  const callbacks = createBetterAuthSmsAdapter(adapterOptions);
+  const resetGuard = createBetterAuthPasswordResetPreRouteGuard(adapterOptions);
+  const context = undefined as BetterAuthCallbackContext;
+
+  async function issueAndVerify(action: "password.change" | "step.up", idempotencyKey: string): Promise<string> {
+    const issued = await challengeService.issue({ tenantId, subjectId: "user-1", action, phone: knownPhone, idempotencyKey });
+    return (await challengeService.verify({ tenantId, challengeId: issued.id, code: otpCode })).proof;
+  }
+
+  return {
+    fakeProvider,
+    async requestLoginOtp(phoneNumber): Promise<void> {
+      await callbacks.sendOTP({ phoneNumber, code: otpCode }, context);
+      await scheduler.drain();
+    },
+    async requestPasswordResetOtp(phoneNumber): Promise<void> {
+      await resetGuard.run({
+        phoneNumber,
+        context,
+        next: async () => {
+          if (await isExistingPhone(tenantId, phoneNumber)) await callbacks.sendPasswordResetOTP?.({ phoneNumber, code: otpCode }, context);
+          return undefined;
+        },
+      });
+      await scheduler.drain();
+    },
+    issueAndVerifyPasswordChallenge: () => issueAndVerify("password.change", "user-1:password.change:1"),
+    async changePassword(userId, proof, consumptionKey): Promise<void> {
+      await withPgProofTransaction(pool, proofService, {
+        tenantId, proof, subjectId: userId, action: "password.change", consumptionKey,
+      }, {
+        execute: async (client) => {
+          await client.query("update auth_flow_user set password_version = password_version + 1 where id = $1", [userId]);
+        },
+        replay: async () => undefined,
+      });
+    },
+    async passwordVersion(userId): Promise<number | undefined> {
+      return (await pool.query<{ password_version: number }>("select password_version from auth_flow_user where id = $1", [userId])).rows[0]?.password_version;
+    },
+    issueAndVerifyStepUpChallenge: () => issueAndVerify("step.up", "user-1:step.up:1"),
+    consumeStepUp: (userId, proof, consumptionKey) => proofService.consume({ tenantId, proof, subjectId: userId, action: "step.up", consumptionKey }),
+    clearProviderCalls(): void {
+      fakeProvider.calls.send.splice(0);
+    },
+    stop: postgres.stop,
+  };
+}
