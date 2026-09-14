@@ -78,6 +78,7 @@ function createReceiptDeadline(clock: Clock, deadlineAt: Date, safetyMarginMs: n
     callbackDeadlineMs - safetyMarginMs,
     deadlineAt.getTime() - clock.now().getTime() - safetyMarginMs,
   );
+  const monotonicDeadlineAt = performance.now() + remainingMs;
   let timer: ReturnType<typeof setTimeout> | undefined;
   if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
     controller.abort(new ReceiptDeadlineError());
@@ -87,7 +88,8 @@ function createReceiptDeadline(clock: Clock, deadlineAt: Date, safetyMarginMs: n
 
   const assertActive = (): void => {
     if (!Number.isFinite(deadlineAt.getTime()) ||
-        deadlineAt.getTime() - clock.now().getTime() <= safetyMarginMs) {
+        deadlineAt.getTime() - clock.now().getTime() <= safetyMarginMs ||
+        performance.now() >= monotonicDeadlineAt) {
       controller.abort(new ReceiptDeadlineError());
     }
     if (controller.signal.aborted) throw deadlineError(controller.signal);
