@@ -99,4 +99,63 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
       throw new SmsKitError("CONCURRENT_MODIFICATION", "admin operation is no longer claimable");
     }
   }
+
+  async authorizeJob(input: Readonly<{
+    tenantId: TenantId;
+    operation: "receipt.reconcile";
+    idempotencyKey: string;
+    jobId: string;
+    requiredPermission: "receipt.reconcile";
+  }>, tx: SmsTransaction): Promise<void> {
+    const db = executor(this.pool, tx);
+    const inserted = await db.query(
+      `insert into sms_kit.admin_job_authorization (
+         tenant_id, job_id, operation, idempotency_key, required_permission, created_at
+       )
+       select job.tenant_id, job.id, operation.operation,
+              operation.idempotency_key, $5, now()
+         from sms_kit.send_job job
+         join sms_kit.admin_operation operation
+           on operation.tenant_id = job.tenant_id
+          and operation.operation = $2
+          and operation.idempotency_key = $3
+        where job.tenant_id = $1 and job.id = $4
+          and job.job_type = 'reconcile' and job.origin_action is null
+       on conflict (tenant_id, job_id, required_permission) do nothing
+       returning job_id`,
+      [input.tenantId, input.operation, input.idempotencyKey, input.jobId, input.requiredPermission],
+    );
+    if (inserted.rowCount === 1) return;
+
+    const existing = await db.query(
+      `select job_auth.job_id
+         from sms_kit.admin_job_authorization job_auth
+         join sms_kit.send_job job
+           on job.tenant_id = job_auth.tenant_id and job.id = job_auth.job_id
+        where job_auth.tenant_id = $1 and job_auth.job_id = $2
+          and job_auth.required_permission = $3
+          and job.job_type = 'reconcile' and job.origin_action is null`,
+      [input.tenantId, input.jobId, input.requiredPermission],
+    );
+    if (existing.rowCount !== 1) {
+      throw new SmsKitError("CONCURRENT_MODIFICATION", "job cannot inherit this admin authorization");
+    }
+  }
+
+  async findJobAuthorization(input: Readonly<{
+    tenantId: TenantId;
+    jobId: string;
+  }>, tx?: SmsTransaction): Promise<Readonly<{ requiredPermission: "receipt.reconcile" }> | undefined> {
+    const { rows } = await executor(this.pool, tx).query<{ required_permission: "receipt.reconcile" }>(
+      `select job_auth.required_permission
+         from sms_kit.admin_job_authorization job_auth
+         join sms_kit.send_job job
+           on job.tenant_id = job_auth.tenant_id and job.id = job_auth.job_id
+        where job_auth.tenant_id = $1 and job_auth.job_id = $2
+          and job_auth.required_permission = 'receipt.reconcile'
+          and job.job_type = 'reconcile' and job.origin_action is null`,
+      [input.tenantId, input.jobId],
+    );
+    return rows[0] === undefined ? undefined : { requiredPermission: rows[0].required_permission };
+  }
 }

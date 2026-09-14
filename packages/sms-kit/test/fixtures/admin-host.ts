@@ -355,12 +355,6 @@ export async function createAdminHost(): Promise<AdminHost> {
         syncPreview: async (version) => requiredData(await request<ResourceSyncPreviewDto>("/resources/sync-preview", "POST", {
           version,
           idempotencyKey: "fixture:resources:preview",
-          templates: [{
-            externalKey: fixtureTemplateExternalKey,
-            signatureExternalKey: fixtureSignatureExternalKey,
-            templateKey: fixtureTemplateKey,
-            purpose: fixturePurpose,
-          }],
         })),
         syncCommit: async (version, syncId, candidates) => requiredData(await request<ResourceSyncCommitResultDto>("/resources/sync-commit", "POST", {
           version,

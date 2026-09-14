@@ -32,6 +32,12 @@ const handler = createSmsAdminHandler({
   resolveActor: resolveTrustedActor,
   resolveTrustedIp: resolveTrustedProxyIp,
   authorizer: smsAuthorizer,
+  csrfProtection: {
+    // Needed when request.url contains an internal reverse-proxy origin.
+    allowedOrigins: ["https://admin.example.com"],
+    // Bind this check to the same session that resolveTrustedActor reads.
+    verifyToken: verifyHostCsrfToken,
+  },
   services: smsAdminServices,
   ids,
 });
@@ -48,6 +54,21 @@ import type { ApiSuccess, SmsOverviewDto } from "sms-kit/next/types";
 
 type OverviewResponse = ApiSuccess<SmsOverviewDto>;
 ```
+
+Every admin route with a body requires `Content-Type: application/json`; form,
+text, and other CORS-simple bodies are rejected. Cookie-authenticated writes
+also require either an exact same/public `Origin` or the host-owned
+`verifyToken` check. `allowedOrigins` must contain exact origins (no paths or
+wildcards), normally HTTPS; explicit `localhost`, `127.0.0.1`, and `[::1]`
+HTTP origins are accepted only for development. CORS configuration alone is
+not a CSRF boundary. The default fails closed whenever any cookie is present,
+even alongside an `Authorization` header: an attacker-controlled header must
+not disable protection for a valid browser session. A bearer/service-only host
+with infrastructure cookies, or a mixed host, must supply
+`isCookieAuthenticated(request, actor)` and return `false` only after its
+trusted authentication boundary has positively identified that request as a
+non-cookie principal. Service callers must not synthesize browser `Origin`
+headers.
 
 ## PostgreSQL bootstrap
 
@@ -107,7 +128,7 @@ Verification policy is independent from provider configuration. Manage OTP lengt
 
 ## Resource synchronization and notification delivery
 
-Provider signatures and templates are system-wide resources. Use `ResourceSyncService.preview()` to fetch a short-lived candidate snapshot, choose approved signatures/templates and stable local template keys, then call `commit()` with the preview ID and candidate checksums. A preview expires after 24 hours; do not directly persist an arbitrary provider listing or reuse an expired checksum.
+Provider signatures and templates are system-wide resources. Use `ResourceSyncService.preview()` to fetch a short-lived candidate snapshot. The first preview includes safe discovery records for cloud templates that have never been imported (provider name/status/type and declared variable names), without inventing a local key or persisting provider content. An administrator must then explicitly select a candidate and call `/templates/import` with its checksum, stable local key, purpose, and signature. `/resources/sync-commit` applies selected signatures and refreshes only templates whose persisted local mapping still matches exactly; it rejects every `new` template candidate, including mapped candidates from an older preview. The application-level `preview({ templates: ... })` compatibility field is deprecated and rejected. A preview expires after 24 hours; do not directly persist an arbitrary provider listing or reuse an expired checksum.
 
 For ordinary business notifications, send through `SendService`, not directly through the provider:
 
@@ -155,9 +176,27 @@ const receiptHandler = createAliyunReceiptHandler({
 
 Use an HTTPS callback URL whose final path segment is a high-entropy opaque token. `verifyToken` should use a host-controlled constant-time comparison. The handler checks the token before reading the body, applies payload and deadline limits, and returns only generic safe failures. Redact that path segment, phone numbers, OTPs, template parameters, credentials, and raw callback/provider payloads from proxy and application logs.
 
+The callback's 700 ms budget covers token verification, streaming body reads,
+and the complete ingestor promise. On expiry the handler returns retryable 503,
+cancels the body reader best-effort, and aborts a shared `AbortSignal`; custom
+ingestors must pass that signal to cancellable I/O. A late resolve/rejection is
+observed and cannot rewrite the response or become an unhandled rejection. The
+built-in `ReceiptService` checks the signal at async boundaries, and
+`PgSmsStore` rolls its transaction back when cancellation is observed before
+COMMIT is dispatched. Once PostgreSQL has accepted COMMIT, the adapter waits
+for its outcome before releasing the connection; the handler may already have
+returned 503, and the provider retry is safely absorbed by the receipt's
+semantic dedupe key.
+
 Receipts that are structurally valid but do not belong to this system are acknowledged and counted as unmatched; they must not create a tenant, reveal data, or trigger a retry. Monitor `GET /receipt-health` for `unmatchedCount`, acceptance-unknown, final-delivery-unknown, backlog, budget, circuit, and warnings.
 
-Schedule `ReconcileService.runBatch({ limit })` for delivery-status queries. Reconciliation is a read/repair path for delivery state, not a second send path. Administrators can enqueue a targeted reconciliation through `POST /reconcile`; the result is a tenant-scoped job. Schedule `MaintenanceService.rollupDirtyDates({ limit })` and `MaintenanceService.applyRetention({ batchSize })` to keep aggregate statistics useful while applying the configured retention policy.
+Schedule `ReconcileService.runBatch({ limit })` for delivery-status queries. Reconciliation is a read/repair path for delivery state, not a second send path. Administrators can enqueue a targeted reconciliation through `POST /reconcile`; the result is a tenant-scoped job. If that request reuses an existing system job, sms-kit records a durable, narrow `receipt.reconcile` operation/job authorization without rewriting the job origin; `/jobs/:id` still requires that permission and never lets it override an `sms.test` origin. Schedule `MaintenanceService.rollupDirtyDates({ limit })` and `MaintenanceService.applyRetention({ batchSize })` to keep aggregate statistics useful while applying the configured retention policy.
+
+`GET /messages/:id` returns the tenant-authorized, redacted operational
+timeline: stable attempt state/times, provider request IDs, stable sms-kit error
+codes, receipt source/status/times, and finite redaction diagnostics. It never
+returns dispatch/lease tokens, provider messages, raw callback payloads,
+plaintext or encrypted phones, template-variable values, or ciphertext.
 
 Use the admin `/stats` route for explicit measurements. It reports `submitted`, `accepted`, `acceptanceRejected`, `acceptanceUnknown`, `deliveryWaiting`, `delivered`, `deliveryFailed`, `deliveryUnknownFinal`, and `retry`, with derived rates when meaningful. Never collapse provider acceptance into final delivery.
 
@@ -193,6 +232,10 @@ const adapterOptions = {
   clock,
   sleeper,
   events,
+  templates: {
+    login: "auth.login_otp",
+    passwordReset: "auth.password_reset",
+  },
 };
 const callbacks = createBetterAuthSmsAdapter(adapterOptions);
 const policy = await policyService.get(systemActor);
@@ -208,6 +251,30 @@ const auth = betterAuth({
   })],
 });
 ```
+
+Expose those same host-owned mappings to the admin verification read model;
+do not duplicate them as invented database fields:
+
+```ts
+const betterAuthVerification = {
+  get: async () => ({
+    adapterStatus: "enabled",
+    loginTemplateKey: adapterOptions.templates.login,
+    passwordResetTemplateKey: adapterOptions.templates.passwordReset,
+  }),
+};
+
+const smsAdminServices = {
+  task3: smsTask3Services,
+  task4: { ...smsTask4Services, betterAuth: betterAuthVerification },
+};
+```
+
+Without this source, `GET /verification` truthfully reports
+`adapterStatus: "not_configured"` and null mappings. Better Auth mappings are
+read-only in this endpoint—`PATCH /verification` updates sms-kit policy only.
+If the host makes mappings editable elsewhere, it must persist them in its own
+validated configuration and rebuild the adapter through its normal lifecycle.
 
 `waitUntil` above is a host/platform scheduler injection, not a browser API. It must register the task with the request's real lifetime primitive, observe rejected registration, and keep the provider task server-side. Do not invoke an SMS provider from an untrusted client. Configure approved verification templates before enabling this integration: `auth.login_otp` (`better-auth:login`), `auth.password_reset` (`better-auth:passwordReset`), `auth.password_change` (`auth.password_change`), and `auth.step_up` (`auth.step_up`) must each be an approved verification template with the `code` variable. No live SMS provider is necessary for integration tests; use a recording fake provider as in `test/integration/auth/auth-flows.test.ts`.
 

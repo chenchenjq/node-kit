@@ -8,6 +8,7 @@ import type { TenantId } from "../../../src/core/types.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const tenantId = "reconcile-tenant" as TenantId;
 
@@ -45,7 +46,7 @@ describe("ReconcileService", () => {
     const signature = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "reconcile-sign", changeType: "new", checksum: "reconcile-sign", resourceType: "signature", snapshot: { kind: "signature", externalName: "Reconcile", externalStatus: "approved", externalType: "text" } });
     const template = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "reconcile-template", changeType: "new", checksum: "reconcile-template", resourceType: "template", signatureExternalKey: "reconcile-sign", templateKey: "reconcile.delivery", purpose: "notification", snapshot: { kind: "template", externalCode: "SMS_RECONCILE", externalName: "Reconcile", externalStatus: "approved", templateType: "notification", variableNames: [] } });
     const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
-    await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    await commitResourceFixturePreview(store, preview);
     templateId = (await store.resources.findTemplateByKey({ templateKey: "reconcile.delivery" }))!.id;
     const config = await store.config.update({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "id", accessKeySecretRef: "secret", receiptCallbackTokenRef: "callback", enabled: true, expectedVersion: 0 });
     await store.config.recordConnectionTest({ status: "succeeded", summary: {}, testedAt: clock.now(), expectedVersion: config.version });

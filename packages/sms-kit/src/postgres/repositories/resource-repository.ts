@@ -4,8 +4,9 @@ import { SmsKitError } from "../../core/errors.js";
 import { isCloudApproved, isUsableSignature } from "../../core/resource-usability.js";
 import type {
   ImportTemplateResourceInput, ResourceRepository, ResourceSyncCandidate, ResourceSyncPreview, Signature,
-  SmsTransaction, Template, UpdateSignatureResourceInput, UpdateTemplateResourceInput,
+  SmsTransaction, Template, TemplateResourceSelection, UpdateSignatureResourceInput, UpdateTemplateResourceInput,
 } from "../../ports/store.js";
+import { hasTemplateResourceSelection } from "../../ports/store.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
 type Queryable = Pool | PoolClient;
@@ -83,16 +84,23 @@ function requiredString(value: Readonly<Record<string, unknown>>, key: string): 
   return result;
 }
 
-function importSnapshot(value: unknown): Readonly<{
+type StoredTemplateSnapshot = Readonly<{
   externalCode: string;
   externalName: string;
   externalStatus: string;
   templateType: "verification" | "notification";
   variableNames: readonly string[];
-  signatureExternalKey: string;
-  templateKey: string;
-  purpose: string;
-}> {
+}> & Readonly<Partial<TemplateResourceSelection>>;
+
+function hasStoredTemplateSelection(
+  snapshot: StoredTemplateSnapshot,
+): snapshot is StoredTemplateSnapshot & TemplateResourceSelection {
+  return typeof snapshot.signatureExternalKey === "string" &&
+    typeof snapshot.templateKey === "string" &&
+    typeof snapshot.purpose === "string";
+}
+
+function importSnapshot(value: unknown): StoredTemplateSnapshot {
   const snapshot = object(value);
   const templateType = requiredString(snapshot, "templateType");
   const variableNames = snapshot.variableNames;
@@ -100,12 +108,18 @@ function importSnapshot(value: unknown): Readonly<{
       !Array.isArray(variableNames) || !variableNames.every((name) => typeof name === "string")) {
     throw new SmsKitError("STORAGE_FAILURE", "resource candidate snapshot is invalid", true);
   }
-  return {
+  const providerSnapshot = {
     externalCode: requiredString(snapshot, "externalCode"),
     externalName: requiredString(snapshot, "externalName"),
     externalStatus: requiredString(snapshot, "externalStatus"),
     templateType: templateType as "verification" | "notification",
     variableNames,
+  };
+  const hasSelection = ["signatureExternalKey", "templateKey", "purpose"]
+    .some((key) => snapshot[key] !== undefined);
+  if (!hasSelection) return providerSnapshot;
+  return {
+    ...providerSnapshot,
     signatureExternalKey: requiredString(snapshot, "signatureExternalKey"),
     templateKey: requiredString(snapshot, "templateKey"),
     purpose: requiredString(snapshot, "purpose"),
@@ -122,7 +136,16 @@ function safeSnapshot(candidate: ResourceSyncCandidate): object {
   if (candidate.resourceType === "signature") {
     return { kind: "signature", externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, externalType: candidate.snapshot.externalType };
   }
-  return { kind: "template", externalCode: candidate.snapshot.externalCode, externalName: candidate.snapshot.externalName, externalStatus: candidate.snapshot.externalStatus, templateType: candidate.snapshot.templateType, variableNames: [...candidate.snapshot.variableNames], signatureExternalKey: candidate.signatureExternalKey, templateKey: candidate.templateKey, purpose: candidate.purpose };
+  return {
+    kind: "template", externalCode: candidate.snapshot.externalCode, externalName: candidate.snapshot.externalName,
+    externalStatus: candidate.snapshot.externalStatus, templateType: candidate.snapshot.templateType,
+    variableNames: [...candidate.snapshot.variableNames],
+    ...(hasTemplateResourceSelection(candidate) ? {
+      signatureExternalKey: candidate.signatureExternalKey,
+      templateKey: candidate.templateKey,
+      purpose: candidate.purpose,
+    } : {}),
+  };
 }
 
 /**
@@ -215,11 +238,6 @@ type ExistingSignatureIdentityRow = Readonly<{
 type ExistingTemplateParentRow = Readonly<{
   signature_external_key: string;
 }>;
-type TemplateParentByCodeRow = Readonly<{
-  external_code: string;
-  signature_external_key: string;
-}>;
-
 /**
  * A later provider refresh must retain an already imported template's parent
  * signature. Add those existing parents before the shared resource lock
@@ -266,59 +284,37 @@ async function includePersistedSignatureIdentities(
   return { ...scope, signatureNameTypes: [...signatureNameTypes].sort() };
 }
 
-/**
- * A `new` provider code is bound to one local stable-key/signature/purpose
- * selection. A second new preview may have been built before the first
- * preview imported it, so verify that initial choice while holding the
- * resource locks rather than silently treating a conflicting choice as an
- * upsert. Later changed/unchanged refreshes preserve all existing local
- * controls, including the selected parent signature.
- */
+/** A sync refresh may observe local mappings, but can never create or change them. */
 async function assertTemplateSelectionsCurrent(
   db: Queryable,
   candidates: readonly CandidateRow[],
-): Promise<ReadonlySet<string>> {
-  const newSelections = new Map<string, Readonly<{
+): Promise<void> {
+  const expectedSelections = new Map<string, Readonly<{
     templateKey: string;
     purpose: string;
     signatureExternalKey: string;
   }>>();
-  const existingParents = new Map<string, Readonly<{
-    signatureExternalKey: string;
-    cloudApproved: boolean;
-  }>>();
-  const unavailableSignatureExternalKeys = new Set(candidates
-    .filter((candidate) => candidate.resource_type === "signature" && candidate.change_type === "unavailable")
-    .map((candidate) => candidate.external_key));
   for (const candidate of candidates) {
     if (candidate.resource_type !== "template" || candidate.change_type === "unavailable") continue;
     const snapshot = importSnapshot(candidate.snapshot);
-    if (candidate.change_type !== "new") {
-      const previousParent = existingParents.get(snapshot.externalCode);
-      if (previousParent !== undefined && previousParent.signatureExternalKey !== snapshot.signatureExternalKey) {
-        throw new SmsKitError("CONCURRENT_MODIFICATION", "template parent selection changed concurrently");
-      }
-      existingParents.set(snapshot.externalCode, {
-        signatureExternalKey: snapshot.signatureExternalKey,
-        cloudApproved: isCloudApproved(snapshot.externalStatus),
-      });
-      continue;
+    if (!hasStoredTemplateSelection(snapshot)) {
+      throw new SmsKitError("CONFIG_INVALID", "new templates require an explicit import");
     }
     const selection = {
       templateKey: snapshot.templateKey,
       purpose: snapshot.purpose,
       signatureExternalKey: snapshot.signatureExternalKey,
     };
-    const previous = newSelections.get(snapshot.externalCode);
+    const previous = expectedSelections.get(snapshot.externalCode);
     if (previous !== undefined && (previous.templateKey !== selection.templateKey ||
         previous.purpose !== selection.purpose ||
         previous.signatureExternalKey !== selection.signatureExternalKey)) {
       throw new SmsKitError("CONCURRENT_MODIFICATION", "template selection changed concurrently");
     }
-    newSelections.set(snapshot.externalCode, selection);
+    expectedSelections.set(snapshot.externalCode, selection);
   }
-  const externalCodes = [...new Set([...newSelections.keys(), ...existingParents.keys()])];
-  if (externalCodes.length === 0) return new Set();
+  const externalCodes = [...expectedSelections.keys()];
+  if (externalCodes.length === 0) return;
   const { rows } = await db.query<ExistingTemplateSelectionRow>(
     `select t.external_code, t.template_key, t.purpose, s.external_key as signature_external_key
        from sms_kit.template t
@@ -326,70 +322,14 @@ async function assertTemplateSelectionsCurrent(
       where t.external_code = any($1::text[])`,
     [externalCodes],
   );
-  const rebindExternalCodes = new Set<string>();
-  for (const row of rows) {
-    const selection = newSelections.get(row.external_code);
-    if (selection !== undefined && (selection.templateKey !== row.template_key || selection.purpose !== row.purpose ||
-        selection.signatureExternalKey !== row.signature_external_key)) {
-      throw new SmsKitError("CONCURRENT_MODIFICATION", "template selection changed concurrently");
-    }
-    const expectedParent = existingParents.get(row.external_code);
-    if (expectedParent !== undefined && expectedParent.signatureExternalKey !== row.signature_external_key) {
-      // A normal refresh never rewires a local template. The only supported
-      // exception is an explicit replacement selected during preview: its old
-      // parent must disappear in this very batch and the replacement template
-      // must remain cloud-approved. That gives the commit enough persisted,
-      // checksummed evidence to move the child atomically.
-      if (!expectedParent.cloudApproved || !unavailableSignatureExternalKeys.has(row.signature_external_key)) {
-        throw new SmsKitError("CONCURRENT_MODIFICATION", "template parent selection changed concurrently");
-      }
-      rebindExternalCodes.add(row.external_code);
-    }
+  if (rows.length !== expectedSelections.size) {
+    throw new SmsKitError("CONCURRENT_MODIFICATION", "template selection changed concurrently");
   }
-  return rebindExternalCodes;
-}
-
-/**
- * A retired parent and a selected child rebind form one atomic dependency.
- * Resource-sync commits intentionally support independent partial batches, but
- * allowing just the retired signature to commit would disable its child before
- * the only persisted replacement can move it. Inspect the whole immutable
- * preview and reject only a split of that dependency; unrelated candidates
- * remain independently committable.
- */
-async function assertTemplateRebindsCommittedAtomically(
-  db: Queryable,
-  selectedCandidates: readonly CandidateRow[],
-  allCandidates: readonly CandidateRow[],
-): Promise<void> {
-  const retiredByExternalKey = new Map(allCandidates
-    .filter((candidate) => candidate.resource_type === "signature" && candidate.change_type === "unavailable")
-    .map((candidate) => [candidate.external_key, candidate] as const));
-  if (retiredByExternalKey.size === 0) return;
-  const templateSelections = allCandidates
-    .filter((candidate) => candidate.resource_type === "template" && candidate.change_type !== "unavailable")
-    .map((candidate) => ({ candidate, snapshot: importSnapshot(candidate.snapshot) }));
-  if (templateSelections.length === 0) return;
-  const externalCodes = [...new Set(templateSelections.map(({ snapshot }) => snapshot.externalCode))];
-  const { rows } = await db.query<TemplateParentByCodeRow>(
-    `select t.external_code, s.external_key as signature_external_key
-       from sms_kit.template t
-       join sms_kit.signature s on s.id = t.signature_id
-      where t.external_code = any($1::text[])`,
-    [externalCodes],
-  );
-  const currentParents = new Map(rows.map((row) => [row.external_code, row.signature_external_key]));
-  const selectedIds = new Set(selectedCandidates.map((candidate) => candidate.id));
-  for (const { candidate, snapshot } of templateSelections) {
-    const currentParent = currentParents.get(snapshot.externalCode);
-    if (currentParent === undefined || currentParent === snapshot.signatureExternalKey) continue;
-    const retired = retiredByExternalKey.get(currentParent);
-    if (retired === undefined) continue;
-    if (selectedIds.has(candidate.id) !== selectedIds.has(retired.id)) {
-      throw new SmsKitError(
-        "CONCURRENT_MODIFICATION",
-        "template replacement must be committed with its retired signature",
-      );
+  for (const row of rows) {
+    const expected = expectedSelections.get(row.external_code);
+    if (expected === undefined || expected.templateKey !== row.template_key || expected.purpose !== row.purpose ||
+        expected.signatureExternalKey !== row.signature_external_key) {
+      throw new SmsKitError("CONCURRENT_MODIFICATION", "template selection changed concurrently");
     }
   }
 }
@@ -568,14 +508,20 @@ export class PgResourceRepository implements ResourceRepository {
       throw new SmsKitError("CONCURRENT_MODIFICATION", "template candidate is no longer current");
     }
     const snapshot = importSnapshot(candidate.snapshot);
-    if (snapshot.templateKey !== input.templateKey || snapshot.purpose !== input.purpose ||
-        snapshot.signatureExternalKey !== input.signatureExternalKey) {
+    if (hasStoredTemplateSelection(snapshot) &&
+        (snapshot.templateKey !== input.templateKey || snapshot.purpose !== input.purpose ||
+          snapshot.signatureExternalKey !== input.signatureExternalKey)) {
       throw new SmsKitError("CONCURRENT_MODIFICATION", "template candidate selection changed");
     }
     if (!isCloudApproved(snapshot.externalStatus)) {
       throw new SmsKitError("TEMPLATE_UNAVAILABLE", "template is not cloud-approved");
     }
-    const identityScope = await includePersistedSignatureIdentities(db, resourceLockScope([candidate]));
+    const candidateScope = resourceLockScope([candidate]);
+    const identityScope = await includePersistedSignatureIdentities(db, {
+      ...candidateScope,
+      templateKeys: [...new Set([...candidateScope.templateKeys, input.templateKey])].sort(),
+      signatureExternalKeys: [...new Set([...candidateScope.signatureExternalKeys, input.signatureExternalKey])].sort(),
+    });
     await lockResourceIdentities(db, identityScope);
     const owner = await db.query<SignatureRow>(
       `select ${signatureFields} from sms_kit.signature where external_key = $1 for share`,
@@ -711,17 +657,23 @@ export class PgResourceRepository implements ResourceRepository {
       if (candidates.length !== input.candidates.length || candidates.some((candidate) => candidate.committed_at !== null || input.candidates.find((chosen) => chosen.id === candidate.id)?.checksum !== candidate.checksum)) {
         throw new SmsKitError("CONCURRENT_MODIFICATION", "resource preview checksum changed");
       }
+      for (const candidate of candidates) {
+        if (candidate.resource_type !== "template") continue;
+        if (candidate.change_type === "new") {
+          // A preview may pre-date the explicit-import boundary or may have
+          // been created by a direct application caller. Never trust a stored
+          // local mapping to turn resource.sync into template.manage.
+          throw new SmsKitError("CONFIG_INVALID", "new templates require an explicit import");
+        }
+        if (!hasStoredTemplateSelection(importSnapshot(candidate.snapshot))) {
+          throw new SmsKitError("CONFIG_INVALID", "imported templates require their persisted local mapping");
+        }
+      }
       // Provider snapshots can change multiple overlapping identity rows. A
       // single transaction-level commit lock makes their persisted-name reads,
       // identity staging, and final unique-index writes one serial sequence.
       // Direct template/import mutations still use the narrower locks below.
       await db.query("select pg_advisory_xact_lock(hashtext('sms-kit:resource-sync-commit'))");
-      const allCandidates = (await db.query<CandidateRow>(
-        `select id, resource_type, external_key, change_type, checksum, snapshot, committed_at
-           from sms_kit.resource_sync_candidate
-          where sync_id = $1`,
-        [input.syncId],
-      )).rows;
       // Template-before-signature is the shared resource lock order. This must
       // precede the signature upserts below, including unavailable-parent
       // updates that subsequently disable every child template.
@@ -735,8 +687,7 @@ export class PgResourceRepository implements ResourceRepository {
       });
       await lockAffectedTemplates(db, scope);
       await lockAffectedSignatures(db, scope);
-      await assertTemplateRebindsCommittedAtomically(db, candidates, allCandidates);
-      const templateRebindExternalCodes = await assertTemplateSelectionsCurrent(db, candidates);
+      await assertTemplateSelectionsCurrent(db, candidates);
       await stageExistingSignaturesUnavailable(db, candidates);
       try {
         for (const candidate of candidates) {
@@ -747,22 +698,12 @@ export class PgResourceRepository implements ResourceRepository {
               "update sms_kit.signature set external_status = 'unavailable', enabled = false, last_synced_at = now(), version = version + 1, updated_at = now() where external_key = $1",
               [candidate.external_key],
             );
-            if (templateRebindExternalCodes.size === 0) {
-              await db.query(
-                `update sms_kit.template set external_status = 'unavailable', enabled = false, last_synced_at = now(),
-                   version = version + 1, updated_at = now()
-                 where signature_id in (select id from sms_kit.signature where external_key = $1)`,
-                [candidate.external_key],
-              );
-            } else {
-              await db.query(
-                `update sms_kit.template set external_status = 'unavailable', enabled = false, last_synced_at = now(),
-                   version = version + 1, updated_at = now()
-                 where signature_id in (select id from sms_kit.signature where external_key = $1)
-                   and not (external_code = any($2::text[]))`,
-                [candidate.external_key, [...templateRebindExternalCodes].sort()],
-              );
-            }
+            await db.query(
+              `update sms_kit.template set external_status = 'unavailable', enabled = false, last_synced_at = now(),
+                 version = version + 1, updated_at = now()
+               where signature_id in (select id from sms_kit.signature where external_key = $1)`,
+              [candidate.external_key],
+            );
             await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
             continue;
           }
@@ -781,7 +722,10 @@ export class PgResourceRepository implements ResourceRepository {
             [candidate.id, candidate.external_key, snapshot.externalName, snapshot.externalStatus, snapshot.externalType],
           );
         } else {
-          const snapshot = candidate.snapshot as Extract<ResourceSyncCandidate, { resourceType: "template" }>["snapshot"] & { signatureExternalKey: string; templateKey: string; purpose: string };
+          const snapshot = importSnapshot(candidate.snapshot);
+          if (!hasStoredTemplateSelection(snapshot)) {
+            throw new SmsKitError("CONFIG_INVALID", "new templates require an explicit import");
+          }
           if (candidate.change_type === "unavailable") {
             await db.query(
               "update sms_kit.template set external_status = 'unavailable', enabled = false, last_synced_at = now(), version = version + 1, updated_at = now() where external_code = $1",
@@ -811,15 +755,17 @@ export class PgResourceRepository implements ResourceRepository {
             }
             throw new SmsKitError("CONFIG_INVALID", "template preview has no usable signature");
           }
-          await db.query(
-            `insert into sms_kit.template (id, signature_id, template_key, external_code, external_name, external_status, template_type, purpose, content_snapshot, variable_schema, imported_at, last_synced_at, created_at, updated_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, '', $9::jsonb, now(), now(), now(), now())
-             on conflict (external_code) do update set
-               ${templateRebindExternalCodes.has(snapshot.externalCode) ? "signature_id = excluded.signature_id," : ""}
-               external_name = excluded.external_name, external_status = excluded.external_status,
-               template_type = excluded.template_type, variable_schema = excluded.variable_schema, last_synced_at = now(), version = sms_kit.template.version + 1, updated_at = now()`,
-            [candidate.id, signature.rows[0].id, snapshot.templateKey, snapshot.externalCode, snapshot.externalName, snapshot.externalStatus, snapshot.templateType, snapshot.purpose, JSON.stringify(snapshot.variableNames)],
+          const updated = await db.query(
+            `update sms_kit.template
+                set external_name = $5, external_status = $6, template_type = $7,
+                    variable_schema = $8::jsonb, last_synced_at = now(), version = version + 1, updated_at = now()
+              where external_code = $1 and signature_id = $2 and template_key = $3 and purpose = $4`,
+            [snapshot.externalCode, signature.rows[0].id, snapshot.templateKey, snapshot.purpose,
+              snapshot.externalName, snapshot.externalStatus, snapshot.templateType, JSON.stringify(snapshot.variableNames)],
           );
+          if (updated.rowCount !== 1) {
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "template selection changed concurrently");
+          }
         }
           await db.query("update sms_kit.resource_sync_candidate set committed_at = now() where id = $1", [candidate.id]);
         }

@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { ConfigService } from "../../src/application/config-service.js";
 import { PolicyService } from "../../src/application/policy-service.js";
 import { ResourceSyncService } from "../../src/application/resource-sync-service.js";
+import { ResourceAdminService } from "../../src/application/resource-admin-service.js";
 import { SendService } from "../../src/application/send-service.js";
 import { SendWorker } from "../../src/application/send-worker.js";
 import { MaintenanceService } from "../../src/application/maintenance-service.js";
@@ -58,8 +59,23 @@ export async function runLiveDeliveryScenario(dependencies: Readonly<{
     if (signature === undefined || !isTestResourceName(signature.externalName) || !isCloudApproved(signature.externalStatus) ||
         template === undefined || !isTestResourceName(template.externalName) || !isCloudApproved(template.externalStatus) || template.templateType !== "notification") throw new Error("live resources must be approved test-only notification resources");
     const sync = new ResourceSyncService(common);
-    const preview = await sync.preview(actor, { templates: [{ externalKey: template.externalKey, signatureExternalKey: signature.externalKey, templateKey: "live.test", purpose: "notification" }] });
-    await sync.commit(actor, { syncId: preview.id, candidates: preview.candidates.filter((item) => item.externalKey === signature.externalKey || item.externalKey === template.externalKey).map(({ id, checksum }) => ({ id, checksum })) });
+    const preview = await sync.preview(actor);
+    const signatureCandidate = preview.candidates.find((item) => item.resourceType === "signature" && item.externalKey === signature.externalKey);
+    const templateCandidate = preview.candidates.find((item) => item.resourceType === "template" && item.externalKey === template.externalKey);
+    if (signatureCandidate === undefined || templateCandidate === undefined) throw new Error("live resource preview is incomplete");
+    await sync.commit(actor, { syncId: preview.id, candidates: [{ id: signatureCandidate.id, checksum: signatureCandidate.checksum }] });
+    const importedSignature = (await store.resources.listSignatures({ page: 1, pageSize: 100 })).items
+      .find((item) => item.externalKey === signature.externalKey);
+    if (importedSignature === undefined) throw new Error("live signature import failed");
+    await new ResourceAdminService(common).importTemplate(actor, {
+      version: importedSignature.version,
+      idempotencyKey: `live-template:${templateCandidate.id}`,
+      candidateId: templateCandidate.id,
+      checksum: templateCandidate.checksum,
+      templateKey: "live.test",
+      purpose: "notification",
+      signatureExternalKey: signature.externalKey,
+    });
 
     const key = randomBytes(32);
     const keyring = { activeKey: async () => ({ id: "ephemeral-live-test", bytes: key }), keyById: async () => key };

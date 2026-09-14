@@ -17,6 +17,7 @@ const migrationFiles: readonly MigrationFile[] = [
   { version: 7, name: "0007_admin_operation.sql", url: new URL("./migrations/0007_admin_operation.sql", import.meta.url) },
   { version: 8, name: "0008_signature_active_identity.sql", url: new URL("./migrations/0008_signature_active_identity.sql", import.meta.url) },
   { version: 9, name: "0009_admin_operations.sql", url: new URL("./migrations/0009_admin_operations.sql", import.meta.url) },
+  { version: 10, name: "0010_admin_job_authorization.sql", url: new URL("./migrations/0010_admin_job_authorization.sql", import.meta.url) },
 ];
 
 const bootstrapDdl = `

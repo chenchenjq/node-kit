@@ -9,7 +9,12 @@ import { SmsKitError } from "../../../src/core/errors.js";
 import { normalizeMainlandPhone } from "../../../src/core/phone.js";
 import type { MessageId, TenantId } from "../../../src/core/types.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
-import { createResourceSyncCandidate, type SmsStore, type SmsTransaction } from "../../../src/ports/store.js";
+import {
+  createResourceSyncCandidate,
+  hasTemplateResourceSelection,
+  type SmsStore,
+  type SmsTransaction,
+} from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { asSmsTransaction, type PgSmsTransaction } from "../../../src/postgres/transaction.js";
@@ -147,11 +152,21 @@ describe("ResourceAdminService with PostgreSQL", () => {
     const preview = await store.resources.createSyncPreview({
       id: randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template],
     });
+    if (!hasTemplateResourceSelection(template)) throw new Error("seed template selection is missing");
     await store.resources.commitSync({
       syncId: preview.id,
-      candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })),
+      candidates: [{ id: signature.id, checksum: signature.checksum }],
       now,
     });
+    await store.transaction((tx) => store.resources.importTemplate({
+      candidateId: template.id,
+      checksum: template.checksum,
+      templateKey: template.templateKey,
+      purpose: template.purpose,
+      signatureExternalKey: template.signatureExternalKey,
+      expectedSignatureVersion: 1,
+      now,
+    }, tx));
   });
 
   afterAll(async () => stop?.());
@@ -189,7 +204,7 @@ describe("ResourceAdminService with PostgreSQL", () => {
         externalStatus: "approved", templateType: "notification", variableNames: ["orderNo"],
       },
     });
-    if (candidate.resourceType !== "template") throw new Error("template candidate was not created");
+    if (!hasTemplateResourceSelection(candidate)) throw new Error("selected template candidate was not created");
     const preview = await store.resources.createSyncPreview({
       id: randomUUID(), actorId: actorA.id, expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [candidate],
     });
@@ -218,6 +233,40 @@ describe("ResourceAdminService with PostgreSQL", () => {
     )).resolves.toMatchObject({ rows: [{ status: "succeeded", committed: "1" }] });
   });
 
+  it("never lets a mapped new template cross the resource.sync permission boundary", async () => {
+    const signature = (await store.resources.listSignatures({ page: 1, pageSize: 10 })).items[0]!;
+    const candidate = createResourceSyncCandidate({
+      id: randomUUID(), externalKey: "aliyun:template:SMS_EXPLICIT_ONLY", changeType: "new", checksum: "explicit-only-checksum",
+      resourceType: "template", signatureExternalKey: signature.externalKey,
+      templateKey: "notice.explicit-only", purpose: "notification",
+      snapshot: {
+        kind: "template", externalCode: "SMS_EXPLICIT_ONLY", externalName: "Explicit only",
+        externalStatus: "approved", templateType: "notification", variableNames: [],
+      },
+    });
+    if (!hasTemplateResourceSelection(candidate)) throw new Error("selected template candidate was not created");
+    const preview = await store.resources.createSyncPreview({
+      id: randomUUID(), actorId: actorA.id, expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [candidate],
+    });
+
+    await expect(store.resources.commitSync({
+      syncId: preview.id,
+      candidates: [{ id: candidate.id, checksum: candidate.checksum }],
+      now,
+    })).rejects.toMatchObject({ code: "CONFIG_INVALID" } satisfies Partial<SmsKitError>);
+    await expect(store.resources.findTemplateByKey({ templateKey: candidate.templateKey })).resolves.toBeUndefined();
+
+    await expect(service.importTemplate(actorA, {
+      version: signature.version,
+      idempotencyKey: "template:explicit-only",
+      candidateId: candidate.id,
+      checksum: candidate.checksum,
+      templateKey: candidate.templateKey,
+      purpose: candidate.purpose,
+      signatureExternalKey: candidate.signatureExternalKey,
+    })).resolves.toMatchObject({ templateKey: candidate.templateKey });
+  });
+
   it("rejects a later batch commit that reselects an independently imported template", async () => {
     const signature = (await store.resources.listSignatures({ page: 1, pageSize: 10 })).items[0]!;
     const signatureCandidate = createResourceSyncCandidate({
@@ -236,7 +285,7 @@ describe("ResourceAdminService with PostgreSQL", () => {
         externalStatus: "approved", templateType: "notification", variableNames: [],
       },
     });
-    if (templateCandidate.resourceType !== "template") throw new Error("template candidate was not created");
+    if (!hasTemplateResourceSelection(templateCandidate)) throw new Error("selected template candidate was not created");
     const preview = await store.resources.createSyncPreview({
       id: randomUUID(), actorId: actorA.id, expiresAt: new Date("2030-01-01T00:00:00.000Z"),
       resources: [signatureCandidate, templateCandidate],
@@ -270,7 +319,7 @@ describe("ResourceAdminService with PostgreSQL", () => {
         externalStatus: "approved", templateType: "notification", variableNames: [],
       },
     });
-    if (candidate.resourceType !== "template") throw new Error("template candidate was not created");
+    if (!hasTemplateResourceSelection(candidate)) throw new Error("selected template candidate was not created");
     const preview = await store.resources.createSyncPreview({
       id: randomUUID(), actorId: actorA.id, expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [candidate],
     });
@@ -327,7 +376,7 @@ describe("ResourceAdminService with PostgreSQL", () => {
         variableNames: [],
       },
     });
-    if (templateCandidate.resourceType !== "template") throw new Error("template candidate was not created");
+    if (!hasTemplateResourceSelection(templateCandidate)) throw new Error("selected template candidate was not created");
     await store.resources.createSyncPreview({
       id: randomUUID(),
       actorId: actorA.id,

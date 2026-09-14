@@ -1,12 +1,11 @@
 import { SmsKitError } from "../core/errors.js";
-import { isUsableSignature } from "../core/resource-usability.js";
-import { validateTemplateKey } from "../core/template.js";
 import type { ProviderAuthInput, ProviderPage, ProviderSignature, ProviderTemplate, SmsProvider } from "../ports/provider.js";
 import type { Clock, EventSink, IdGenerator } from "../ports/runtime.js";
 import type { Authorizer, AuthorizationActor } from "../ports/security.js";
 import type { TenantId } from "../core/types.js";
 import {
   createResourceSyncCandidate,
+  hasTemplateResourceSelection,
   type ConfiguredProviderConfig,
   type ResourceSyncCandidate,
   type ResourceSyncPreview,
@@ -22,7 +21,7 @@ export type ResourceSyncTemplateSelection = TemplateResourceSelection & Readonly
 }>;
 
 export type ResourceSyncPreviewInput = Readonly<{
-  /** Templates are opt-in because their stable local name and purpose are admin choices. */
+  /** @deprecated Template mappings are rejected; use ResourceAdminService.importTemplate. */
   templates?: readonly ResourceSyncTemplateSelection[];
   pageSize?: number;
   /** Supplying both write fields activates durable admin replay and a config fence. */
@@ -139,13 +138,6 @@ function changedTemplate(remote: ProviderTemplate, local: { externalName: string
     ? "unchanged" : "changed";
 }
 
-function assertSelection(selection: ResourceSyncTemplateSelection): void {
-  try { validateTemplateKey(selection.templateKey); } catch { throw new SmsKitError("CONFIG_INVALID", "invalid template selection"); }
-  if (selection.externalKey.trim().length === 0 || selection.signatureExternalKey.trim().length === 0 || selection.purpose.trim().length === 0) {
-    throw new SmsKitError("CONFIG_INVALID", "invalid template selection");
-  }
-}
-
 function candidateChecksum(candidate: unknown): string {
   return canonicalChecksum(candidate);
 }
@@ -205,9 +197,11 @@ function syncSnapshot(value: ResourceSyncPreview): Readonly<Record<string, unkno
       changeType: candidate.changeType,
       checksum: candidate.checksum,
       resourceType: "template",
-      signatureExternalKey: candidate.signatureExternalKey,
-      templateKey: candidate.templateKey,
-      purpose: candidate.purpose,
+      ...(hasTemplateResourceSelection(candidate) ? {
+        signatureExternalKey: candidate.signatureExternalKey,
+        templateKey: candidate.templateKey,
+        purpose: candidate.purpose,
+      } : {}),
       snapshot: {
         kind: "template",
         externalCode: candidate.snapshot.externalCode,
@@ -242,17 +236,14 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
 
   async preview(actor: Actor, input: ResourceSyncPreviewInput = {}): Promise<ResourceSyncPreview> {
     await this.dependencies.authorizer.assert(actor, "resource.sync");
+    if (input.templates !== undefined) {
+      throw new SmsKitError("CONFIG_INVALID", "template mappings require an explicit import");
+    }
     const pageSize = validPageSize(input.pageSize);
     const metadata = adminMetadata(input);
     const request = metadata === undefined ? undefined : {
       expectedVersion: metadata.expectedVersion,
       pageSize,
-      templates: (input.templates ?? []).map((selection) => ({
-        externalKey: selection.externalKey,
-        signatureExternalKey: selection.signatureExternalKey,
-        templateKey: selection.templateKey,
-        purpose: selection.purpose,
-      })),
     };
     if (metadata !== undefined) {
       const replay = await findAdminOperationReplay({
@@ -283,44 +274,18 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     ]);
     const localSignaturesByKey = new Map(localSignatures.map((signature) => [signature.externalKey, signature]));
     const localTemplatesByCode = new Map(localTemplates.map((template) => [template.externalCode, template]));
-    const localTemplatesByKey = new Map(localTemplates.map((template) => [template.templateKey, template]));
     const localSignaturesById = new Map(localSignatures.map((signature) => [signature.id, signature]));
     const discoveredSignatureKeys = new Set(signatures.map((signature) => signature.externalKey));
-    const selectableSignatureKeys = new Set(signatures.filter((signature) => isUsableSignature({
-      externalStatus: signature.externalStatus,
-      enabled: localSignaturesByKey.get(signature.externalKey)?.enabled ?? true,
-    })).map((signature) => signature.externalKey));
-    const templateByExternalKey = new Map(templates.map((template) => [template.externalKey, template]));
-    const selections = input.templates ?? [];
-    const selectionsByExternalKey = new Map<string, ResourceSyncTemplateSelection>();
-    const selectedTemplateKeys = new Set<string>();
-    for (const selection of selections) {
-      assertSelection(selection);
-      const remoteTemplate = templateByExternalKey.get(selection.externalKey);
-      const priorByKey = localTemplatesByKey.get(selection.templateKey);
-      const priorByCode = remoteTemplate === undefined ? undefined : localTemplatesByCode.get(remoteTemplate.externalCode);
-      const priorSignature = priorByCode === undefined ? undefined : localSignaturesById.get(priorByCode.signatureId);
-      const explicitlyReplacesRetiredParent = priorSignature !== undefined &&
-        priorSignature.externalKey !== selection.signatureExternalKey &&
-        !discoveredSignatureKeys.has(priorSignature.externalKey);
-      if (remoteTemplate === undefined || selectionsByExternalKey.has(selection.externalKey) || !selectableSignatureKeys.has(selection.signatureExternalKey) ||
-          selectedTemplateKeys.has(selection.templateKey) ||
-          (priorByKey !== undefined && priorByKey.externalCode !== remoteTemplate.externalCode) ||
-          (priorByCode !== undefined && (priorByCode.templateKey !== selection.templateKey ||
-            priorSignature === undefined || (priorSignature.externalKey !== selection.signatureExternalKey && !explicitlyReplacesRetiredParent)))) {
-        throw new SmsKitError("CONFIG_INVALID", "invalid template selection");
-      }
-      selectionsByExternalKey.set(selection.externalKey, selection);
-      selectedTemplateKeys.add(selection.templateKey);
-    }
-    // Imported resources remain observable even when administrators select no new imports.
+    const refreshesByExternalKey = new Map<string, ResourceSyncTemplateSelection>();
+    // Only previously imported resources carry stable local mappings in a
+    // resource.sync snapshot. First imports always remain mapping-free.
     for (const remote of templates) {
       const local = localTemplatesByCode.get(remote.externalCode);
-      if (local === undefined || selectionsByExternalKey.has(remote.externalKey)) continue;
+      if (local === undefined) continue;
       if (changedTemplate(remote, { ...local, variableNames: local.variables.map(({ name }) => name) }) === "unchanged") continue;
       const signature = localSignaturesById.get(local.signatureId);
       if (signature === undefined) throw new SmsKitError("STORAGE_FAILURE", "template has no local signature", true);
-      selectionsByExternalKey.set(remote.externalKey, { externalKey: remote.externalKey, signatureExternalKey: signature.externalKey, templateKey: local.templateKey, purpose: local.purpose });
+      refreshesByExternalKey.set(remote.externalKey, { externalKey: remote.externalKey, signatureExternalKey: signature.externalKey, templateKey: local.templateKey, purpose: local.purpose });
     }
 
     const resources: ResourceSyncCandidate[] = [];
@@ -340,8 +305,8 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       };
       resources.push(createResourceSyncCandidate({ ...base, checksum: candidateChecksum(base) }));
     }
-    for (const [externalKey, selection] of selectionsByExternalKey) {
-      const template = templateByExternalKey.get(externalKey);
+    for (const [externalKey, selection] of refreshesByExternalKey) {
+      const template = templates.find((item) => item.externalKey === externalKey);
       if (template === undefined) throw new SmsKitError("CONFIG_INVALID", "selected template is not in the provider snapshot");
       const base = {
         id: this.dependencies.ids.next(), externalKey: template.externalKey,
@@ -352,6 +317,21 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
           variableNames: localTemplatesByCode.get(template.externalCode)!.variables.map((variable) => variable.name),
         }), resourceType: "template" as const,
         signatureExternalKey: selection.signatureExternalKey, templateKey: selection.templateKey, purpose: selection.purpose,
+        snapshot: {
+          kind: "template" as const, externalCode: template.externalCode, externalName: template.externalName,
+          externalStatus: template.externalStatus, templateType: template.templateType, variableNames: [...template.variableNames],
+        },
+      };
+      resources.push(createResourceSyncCandidate({ ...base, checksum: candidateChecksum(base) }));
+    }
+    // Every provider template is discoverable before a local stable key,
+    // purpose, or signature mapping exists. Those administrator-owned fields
+    // are deliberately absent until the explicit template-import operation.
+    for (const template of templates) {
+      if (localTemplatesByCode.has(template.externalCode)) continue;
+      const base = {
+        id: this.dependencies.ids.next(), externalKey: template.externalKey,
+        changeType: "new" as const, resourceType: "template" as const,
         snapshot: {
           kind: "template" as const, externalCode: template.externalCode, externalName: template.externalName,
           externalStatus: template.externalStatus, templateType: template.templateType, variableNames: [...template.variableNames],

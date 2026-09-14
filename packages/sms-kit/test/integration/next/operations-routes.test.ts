@@ -13,6 +13,7 @@ import { SendWorker } from "../../../src/application/send-worker.js";
 import { SmsKitError } from "../../../src/core/errors.js";
 import type { MessageId, TenantId, TemplateId } from "../../../src/core/types.js";
 import { createSmsAdminHandler } from "../../../src/next/index.js";
+import { operationJobAuthorization, operationsRoute } from "../../../src/next/handlers/operations.js";
 import type { SmsProvider } from "../../../src/ports/provider.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
@@ -142,6 +143,13 @@ describe("sms operations routes with PostgreSQL", () => {
           reconcile: new ReconcileAdminService({ store, authorizer, clock: { now: () => now }, ids: { next: () => randomUUID() } }),
           phoneProtector,
           clock: { now: () => now },
+          betterAuth: {
+            get: async () => ({
+              adapterStatus: "enabled" as const,
+              loginTemplateKey: "auth.login_otp",
+              passwordResetTemplateKey: "auth.password_reset",
+            }),
+          },
         },
       },
       ids: { next: () => randomUUID(), messageId: () => randomUUID() as MessageId },
@@ -197,19 +205,27 @@ describe("sms operations routes with PostgreSQL", () => {
           set acceptance_status = $1,
               delivery_status = $2,
               provider_biz_id = $3,
+              provider_request_id = $7,
               accepted_at = $4::timestamptz,
               delivered_at = case when $2::text = 'delivered' then $4::timestamptz else null end,
               version = 1
         where tenant_id = $5 and id = $6`,
-      [input.acceptanceStatus, input.deliveryStatus, input.providerBizId, submittedAt, input.tenantId, id],
+      [input.acceptanceStatus, input.deliveryStatus, input.providerBizId, submittedAt, input.tenantId, id, `request:${input.providerBizId}`],
     );
     for (let attemptNo = 1; attemptNo <= input.attemptCount; attemptNo += 1) {
       await pool.query(
         `insert into sms_kit.send_attempt (
            id, message_id, attempt_no, status, dispatch_mode, dispatch_token,
-           dispatch_marked_at, occurred_at
-         ) values ($1, $2, $3, 'accepted', 'direct', $4, $5, $5)`,
-        [randomUUID(), id, attemptNo, randomUUID(), submittedAt],
+           dispatch_marked_at, provider_request_id, provider_code, error_code,
+           latency_ms, occurred_at
+         ) values ($1, $2, $3, $4, 'direct', $5, $6, $7, $8, $9, $10, $6)`,
+        [
+          randomUUID(), id, attemptNo, attemptNo === input.attemptCount ? "accepted" : "rejected",
+          randomUUID(), submittedAt, `attempt-request:${input.providerBizId}:${attemptNo}`,
+          attemptNo === input.attemptCount ? "OK" : "isv.BUSINESS_LIMIT_CONTROL",
+          attemptNo === input.attemptCount ? null : "PROVIDER_THROTTLED",
+          40 + attemptNo,
+        ],
       );
     }
     return id;
@@ -284,6 +300,16 @@ describe("sms operations routes with PostgreSQL", () => {
        ) values ($1, null, null, 'unmatched', $2, $3, 'failed', $4, $4, 'callback', '{"redactedFields":["phone"]}'::jsonb)`,
       [randomUUID(), `unmatched:${randomUUID()}`, `unmatched-out:${randomUUID()}`, now],
     );
+    await pool.query(
+      `insert into sms_kit.delivery_receipt (
+         id, message_id, tenant_id, match_status, dedupe_key, provider_biz_id,
+         provider_out_id, delivery_status, provider_code, provider_message,
+         occurred_at, received_at, source, redacted_payload
+       ) values ($1, $2, $3, 'matched', $4, 'biz-operations-a', $6, 'delivered',
+         'DELIVERED', 'provider payload must not escape', $5, $5, 'callback',
+         '{"redactedFields":["phone","template-params"],"reportCount":1,"rawPhone":"+8613800138000"}'::jsonb)`,
+      [randomUUID(), messageA, tenantA, `matched:${randomUUID()}`, now, messageA],
+    );
 
     phoneHashCalls.length = 0;
     const listed = await request(
@@ -311,7 +337,47 @@ describe("sms operations routes with PostgreSQL", () => {
 
     const detail = await request(adminA, `/messages/${messageA}`);
     expect(detail.status).toBe(200);
-    expect(await detail.json()).toMatchObject({ data: { id: messageA, acceptedAt: now.toISOString(), attemptCount: 2 } });
+    const detailBody = await detail.json();
+    expect(detailBody).toMatchObject({ data: {
+      id: messageA,
+      acceptedAt: now.toISOString(),
+      attemptCount: 2,
+      providerRequestId: "request:biz-operations-a",
+      attempts: [
+        {
+          attemptNo: 1,
+          status: "rejected",
+          dispatchMode: "direct",
+          providerRequestId: "attempt-request:biz-operations-a:1",
+          errorCode: "PROVIDER_THROTTLED",
+          latencyMs: 41,
+        },
+        {
+          attemptNo: 2,
+          status: "accepted",
+          dispatchMode: "direct",
+          providerRequestId: "attempt-request:biz-operations-a:2",
+          latencyMs: 42,
+        },
+      ],
+      receipts: [{
+        source: "callback",
+        deliveryStatus: "delivered",
+        diagnostics: { redactedFields: ["phone", "template-params"], reportCount: 1 },
+      }],
+      diagnostics: { redactedFields: ["phone", "template-params"], counts: [{ name: "message", value: 1 }] },
+    } });
+    const serializedDetail = JSON.stringify(detailBody);
+    for (const forbidden of [
+      "ciphertext:never-returned",
+      "variables:never-returned",
+      "+8613800138000",
+      "provider payload must not escape",
+      "rawPhone",
+      "dispatchToken",
+      "leaseToken",
+      "orderNo",
+    ]) expect(serializedDetail).not.toContain(forbidden);
     const legacyDetail = await request(adminA, `/messages/${legacyMessageA}`);
     expect(legacyDetail.status).toBe(200);
     expect(await legacyDetail.json()).toMatchObject({ data: {
@@ -375,7 +441,15 @@ describe("sms operations routes with PostgreSQL", () => {
     const current = await store.policy.get();
     const verification = await request(adminA, "/verification");
     expect(verification.status).toBe(200);
-    expect(await verification.json()).toMatchObject({ data: { version: current.version, circuitOpen: false } });
+    expect(await verification.json()).toMatchObject({ data: {
+      version: current.version,
+      circuitOpen: false,
+      betterAuth: {
+        adapterStatus: "enabled",
+        loginTemplateKey: "auth.login_otp",
+        passwordResetTemplateKey: "auth.password_reset",
+      },
+    } });
     const configured = await store.config.update({
       provider: "aliyun",
       region: "cn-shanghai",
@@ -468,7 +542,12 @@ describe("sms operations routes with PostgreSQL", () => {
     };
     const updated = await request(adminA, "/verification", "PATCH", policyPatch);
     expect(updated.status).toBe(200);
-    expect(await updated.json()).toMatchObject({ data: { version: current.version + 1, systemDailyBudget: 500, circuitOpen: true } });
+    expect(await updated.json()).toMatchObject({ data: {
+      version: current.version + 1,
+      systemDailyBudget: 500,
+      circuitOpen: true,
+      betterAuth: { adapterStatus: "enabled", loginTemplateKey: "auth.login_otp", passwordResetTemplateKey: "auth.password_reset" },
+    } });
     const replayed = await request(adminA, "/verification", "PATCH", policyPatch);
     expect(replayed.status).toBe(200);
     expect(await replayed.json()).toMatchObject({ data: { version: current.version + 1, circuitOpen: true } });
@@ -573,8 +652,18 @@ describe("sms operations routes with PostgreSQL", () => {
       "select count(*)::text as count from sms_kit.send_job where tenant_id = $1 and message_id = $2 and job_type = 'reconcile'",
       [tenantA, automaticallyScheduledMessage],
     )).resolves.toMatchObject({ rows: [{ count: "1" }] });
-    expect((await request(receiptReconcilerA, `/jobs/${automaticJob.id}`)).status).toBe(404);
-    expect((await request(adminA, `/jobs/${automaticJob.id}`)).status).toBe(404);
+    await expect(pool.query<{ required_permission: string }>(
+      "select required_permission from sms_kit.admin_job_authorization where tenant_id = $1 and job_id = $2",
+      [tenantA, automaticJob.id],
+    )).resolves.toMatchObject({ rows: [{ required_permission: "receipt.reconcile" }] });
+    await expect(operationJobAuthorization({ store }, { tenantId: tenantA, jobId: automaticJob.id }))
+      .resolves.toEqual({ requiredPermission: "receipt.reconcile" });
+    await expect(operationsRoute({ store }, receiptReconcilerA, "/jobs/:id", undefined, { id: automaticJob.id }, {}))
+      .resolves.toMatchObject({ id: automaticJob.id, jobType: "reconcile" });
+    expect((await request(receiptReconcilerA, `/jobs/${automaticJob.id}`)).status).toBe(200);
+    expect((await request(adminA, `/jobs/${automaticJob.id}`)).status).toBe(200);
+    expect((await request(messageReaderA, `/jobs/${automaticJob.id}`)).status).toBe(403);
+    expect((await request(adminB, `/jobs/${automaticJob.id}`)).status).toBe(404);
 
     const smsOriginMessage = await seedMessage({
       tenantId: tenantA,
@@ -601,6 +690,8 @@ describe("sms operations routes with PostgreSQL", () => {
     expect((await crossOriginReconcile.json()).data.id).toBe(smsOriginReconcileJob.id);
     // The durable receipt-reconcile replay retains the source-action fence.
     expect((await request(receiptReconcilerA, "/reconcile", "POST", smsOriginInput)).status).toBe(403);
+    expect((await request(receiptReconcilerA, `/jobs/${smsOriginReconcileJob.id}`)).status).toBe(403);
+    expect((await request(testSenderA, `/jobs/${smsOriginReconcileJob.id}`)).status).toBe(200);
 
     // Model the narrow race after the preliminary replay lookup: the durable
     // claim below returns an already-completed sms.test-origin operation. The
@@ -720,5 +811,38 @@ describe("sms operations routes with PostgreSQL", () => {
       job: { id: job.id },
     });
     await expect(store.jobs.get({ tenantId: tenantA, id: job.id })).resolves.toMatchObject({ state: "succeeded" });
+  });
+
+  it("validates the host Better Auth snapshot before committing a policy write", async () => {
+    const current = await store.policy.get();
+    await expect(operationsRoute({ policy }, adminA, "/verification", undefined, {}, {})).resolves.toMatchObject({
+      betterAuth: { adapterStatus: "not_configured", loginTemplateKey: null, passwordResetTemplateKey: null },
+    });
+    await expect(operationsRoute({
+      policy,
+      betterAuth: {
+        get: async () => ({
+          adapterStatus: "enabled",
+          loginTemplateKey: null,
+          passwordResetTemplateKey: null,
+        } as never),
+      },
+    }, adminA, "/verification", {
+      version: current.version,
+      idempotencyKey: `verification:invalid-host-snapshot:${randomUUID()}`,
+      otpLength: current.otpLength,
+      otpTtlSeconds: current.otpTtlSeconds,
+      otpMaxAttempts: current.otpMaxAttempts,
+      proofTtlSeconds: current.proofTtlSeconds,
+      phoneMinIntervalSeconds: current.phoneMinIntervalSeconds,
+      phoneHourlyLimit: current.phoneHourlyLimit,
+      phoneDailyLimit: current.phoneDailyLimit,
+      ipWindowSeconds: current.ipWindowSeconds,
+      ipWindowLimit: current.ipWindowLimit,
+      systemDailyBudget: current.systemDailyBudget,
+      circuitOpen: current.circuitOpen,
+      ...(current.circuitReason === undefined ? {} : { circuitReason: current.circuitReason }),
+    }, {}, {})).rejects.toBeDefined();
+    await expect(store.policy.get()).resolves.toMatchObject({ version: current.version });
   });
 });

@@ -24,6 +24,8 @@ export type ReceiptIngestInput = Readonly<{
   token: string;
   body: string | Uint8Array;
   deadlineAt: Date;
+  /** Handler-owned cooperative cancellation for body/ingest deadline expiry. */
+  signal?: AbortSignal;
 }>;
 
 export type ReceiptIngestResult = Readonly<{ acknowledgement: typeof acknowledgement }>;
@@ -46,6 +48,12 @@ function receiptDedupeKey(receipt: AliyunReceipt): string {
 
 function deadlineReached(clock: Clock, deadlineAt: Date, safetyMarginMs: number): boolean {
   return !Number.isFinite(deadlineAt.getTime()) || deadlineAt.getTime() - clock.now().getTime() < safetyMarginMs;
+}
+
+function assertActive(input: ReceiptIngestInput, clock: Clock, safetyMarginMs: number): void {
+  if (input.signal?.aborted === true || deadlineReached(clock, input.deadlineAt, safetyMarginMs)) {
+    throw new SmsKitError("STORAGE_FAILURE", "receipt callback deadline is too close", true);
+  }
 }
 
 /** Observability must never turn an already-durable provider acknowledgement into a retry. */
@@ -71,7 +79,9 @@ export class ReceiptService {
   }
 
   async ingest(input: ReceiptIngestInput): Promise<ReceiptIngestResult> {
+    assertActive(input, this.dependencies.clock, this.safetyMarginMs);
     const config = await this.dependencies.store.config.get();
+    assertActive(input, this.dependencies.clock, this.safetyMarginMs);
     if (config.status === "unconfigured" || !config.enabled) {
       throw new SmsKitError("PERMISSION_DENIED", "receipt callback is not enabled");
     }
@@ -79,26 +89,26 @@ export class ReceiptService {
     try {
       expected = await this.dependencies.secrets.resolve(config.receiptCallbackTokenRef);
     } catch {
+      assertActive(input, this.dependencies.clock, this.safetyMarginMs);
       throw new SmsKitError("SECRET_UNRESOLVABLE", "receipt callback token cannot be resolved");
     }
+    assertActive(input, this.dependencies.clock, this.safetyMarginMs);
     const suppliedToken = fixedToken(input.token);
     const expectedToken = fixedToken(expected);
     const equal = timingSafeEqual(suppliedToken.bytes, expectedToken.bytes);
     if (!expectedToken.valid) throw new SmsKitError("CONFIG_INVALID", "receipt callback token configuration is invalid");
     if (!suppliedToken.valid || !equal) throw new SmsKitError("PERMISSION_DENIED", "receipt callback token is invalid");
 
-    if (deadlineReached(this.dependencies.clock, input.deadlineAt, this.safetyMarginMs)) {
-      throw new SmsKitError("STORAGE_FAILURE", "receipt callback deadline is too close", true);
-    }
+    assertActive(input, this.dependencies.clock, this.safetyMarginMs);
     const reports = parseAliyunReceiptBatch(input.body);
-    if (deadlineReached(this.dependencies.clock, input.deadlineAt, this.safetyMarginMs)) {
-      throw new SmsKitError("STORAGE_FAILURE", "receipt callback deadline is too close", true);
-    }
+    assertActive(input, this.dependencies.clock, this.safetyMarginMs);
 
     const outcomes = await this.dependencies.store.transaction(async (tx) => {
       const result = { unmatched: 0, terminalConflicts: 0 };
       for (const report of reports) {
+        assertActive(input, this.dependencies.clock, this.safetyMarginMs);
         const message = await this.dependencies.store.messages.lockByReceiptReference({ outId: report.outId, bizId: report.bizId }, tx);
+        assertActive(input, this.dependencies.clock, this.safetyMarginMs);
         const recorded = await this.dependencies.store.receipts.record({
           tenantId: message?.tenantId ?? unmatchedTenant,
           ...(message === undefined ? {} : { messageId: message.id }),
@@ -111,6 +121,7 @@ export class ReceiptService {
           source: "callback",
           redactedPayload: { redactedFields: ["phone"], reportCount: 1 },
         }, tx);
+        assertActive(input, this.dependencies.clock, this.safetyMarginMs);
         if (message === undefined) {
           if (recorded.created) result.unmatched += 1;
           continue;
@@ -123,6 +134,7 @@ export class ReceiptService {
             status: report.deliveryStatus,
             occurredAt: report.occurredAt,
           }, tx);
+          assertActive(input, this.dependencies.clock, this.safetyMarginMs);
         } catch (error) {
           if (error instanceof SmsKitError && error.code === "CONCURRENT_MODIFICATION") {
             result.terminalConflicts += 1;
@@ -131,8 +143,13 @@ export class ReceiptService {
           throw error;
         }
       }
+      assertActive(input, this.dependencies.clock, this.safetyMarginMs);
       return result;
-    });
+    }, input.signal === undefined ? {} : { signal: input.signal });
+    // A deadline can win after PostgreSQL has already accepted COMMIT. Treat
+    // that as a retryable late completion; receiptDedupeKey makes the provider
+    // retry a no-op instead of duplicating the durable state transition.
+    assertActive(input, this.dependencies.clock, this.safetyMarginMs);
 
     if (outcomes.unmatched > 0) {
       observe(this.dependencies.events, { name: "sms.receipt.unmatched", level: "warn", metadata: { redactedFields: ["phone"], counts: [{ name: "receipt", value: outcomes.unmatched }] } });

@@ -32,6 +32,18 @@ export class PgAttemptRepository implements AttemptRepository {
     return asBigInt <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(count) : count;
   }
 
+  async listForMessage(input: Readonly<{ tenantId: Attempt["tenantId"]; messageId: Attempt["messageId"] }>, tx?: SmsTransaction): Promise<readonly Attempt[]> {
+    const { rows } = await db(this.pool, tx).query<AttemptRow>(
+      `select ${fields}
+         from sms_kit.send_attempt a
+         join sms_kit.send_message m on m.id = a.message_id
+        where m.tenant_id = $1 and m.id = $2
+        order by a.attempt_no, a.occurred_at, a.id`,
+      [input.tenantId, input.messageId],
+    );
+    return rows.map(attempt);
+  }
+
   async createStarted(input: Readonly<{ tenantId: Attempt["tenantId"]; messageId: Attempt["messageId"]; dispatchMode: "direct" | "queued"; leaseToken?: string; dispatchMarkedAt: Date; minimumLeaseUntil?: Date }>, tx?: SmsTransaction): Promise<Attempt> {
     const client = db(this.pool, tx);
     if ((input.dispatchMode === "queued") !== (input.leaseToken !== undefined)) throw new SmsKitError("CONCURRENT_MODIFICATION", "dispatch mode requires its matching lease token");

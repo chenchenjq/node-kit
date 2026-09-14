@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 
 import { SmsKitError } from "../core/errors.js";
-import type { SmsTransaction } from "../ports/store.js";
+import type { SmsTransaction, SmsTransactionOptions } from "../ports/store.js";
 import { PgAttemptRepository } from "./repositories/attempt-repository.js";
 import { PgAdminOperationRepository } from "./repositories/admin-operation-repository.js";
 import { PgAuditRepository } from "./repositories/audit-repository.js";
@@ -52,12 +52,28 @@ export class PgSmsStore {
     this.health = new PgHealthRepository(pool);
   }
 
-  async transaction<T>(work: (tx: SmsTransaction) => Promise<T>): Promise<T> {
+  async transaction<T>(work: (tx: SmsTransaction) => Promise<T>, options?: SmsTransactionOptions): Promise<T> {
+    const assertActive = (): void => {
+      if (options?.signal?.aborted === true) {
+        throw new SmsKitError("STORAGE_FAILURE", "PostgreSQL transaction was aborted", true);
+      }
+    };
+    assertActive();
     const client = await this.pool.connect();
     try {
+      assertActive();
       await client.query("begin");
+      assertActive();
       const result = await work(asSmsTransaction(client));
-      await client.query("commit");
+      // This is the final reversible boundary. No abort callback can run
+      // between this synchronous check and handing COMMIT to node-postgres.
+      assertActive();
+      const commit = client.query("commit");
+      // COMMIT cannot be reliably cancelled once dispatched. Do not race it
+      // with the signal or issue a concurrent ROLLBACK on this client: wait for
+      // the database outcome before releasing the connection. Receipt callers
+      // absorb a timeout after this point through their semantic dedupe key.
+      await commit;
       return result;
     } catch (error) {
       try { await client.query("rollback"); } catch { /* Preserve the original failure. */ }

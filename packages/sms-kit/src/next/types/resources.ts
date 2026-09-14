@@ -4,14 +4,36 @@ import { idempotencyKeySchema, identifierSchema, isoDateTimeSchema, pageSchema, 
 
 export const resourceChangeTypeSchema = z.enum(["new", "changed", "unavailable", "unchanged"]);
 export const resourceTypeSchema = z.enum(["signature", "template"]);
-export const resourceCandidateDtoSchema = z.strictObject({
+const resourceCandidateBaseShape = {
   id: identifierSchema,
-  resourceType: resourceTypeSchema,
   externalKey: z.string().trim().min(1),
   changeType: resourceChangeTypeSchema,
   checksum: z.string().trim().min(1),
   expiresAt: isoDateTimeSchema,
-});
+};
+export const resourceCandidateDtoSchema = z.discriminatedUnion("resourceType", [
+  z.strictObject({
+    ...resourceCandidateBaseShape,
+    resourceType: z.literal("signature"),
+    snapshot: z.strictObject({
+      kind: z.literal("signature"),
+      externalName: z.string().trim().min(1),
+      externalStatus: z.string().trim().min(1),
+      externalType: z.string().trim().min(1),
+    }),
+  }),
+  z.strictObject({
+    ...resourceCandidateBaseShape,
+    resourceType: z.literal("template"),
+    snapshot: z.strictObject({
+      kind: z.literal("template"),
+      externalName: z.string().trim().min(1),
+      externalStatus: z.string().trim().min(1),
+      templateType: z.enum(["verification", "notification"]),
+      variableNames: z.array(z.string().trim().min(1)),
+    }),
+  }),
+]);
 
 export const resourceSyncPreviewDtoSchema = z.strictObject({
   id: identifierSchema,
@@ -24,12 +46,6 @@ export const resourceSyncPreviewInputSchema = z.strictObject({
   version: versionSchema,
   idempotencyKey: idempotencyKeySchema,
   pageSize: z.number().int().min(1).max(100).optional(),
-  templates: z.array(z.strictObject({
-    externalKey: z.string().trim().min(1),
-    signatureExternalKey: z.string().trim().min(1),
-    templateKey: z.string().trim().min(1),
-    purpose: z.string().trim().min(1),
-  })).optional(),
 });
 
 export const resourceSyncCommitInputSchema = z.strictObject({
