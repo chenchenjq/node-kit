@@ -71,14 +71,32 @@ describe("sms-kit PostgreSQL migration", () => {
       `select indexname from pg_indexes
         where schemaname = 'sms_kit' and indexname = 'signature_active_name_type_key'`,
     )).resolves.toMatchObject({ rows: [{ indexname: "signature_active_name_type_key" }] });
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(8);
+    await expect(pool.query<{ column_name: string; is_nullable: string }>(
+      `select column_name, is_nullable
+         from information_schema.columns
+        where table_schema = 'sms_kit' and table_name = 'send_job' and column_name = 'origin_action'`,
+    )).resolves.toMatchObject({ rows: [{ column_name: "origin_action", is_nullable: "YES" }] });
+    await expect(pool.query<{ conname: string }>(
+      `select conname from pg_constraint
+        where connamespace = 'sms_kit'::regnamespace and conname = 'send_job_origin_action_check'`,
+    )).resolves.toMatchObject({ rows: [{ conname: "send_job_origin_action_check" }] });
+    await expect(pool.query(
+      `insert into sms_kit.send_job (
+         id, tenant_id, dedupe_key, job_type, state, available_at,
+         attempt_count, max_attempts, origin_action, payload, created_at, updated_at
+       ) values (
+         '00000000-0000-4000-8000-000000000099', 'origin-check', 'invalid-origin-pair', 'send', 'pending', now(),
+         0, 1, 'receipt.reconcile', '{"kind":"none"}'::jsonb, now(), now()
+       )`,
+    )).rejects.toMatchObject({ code: "23514" });
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(9);
   }, 60_000);
 
   it("upgrades the fixed previous-version fixture", async () => {
     const { pool } = postgres;
     await pool.query(await readFile(previousV2SchemaFixture, "utf8"));
     await migrateSmsKit(pool);
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(8);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(9);
     await migrateSmsKit(pool);
     await expect(allRequiredConstraintsExist(pool)).resolves.toBe(true);
   }, 60_000);
@@ -90,7 +108,7 @@ describe("sms-kit PostgreSQL migration", () => {
 
     await migrateSmsKit(pool);
 
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(8);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(9);
     await expect(pool.query<{ state: string; lease_token: string | null; last_error_code: string | null }>("select state, lease_token, last_error_code from sms_kit.send_job where dedupe_key = 'v1-leased'"))
       .resolves.toMatchObject({ rows: [{ state: "dead", lease_token: null, last_error_code: "ACCEPTANCE_UNKNOWN" }] });
     await expect(pool.query<{ acceptance_status: string; delivery_status: string }>("select acceptance_status, delivery_status from sms_kit.send_message where id = '00000000-0000-4000-8000-000000000012'"))

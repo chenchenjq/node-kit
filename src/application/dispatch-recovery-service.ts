@@ -51,7 +51,15 @@ export class DispatchRecoveryService {
           occurredAt,
         }, tx);
         await this.dependencies.store.messages.clearRenderParams({ tenantId: attempt.tenantId, id: message.id }, tx);
-        await this.dependencies.store.jobs.ensureReconcile({ tenantId: attempt.tenantId, messageId: message.id, availableAt: occurredAt }, tx);
+        const originatingJob = attempt.leaseToken === undefined
+          ? undefined
+          : expiredJobs.find((job) => job.tenantId === attempt.tenantId && job.messageId === attempt.messageId && job.leaseToken === attempt.leaseToken);
+        await this.dependencies.store.jobs.ensureReconcile({
+          tenantId: attempt.tenantId,
+          messageId: message.id,
+          availableAt: occurredAt,
+          ...(originatingJob?.originAction === undefined ? {} : { originAction: originatingJob.originAction }),
+        }, tx);
         if (attempt.leaseToken !== undefined) {
           await this.dependencies.store.jobs.trySucceedByLeaseToken({
             tenantId: attempt.tenantId,

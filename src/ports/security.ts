@@ -25,6 +25,15 @@ export interface MessagePayloadProtector {
   ): Promise<Readonly<Record<string, string>>>;
 }
 
+/**
+ * Computes the stable keyed fingerprint stored with a protected phone.  This
+ * deliberately stays separate from PhoneNumberProtector so read-only lookup
+ * callers do not need encryption or decryption capability.
+ */
+export interface PhoneLookupHasher {
+  lookupHash(phone: MainlandPhone): Promise<string>;
+}
+
 export interface PhoneNumberProtector {
   protect(phone: MainlandPhone, context: ProtectionContext): Promise<{
     ciphertext: string;

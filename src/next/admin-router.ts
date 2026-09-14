@@ -35,6 +35,7 @@ import {
 } from "./types/index.js";
 import { failure, HttpError, parseJsonBody, success } from "./http.js";
 import { configurationRoute, type SmsConfigRouteServices } from "./handlers/config.js";
+import { operationJobAuthorization, operationsRoute, type SmsOperationsRouteServices } from "./handlers/operations.js";
 import { resourceRoute, type SmsResourceRouteServices } from "./handlers/resources.js";
 
 export type SmsAdminRequestContext<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
@@ -96,6 +97,8 @@ export type SmsAdminDeferredAuthorization = Readonly<{
 export type SmsAdminServices<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
   /** Concrete Task 3 services; transport validation and response DTO checks remain router-owned. */
   task3?: SmsConfigRouteServices<Actor> & SmsResourceRouteServices<Actor>;
+  /** Concrete Task 4 operational services, including tenant-scoped job-origin resolution. */
+  task4?: SmsOperationsRouteServices<Actor>;
   resolveJobAuthorization?: (input: SmsAdminJobAuthorizationInput<Actor>) => Promise<SmsAdminDeferredAuthorization | undefined>;
   dispatch?: (input: SmsAdminDispatchInput<Actor>) => Promise<SmsAdminDispatchResult>;
 }>;
@@ -136,15 +139,32 @@ const paginationQuerySchema = z.strictObject({
 const messageQueryTransportSchema = z.strictObject({
   page: queryInteger(Number.MAX_SAFE_INTEGER).default(1),
   pageSize: queryInteger(100).default(20),
+  from: isoDateTimeSchema.optional(),
+  to: isoDateTimeSchema.optional(),
   acceptanceStatus: acceptanceStatusSchema.optional(),
   deliveryStatus: deliveryStatusSchema.optional(),
-  templateKey: z.string().trim().min(1).optional(),
+  templateKey: z.string().trim().min(1).max(256).optional(),
+  purpose: z.string().trim().min(1).max(256).optional(),
   phone: z.string().trim().min(1).max(64).optional(),
+}).superRefine((value, ctx) => {
+  if (!Number.isSafeInteger((value.page - 1) * value.pageSize)) {
+    ctx.addIssue({ code: "custom", path: ["page"], message: "page offset is too large" });
+  }
+  if ((value.from === undefined) !== (value.to === undefined)) {
+    ctx.addIssue({ code: "custom", path: [value.from === undefined ? "from" : "to"], message: "from and to must be supplied together" });
+  }
 });
 const statsQueryTransportSchema = z.strictObject({
   from: isoDateTimeSchema.optional(),
   to: isoDateTimeSchema.optional(),
-  templateKey: z.string().trim().min(1).optional(),
+  templateKey: z.string().trim().min(1).max(256).optional(),
+  purpose: z.string().trim().min(1).max(256).optional(),
+  acceptanceStatus: acceptanceStatusSchema.optional(),
+  deliveryStatus: deliveryStatusSchema.optional(),
+}).superRefine((value, ctx) => {
+  if ((value.from === undefined) !== (value.to === undefined)) {
+    ctx.addIssue({ code: "custom", path: [value.from === undefined ? "from" : "to"], message: "from and to must be supplied together" });
+  }
 });
 
 const permission = (action: SmsAdminPermission): RouteAuthorization => ({ kind: "permission", action });
@@ -315,10 +335,13 @@ export function createAdminRouter<Actor extends AuthorizationActor = Authorizati
         route: { method: route.method, path: route.path },
       };
       if (route.authorization.kind === "deferred") {
-        if (options.services.resolveJobAuthorization === undefined) {
+        const resolveAuthorization = options.services.task4?.store === undefined
+          ? options.services.resolveJobAuthorization
+          : (input: SmsAdminJobAuthorizationInput<Actor>) => operationJobAuthorization(options.services.task4!, input);
+        if (resolveAuthorization === undefined) {
           throw new HttpError(500, "request failed", "STORAGE_FAILURE");
         }
-        const resolvedAuthorization = await options.services.resolveJobAuthorization({ tenantId: actor.tenantId, jobId: params.id! });
+        const resolvedAuthorization = await resolveAuthorization({ tenantId: actor.tenantId, jobId: params.id! });
         if (resolvedAuthorization === undefined) throw new HttpError(404, "job not found");
         const authorization = deferredAuthorization(resolvedAuthorization, route.authorization.allowedActions);
         await options.authorizer.assert(actor, authorization.requiredPermission);
@@ -333,6 +356,10 @@ export function createAdminRouter<Actor extends AuthorizationActor = Authorizati
           ? await resourceRoute(options.services.task3, actor, route.path, body, params, query)
           : data;
         if (task3Data !== undefined) return success(responseData(route.responseSchema, task3Data), requestId);
+      }
+      if (options.services.task4 !== undefined) {
+        const data = await operationsRoute(options.services.task4, actor, route.path, body, params, query);
+        if (data !== undefined) return success(responseData(route.responseSchema, data), requestId);
       }
 
       throw new HttpError(404, "route not found");

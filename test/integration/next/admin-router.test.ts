@@ -278,6 +278,9 @@ describe("sms admin router", () => {
       resolveTrustedIp: () => "203.0.113.9",
       authorizer: { assert: (_actor, action) => { checked.push(action); }, assertAny: () => undefined },
       services: {
+        // A partial Task 4 host must retain the legacy deferred resolver until
+        // it supplies the tenant-scoped operation store.
+        task4: {} as never,
         resolveJobAuthorization: async ({ tenantId, jobId }) => {
           seen.push({ tenantId, params: { id: jobId } });
           return { requiredPermission: "receipt.reconcile" };

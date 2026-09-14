@@ -119,6 +119,8 @@ describe("SendService administrative test send with PostgreSQL", () => {
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
     await expect(pool.query("select count(*)::integer as count from sms_kit.send_job where tenant_id = $1", [actorA.tenantId]))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
+    await expect(pool.query("select origin_action from sms_kit.send_job where tenant_id = $1", [actorA.tenantId]))
+      .resolves.toMatchObject({ rows: [{ origin_action: "sms.test" }] });
     await expect(pool.query("select count(*)::integer as count from sms_kit.audit_event where tenant_id = $1 and action = 'sms.test.send'", [actorA.tenantId]))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
     await expect(pool.query("select count(*)::integer as count from sms_kit.admin_operation where tenant_id = $1 and operation = 'sms.test.send'", [actorA.tenantId]))

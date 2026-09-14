@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { idempotencyKeySchema, identifierSchema, isoDateTimeSchema, pageSchema, safeCountSchema, smsErrorCodeSchema, versionSchema } from "./common.js";
+import { idempotencyKeySchema, identifierSchema, isoDateTimeSchema, pageSchema, positiveVersionSchema, safeCountSchema, smsErrorCodeSchema } from "./common.js";
 
 export const acceptanceStatusSchema = z.enum(["pending", "accepted", "rejected", "unknown"]);
 export const deliveryStatusSchema = z.enum(["not_applicable", "waiting", "delivered", "failed", "unknown_final"]);
@@ -24,6 +24,8 @@ export const messageDtoSchema = z.strictObject({
 
 export const messageDetailDtoSchema = z.strictObject({
   ...messageDtoSchema.shape,
+  /** The message-local optimistic version used by manual reconciliation. */
+  version: positiveVersionSchema,
   acceptedAt: isoDateTimeSchema.optional(),
   deliveredAt: isoDateTimeSchema.optional(),
   finalizedAt: isoDateTimeSchema.optional(),
@@ -33,10 +35,17 @@ export const messagePageDtoSchema = pageSchema(messageDtoSchema);
 export const messageQuerySchema = z.strictObject({
   page: z.number().int().positive().default(1),
   pageSize: z.number().int().min(1).max(100).default(20),
+  from: isoDateTimeSchema.optional(),
+  to: isoDateTimeSchema.optional(),
   acceptanceStatus: acceptanceStatusSchema.optional(),
   deliveryStatus: deliveryStatusSchema.optional(),
-  templateKey: z.string().trim().min(1).optional(),
+  templateKey: z.string().trim().min(1).max(256).optional(),
+  purpose: z.string().trim().min(1).max(256).optional(),
   phone: z.string().trim().min(1).max(64).optional(),
+}).superRefine((value, ctx) => {
+  if ((value.from === undefined) !== (value.to === undefined)) {
+    ctx.addIssue({ code: "custom", path: [value.from === undefined ? "from" : "to"], message: "from and to must be supplied together" });
+  }
 });
 
 export const receiptHealthDtoSchema = z.strictObject({
@@ -52,10 +61,14 @@ export const receiptHealthDtoSchema = z.strictObject({
 });
 
 export const reconcileInputSchema = z.strictObject({
-  version: versionSchema,
+  version: positiveVersionSchema,
   idempotencyKey: idempotencyKeySchema,
   messageId: identifierSchema.optional(),
-  providerBizId: z.string().trim().min(1).optional(),
+  providerBizId: z.string().trim().min(1).max(128).optional(),
+}).superRefine((value, ctx) => {
+  if (value.messageId === undefined && value.providerBizId === undefined) {
+    ctx.addIssue({ code: "custom", path: [], message: "messageId or providerBizId is required" });
+  }
 });
 
 export const jobStateSchema = z.enum(["pending", "leased", "succeeded", "failed", "dead"]);
@@ -88,7 +101,14 @@ export const smsStatsDtoSchema = z.strictObject({
 export const statsQuerySchema = z.strictObject({
   from: isoDateTimeSchema.optional(),
   to: isoDateTimeSchema.optional(),
-  templateKey: z.string().trim().min(1).optional(),
+  templateKey: z.string().trim().min(1).max(256).optional(),
+  purpose: z.string().trim().min(1).max(256).optional(),
+  acceptanceStatus: acceptanceStatusSchema.optional(),
+  deliveryStatus: deliveryStatusSchema.optional(),
+}).superRefine((value, ctx) => {
+  if ((value.from === undefined) !== (value.to === undefined)) {
+    ctx.addIssue({ code: "custom", path: [value.from === undefined ? "from" : "to"], message: "from and to must be supplied together" });
+  }
 });
 
 export type AcceptanceStatus = z.infer<typeof acceptanceStatusSchema>;

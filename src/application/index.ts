@@ -2,7 +2,7 @@ export { canonicalChecksum } from "./checksum.js";
 export { ConfigService } from "./config-service.js";
 export type { ConfigServiceDependencies, PatchProviderConfigInput, TestConnectionInput } from "./config-service.js";
 export { PolicyService, validateVerificationPolicy } from "./policy-service.js";
-export type { PolicyServiceDependencies } from "./policy-service.js";
+export type { PatchVerificationPolicyInput, PolicyServiceDependencies } from "./policy-service.js";
 export { ResourceSyncService } from "./resource-sync-service.js";
 export type {
   ResourceSyncCommitInput,
@@ -37,6 +37,13 @@ export { ReceiptService } from "./receipt-service.js";
 export type { ReceiptIngestInput, ReceiptIngestResult, ReceiptServiceDependencies } from "./receipt-service.js";
 export { ReconcileService } from "./reconcile-service.js";
 export type { ReconcileRunInput, ReconcileServiceDependencies } from "./reconcile-service.js";
+export { ReconcileAdminService } from "./reconcile-admin-service.js";
+export type {
+  EnqueueReconciliationInput,
+  EnqueueReconciliationResult,
+  ReconcileAdminServiceDependencies,
+  ReconciliationJob,
+} from "./reconcile-admin-service.js";
 export { MaintenanceService } from "./maintenance-service.js";
 export type { ApplyRetentionInput, MaintenanceServiceDependencies, RollupDirtyDatesInput } from "./maintenance-service.js";
 export { HealthService } from "./health-service.js";

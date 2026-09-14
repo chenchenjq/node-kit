@@ -16,6 +16,22 @@ const fields = "a.id, m.tenant_id, a.message_id, a.attempt_no, a.status, a.dispa
 export class PgAttemptRepository implements AttemptRepository {
   constructor(private readonly pool: Pool) {}
 
+  async countForMessage(input: Readonly<{ tenantId: Attempt["tenantId"]; messageId: Attempt["messageId"] }>, tx?: SmsTransaction): Promise<number | string> {
+    const { rows } = await db(this.pool, tx).query<{ count: string }>(
+      `select count(*)::text as count
+         from sms_kit.send_attempt attempt
+         join sms_kit.send_message message on message.id = attempt.message_id
+        where message.tenant_id = $1 and message.id = $2`,
+      [input.tenantId, input.messageId],
+    );
+    const count = rows[0]?.count ?? "0";
+    if (!/^(?:0|[1-9][0-9]*)$/.test(count)) {
+      throw new SmsKitError("STORAGE_FAILURE", "attempt count is invalid", true);
+    }
+    const asBigInt = BigInt(count);
+    return asBigInt <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(count) : count;
+  }
+
   async createStarted(input: Readonly<{ tenantId: Attempt["tenantId"]; messageId: Attempt["messageId"]; dispatchMode: "direct" | "queued"; leaseToken?: string; dispatchMarkedAt: Date; minimumLeaseUntil?: Date }>, tx?: SmsTransaction): Promise<Attempt> {
     const client = db(this.pool, tx);
     if ((input.dispatchMode === "queued") !== (input.leaseToken !== undefined)) throw new SmsKitError("CONCURRENT_MODIFICATION", "dispatch mode requires its matching lease token");
