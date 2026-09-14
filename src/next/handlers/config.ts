@@ -8,6 +8,7 @@ import {
   connectionTestResultDtoSchema,
   messageDtoSchema,
   providerConfigDtoSchema,
+  secretRefDtoSchema,
   smsOverviewDtoSchema,
   type TestSendInput,
   type TestConnectionInput,
@@ -48,8 +49,12 @@ function secretReference(reference: string) {
   const last = safeParts.at(-1);
   // A single identifier segment is legal input but is itself sensitive.  The
   // DTO intentionally has no one-label form, so never echo it in a mask.
-  const maskedName = first === undefined || last === undefined || first === last ? "***" : `${first}_***_${last}`;
-  return { scheme, maskedName, configured: true };
+  const candidate = first === undefined || last === undefined || first === last ? "***" : `${first}_***_${last}`;
+  const projected = secretRefDtoSchema.safeParse({ scheme, maskedName: candidate, configured: true });
+  if (projected.success) return projected.data;
+  const fallback = secretRefDtoSchema.safeParse({ scheme, maskedName: "***", configured: true });
+  if (fallback.success) return fallback.data;
+  throw new SmsKitError("STORAGE_FAILURE", "stored secret reference is invalid");
 }
 
 /** Explicit allow-list projection: no raw secret reference may cross this function. */
@@ -97,7 +102,7 @@ export async function configurationRoute<Actor extends AuthorizationActor>(
     const snapshot = await requireService(services.health).getSnapshot({ tenantId: actor.tenantId });
     return smsOverviewDtoSchema.parse({
       status: snapshot.status,
-      providerStatus: snapshot.status === "unconfigured" ? "unconfigured" : snapshot.status === "disabled" ? "disabled" : snapshot.status === "ready" ? "ready" : "degraded",
+      providerStatus: snapshot.providerStatus,
       pendingJobs: snapshot.pendingJobs,
       acceptanceUnknown: snapshot.acceptanceUnknown,
       deliveryUnknown: snapshot.finalUnknown,

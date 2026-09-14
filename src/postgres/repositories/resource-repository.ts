@@ -575,10 +575,8 @@ export class PgResourceRepository implements ResourceRepository {
     if (!isCloudApproved(snapshot.externalStatus)) {
       throw new SmsKitError("TEMPLATE_UNAVAILABLE", "template is not cloud-approved");
     }
-    await lockResourceIdentities(db, {
-      templateExternalCodes: [snapshot.externalCode],
-      templateKeys: [input.templateKey],
-    });
+    const identityScope = await includePersistedSignatureIdentities(db, resourceLockScope([candidate]));
+    await lockResourceIdentities(db, identityScope);
     const owner = await db.query<SignatureRow>(
       `select ${signatureFields} from sms_kit.signature where external_key = $1 for share`,
       [input.signatureExternalKey],

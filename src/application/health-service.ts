@@ -1,11 +1,12 @@
 import type { SmsErrorCode } from "../core/errors.js";
 import type { TenantId } from "../core/types.js";
-import type { SmsStore } from "../ports/store.js";
+import type { ProviderConfig, SmsStore } from "../ports/store.js";
 import type { Clock } from "../ports/runtime.js";
 
 export type SmsHealthSnapshot = Readonly<{
   tenantId: TenantId;
   status: "ready" | "degraded" | "disabled" | "unconfigured";
+  providerStatus: ProviderConfig["status"];
   lastConnectionTestAt?: Date;
   lastReceiptAt?: Date;
   pendingJobs: number;
@@ -42,7 +43,8 @@ export class HealthService {
     if (budgetRemaining !== null && budgetRemaining <= Math.max(0, Math.floor(policy.systemDailyBudget! * 0.1))) warnings.push("BUDGET_EXCEEDED");
     if (status === "ready" && warnings.length > 0) status = "degraded";
     return {
-      tenantId: input.tenantId, status, ...(config.status === "unconfigured" || config.lastTestedAt === undefined ? {} : { lastConnectionTestAt: config.lastTestedAt }),
+      tenantId: input.tenantId, status, providerStatus: config.status,
+      ...(config.status === "unconfigured" || config.lastTestedAt === undefined ? {} : { lastConnectionTestAt: config.lastTestedAt }),
       ...(counts.lastReceiptAt === undefined ? {} : { lastReceiptAt: counts.lastReceiptAt }), pendingJobs: counts.pendingJobs,
       acceptanceUnknown: counts.acceptanceUnknown, finalUnknown: counts.finalUnknown, unmatchedReceipts: counts.unmatchedReceipts,
       systemBudgetRemaining: budgetRemaining,

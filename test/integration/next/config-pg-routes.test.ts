@@ -165,6 +165,121 @@ describe("configuration routes with PostgreSQL", () => {
     }
   });
 
+  it("does not reuse a successful connection test after credentials change through disable and enable", async () => {
+    const current = await service.get(tenantA);
+    const oldCredentials = {
+      provider: "aliyun" as const,
+      region: "cn-hangzhou",
+      accessKeyIdRef: "env://ALIYUN_ACCESS_KEY_ID_OLD",
+      accessKeySecretRef: "env://ALIYUN_ACCESS_KEY_SECRET_OLD",
+      receiptCallbackTokenRef: "env://SMS_CALLBACK_TOKEN_OLD",
+    };
+    const operation = randomUUID();
+    const normalized = await json(tenantA, "/config", "PATCH", {
+      ...oldCredentials,
+      version: current.version,
+      idempotencyKey: `config:readiness:${operation}:normalize`,
+      enabled: false,
+    });
+    expect(normalized.status).toBe(200);
+    const normalizedConfig = await service.get(tenantA);
+    if (normalizedConfig.status === "unconfigured") throw new Error("provider configuration is missing");
+
+    const callsBeforeTest = connectionTests;
+    const tested = await json(tenantA, "/config/test-connection", "POST", {
+      version: normalizedConfig.version,
+      idempotencyKey: `config:readiness:${operation}:test-old`,
+    });
+    expect(tested.status).toBe(200);
+    const testedConfig = await service.get(tenantA);
+    if (testedConfig.status === "unconfigured") throw new Error("provider configuration is missing");
+
+    const enabledOld = await json(tenantA, "/config", "PATCH", {
+      ...oldCredentials,
+      version: testedConfig.version,
+      idempotencyKey: `config:readiness:${operation}:enable-old`,
+      enabled: true,
+    });
+    expect(enabledOld.status).toBe(200);
+    const enabledOldConfig = await service.get(tenantA);
+    if (enabledOldConfig.status === "unconfigured") throw new Error("provider configuration is missing");
+    expect(enabledOldConfig).toMatchObject({ status: "ready", enabled: true, lastTestStatus: "succeeded" });
+
+    const newCredentials = {
+      ...oldCredentials,
+      accessKeyIdRef: "env://ALIYUN_ACCESS_KEY_ID_NEW",
+      accessKeySecretRef: "env://ALIYUN_ACCESS_KEY_SECRET_NEW",
+    };
+    const changed = await json(tenantA, "/config", "PATCH", {
+      ...newCredentials,
+      version: enabledOldConfig.version,
+      idempotencyKey: `config:readiness:${operation}:change`,
+      enabled: true,
+    });
+    expect(changed.status).toBe(200);
+    const changedConfig = await service.get(tenantA);
+    if (changedConfig.status === "unconfigured") throw new Error("provider configuration is missing");
+    expect(changedConfig).toMatchObject({ status: "untested", enabled: false, lastTestStatus: "never" });
+    expect(changedConfig.lastTestSummary).toBeUndefined();
+    expect(changedConfig.lastTestedAt).toBeUndefined();
+
+    const disabled = await json(tenantA, "/config", "PATCH", {
+      ...newCredentials,
+      version: changedConfig.version,
+      idempotencyKey: `config:readiness:${operation}:disable-new`,
+      enabled: false,
+    });
+    expect(disabled.status).toBe(200);
+    const disabledConfig = await service.get(tenantA);
+    if (disabledConfig.status === "unconfigured") throw new Error("provider configuration is missing");
+    expect(disabledConfig).toMatchObject({ status: "disabled", enabled: false, lastTestStatus: "never" });
+
+    const reenabled = await json(tenantA, "/config", "PATCH", {
+      ...newCredentials,
+      version: disabledConfig.version,
+      idempotencyKey: `config:readiness:${operation}:enable-new`,
+      enabled: true,
+    });
+    expect(reenabled.status).toBe(200);
+    expect(await service.get(tenantA)).toMatchObject({
+      status: "untested",
+      enabled: true,
+      lastTestStatus: "never",
+    });
+    expect(connectionTests).toBe(callsBeforeTest + 1);
+  });
+
+  it("falls back to a fully redacted label for a persisted legal secret reference", async () => {
+    const current = await service.get(tenantA);
+    const operation = randomUUID();
+    const reference = "env://ALIYUN_SECRET_1";
+    const updated = await json(tenantA, "/config", "PATCH", {
+      version: current.version,
+      idempotencyKey: `config:safe-reference:${operation}`,
+      provider: "aliyun",
+      region: "cn-hangzhou",
+      accessKeyIdRef: "env://ALIYUN_ACCESS_KEY_ID",
+      accessKeySecretRef: reference,
+      receiptCallbackTokenRef: "env://SMS_CALLBACK_TOKEN",
+      enabled: false,
+    });
+
+    expect(updated.status).toBe(200);
+    const updatedBody = await updated.json();
+    expect(updatedBody).toMatchObject({
+      data: { accessKeySecretRef: { scheme: "env", maskedName: "***", configured: true } },
+    });
+    expect(JSON.stringify(updatedBody)).not.toContain(reference);
+
+    const read = await json(tenantA, "/config", "GET");
+    expect(read.status).toBe(200);
+    const readBody = await read.json();
+    expect(readBody).toMatchObject({
+      data: { accessKeySecretRef: { scheme: "env", maskedName: "***", configured: true } },
+    });
+    expect(JSON.stringify(readBody)).not.toContain(reference);
+  });
+
   it("times out an unresponsive connection probe, replays its safe failure, and releases the config fence", async () => {
     const current = await service.get(tenantA);
     if (current.status === "unconfigured") throw new Error("provider configuration is missing");

@@ -80,6 +80,9 @@ export class PgConfigRepository implements ConfigRepository {
             when status = 'disabled' then 'untested'
             else status
           end,
+          last_test_status = case when $8 then 'never' else last_test_status end,
+          last_test_summary = case when $8 then null else last_test_summary end,
+          last_tested_at = case when $8 then null else last_tested_at end,
           version = version + 1, updated_at = now()
         where id = 1 and version = $7
         returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,

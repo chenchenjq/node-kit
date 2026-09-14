@@ -33,7 +33,7 @@ describe("HealthService", () => {
     });
 
     await expect(health.getSnapshot({ tenantId })).resolves.toEqual({
-      tenantId, status: "ready", lastConnectionTestAt: new Date("2026-09-14T00:00:00.000Z"), lastReceiptAt: new Date("2026-09-14T00:00:00.000Z"),
+      tenantId, status: "ready", providerStatus: "ready", lastConnectionTestAt: new Date("2026-09-14T00:00:00.000Z"), lastReceiptAt: new Date("2026-09-14T00:00:00.000Z"),
       pendingJobs: 2, acceptanceUnknown: 1, finalUnknown: 3, unmatchedReceipts: 4, systemBudgetRemaining: 10, circuitOpen: false, warnings: [],
     });
   });
