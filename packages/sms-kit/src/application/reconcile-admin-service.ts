@@ -181,12 +181,13 @@ export class ReconcileAdminService<Actor extends AuthorizationActor = Authorizat
   constructor(private readonly dependencies: ReconcileAdminServiceDependencies<Actor>) {}
 
   /**
-   * A reconciliation dedupe key can be established by a worker or a distinct
-   * administrator action. Never let a receipt-only caller learn or replay a
-   * job created under a different authority.
+   * A system/ordinary-message job has no originating admin authority, so a
+   * tenant-scoped receipt reconciliation may safely reuse it. A job inherited
+   * from an admin test send retains that stronger source permission: never let
+   * a receipt-only caller learn or replay it.
    */
   private async authorizeReturnedJob(actor: Actor, job: ReconciliationJob): Promise<void> {
-    if (job.originAction === "receipt.reconcile") return;
+    if (job.originAction === undefined || job.originAction === "receipt.reconcile") return;
     if (job.originAction === "sms.test") {
       await this.dependencies.authorizer.assert(actor, "sms.test");
       return;

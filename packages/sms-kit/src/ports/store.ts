@@ -511,6 +511,7 @@ export interface ReceiptRepository {
   }>, tx?: SmsTransaction): Promise<{ receipt: DeliveryReceipt; created: boolean }>;
 }
 
+/** Admin authority inherited by a job; absence means a system/ordinary-message origin with no direct admin read permission. */
 export type JobOriginAction = "sms.test" | "receipt.reconcile";
 
 export type Job = Readonly<{
@@ -552,7 +553,7 @@ export interface JobRepository {
   trySucceedByLeaseToken(input: Readonly<{ tenantId: TenantId; messageId: MessageId; leaseToken: string }>, tx?: SmsTransaction): Promise<boolean>;
   tryReschedule(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<boolean>;
   tryFail(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; errorCode: string; terminal: boolean }>, tx?: SmsTransaction): Promise<boolean>;
-  /** Creates at most one reconciliation job per message, even under concurrent recovery. */
+  /** Creates at most one reconciliation job per message; existing jobs are observed without taking an update lock. */
   ensureReconcile(input: Readonly<{
     tenantId: TenantId;
     messageId: MessageId;

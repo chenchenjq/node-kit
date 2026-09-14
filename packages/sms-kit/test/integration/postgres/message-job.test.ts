@@ -7,6 +7,7 @@ import type { TenantId } from "../../../src/core/types.js";
 import { SmsKitError } from "../../../src/core/errors.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
+import { asSmsTransaction } from "../../../src/postgres/transaction.js";
 import { startPostgres } from "./helpers.js";
 
 const tenantA = "tenant-a" as TenantId;
@@ -145,6 +146,78 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
 
     await expect(createMessage(conflicting)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" } satisfies Partial<SmsKitError>);
     expect(await store.messages.get({ tenantId: tenantA, id: conflicting.id })).toBeUndefined();
+  });
+
+  it("returns the concurrent first reconciliation job without changing its originating permission", async () => {
+    const created = await createMessage(messageFixture());
+    const firstClient = await pool.connect();
+    const secondClient = await pool.connect();
+    try {
+      await firstClient.query("begin");
+      await secondClient.query("begin");
+      const firstPid = (await firstClient.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      const secondPid = (await secondClient.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      const first = await store.jobs.ensureReconcile({
+        tenantId: tenantA,
+        messageId: created.message.id,
+        availableAt: new Date("2026-09-13T00:00:12.000Z"),
+        originAction: "sms.test",
+      }, asSmsTransaction(firstClient));
+      const secondPending = store.jobs.ensureReconcile({
+        tenantId: tenantA,
+        messageId: created.message.id,
+        availableAt: new Date("2026-09-13T00:00:13.000Z"),
+        originAction: "receipt.reconcile",
+      }, asSmsTransaction(secondClient));
+      void secondPending.catch(() => undefined);
+
+      let blockedByFirstCreator = false;
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const blocked = await pool.query<{ blocked: boolean }>(
+          "select $2::integer = any(pg_blocking_pids($1::integer)) as blocked",
+          [secondPid, firstPid],
+        );
+        if (blocked.rows[0]?.blocked === true) {
+          blockedByFirstCreator = true;
+          break;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blockedByFirstCreator).toBe(true);
+
+      await firstClient.query("commit");
+      const second = await secondPending;
+      await secondClient.query("commit");
+
+      expect(second).toMatchObject({ id: first.id, originAction: "sms.test" });
+      await expect(pool.query<{ count: string; origin_action: string | null }>(
+        `select count(*)::text as count, min(origin_action) as origin_action
+           from sms_kit.send_job
+          where tenant_id = $1 and job_type = 'reconcile' and dedupe_key = $2`,
+        [tenantA, `reconcile:${created.message.id}`],
+      )).resolves.toMatchObject({ rows: [{ count: "1", origin_action: "sms.test" }] });
+    } finally {
+      await firstClient.query("rollback").catch(() => undefined);
+      await secondClient.query("rollback").catch(() => undefined);
+      firstClient.release();
+      secondClient.release();
+    }
+  });
+
+  it("rejects an invalid reconciliation origin even when the deduplicated job already exists", async () => {
+    const created = await createMessage(messageFixture());
+    await store.jobs.ensureReconcile({
+      tenantId: tenantA,
+      messageId: created.message.id,
+      availableAt: new Date("2026-09-13T00:00:14.000Z"),
+    });
+
+    await expect(store.jobs.ensureReconcile({
+      tenantId: tenantA,
+      messageId: created.message.id,
+      availableAt: new Date("2026-09-13T00:00:15.000Z"),
+      originAction: "message.read",
+    } as never)).rejects.toMatchObject({ code: "CONFIG_INVALID" } satisfies Partial<SmsKitError>);
   });
 
   it("tenant-constrains receipt association and never discloses an unmatched receipt by dedupe", async () => {
