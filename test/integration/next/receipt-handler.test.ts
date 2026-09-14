@@ -150,6 +150,29 @@ describe("Aliyun receipt Route Handler", () => {
     expect(await response.json()).toEqual({ error: "callback temporarily unavailable", retryable: true });
   });
 
+  it("returns retryable 503 when synchronous ingest work consumes 800ms while the injected clock is fixed", async () => {
+    let monotonicElapsedMs = 0;
+    const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => monotonicElapsedMs);
+    try {
+      const receiptHandler = handler({
+        clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+        ingest: async () => {
+          // Model an 800ms synchronous block without making the test wait on
+          // real time or relying on the timer callback getting a turn.
+          monotonicElapsedMs += 800;
+          return { acknowledgement };
+        },
+      });
+
+      const response = await receiptHandler.callback(request("POST", receipt));
+
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "callback temporarily unavailable", retryable: true });
+    } finally {
+      performanceNow.mockRestore();
+    }
+  });
+
   it("prioritizes the deadline when a verifier advances the injected clock and then rejects", async () => {
     const startedAt = new Date("2026-09-13T00:00:00.000Z");
     let current = startedAt;
