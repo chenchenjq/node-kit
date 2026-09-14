@@ -33,6 +33,8 @@ import {
   verificationSettingsDtoSchema,
 } from "./types/index.js";
 import { failure, HttpError, parseJsonBody, success } from "./http.js";
+import { configurationRoute, type SmsConfigRouteServices } from "./handlers/config.js";
+import { resourceRoute, type SmsResourceRouteServices } from "./handlers/resources.js";
 
 export type SmsAdminRequestContext<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
   actor: Actor;
@@ -91,6 +93,8 @@ export type SmsAdminDeferredAuthorization = Readonly<{
  * The main dispatcher is not called until that originating action is allowed.
  */
 export type SmsAdminServices<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+  /** Concrete Task 3 services; transport validation and response DTO checks remain router-owned. */
+  task3?: SmsConfigRouteServices<Actor> & SmsResourceRouteServices<Actor>;
   resolveJobAuthorization?: (input: SmsAdminJobAuthorizationInput<Actor>) => Promise<SmsAdminDeferredAuthorization | undefined>;
   dispatch?: (input: SmsAdminDispatchInput<Actor>) => Promise<SmsAdminDispatchResult>;
 }>;
@@ -320,6 +324,13 @@ export function createAdminRouter<Actor extends AuthorizationActor = Authorizati
       if (options.services.dispatch !== undefined) {
         const result = dispatchResult(await options.services.dispatch(dispatchInput));
         return success(responseData(route.responseSchema, result.data), requestId);
+      }
+      if (options.services.task3 !== undefined) {
+        const data = await configurationRoute(options.services.task3, actor, route.path, body);
+        const task3Data = data === undefined
+          ? await resourceRoute(options.services.task3, actor, route.path, body, params, query)
+          : data;
+        if (task3Data !== undefined) return success(responseData(route.responseSchema, task3Data), requestId);
       }
 
       throw new HttpError(404, "route not found");
