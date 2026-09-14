@@ -103,6 +103,20 @@ describe("public Next admin DTO contracts", () => {
   });
 
   it.each([
+    ["AccessKey ID", "LTAI5tExampleAccessKey"],
+    ["AccessKey Secret", "example-access-key-secret"],
+    ["callback token", "callback-token-example"],
+    ["complete env reference", "env://ALIYUN_SECRET"],
+    ["env reference with a callback token", "env://CALLBACK_TOKEN?token=callback-token-example"],
+  ])("rejects injected secret reference scheme content: %s", (_label, scheme) => {
+    expect(() => secretRefDtoSchema.parse({
+      scheme,
+      maskedName: "ALIYUN_***_SECRET",
+      configured: true,
+    })).toThrow();
+  });
+
+  it.each([
     ["AccessKey ID after the marker", "***LTAI5tExampleAccessKey"],
     ["AccessKey ID before the marker", "LTAI5tExampleAccessKey***"],
     ["AccessKey ID after a delimiter", "***_LTAI5tExampleAccessKey"],
@@ -202,6 +216,18 @@ describe("public Next admin DTO contracts", () => {
 
     expect(updateProviderConfigSchema.parse(input)).toMatchObject(input);
     expect(() => updateProviderConfigSchema.parse({ ...input, accessKeySecretRef: "AKIA-raw-secret" })).toThrow();
+  });
+
+  it("keeps host-registered schemes available to configuration references", () => {
+    const input = {
+      version: 1,
+      idempotencyKey: "config:custom-scheme",
+      region: "cn-hangzhou",
+      accessKeyIdRef: "vault://sms/aliyun/access-key-id",
+      accessKeySecretRef: "vault://sms/aliyun/access-key-secret",
+    };
+
+    expect(updateProviderConfigSchema.parse(input)).toMatchObject(input);
   });
 
   it("requires a versioned write for a resource sync preview", () => {

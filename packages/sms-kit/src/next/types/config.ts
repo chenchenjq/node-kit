@@ -3,7 +3,7 @@ import { z } from "zod";
 import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeSchema, versionSchema } from "./common.js";
 
 export const secretRefDtoSchema = z.strictObject({
-  scheme: z.string().trim().min(1),
+  scheme: z.literal("env"),
   maskedName: z.string().trim().min(3).max(256)
     .regex(
       /^(?:\*{3}|[A-Z][A-Z0-9]{0,7}_\*{3}_[A-Z][A-Z0-9]{0,7})$/,
