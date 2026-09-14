@@ -40,10 +40,13 @@ describe("simulated authentication flows", () => {
 
     const first = await host.changePassword("user-1", proof, "pwd:42");
     const replay = await host.changePassword("user-1", proof, "pwd:42");
+    const laterProof = await host.issueAndVerifyPasswordChallenge();
+    const laterChange = await host.changePassword("user-1", laterProof, "pwd:43");
+    const originalReplay = await host.changePassword("user-1", proof, "pwd:42");
 
-    expect([first, replay]).toEqual([2, 2]);
-    expect(await host.passwordVersion("user-1")).toBe(2);
-    await expect(host.changePassword("user-1", proof, "pwd:43")).rejects.toMatchObject({ code: "PROOF_INVALID" });
+    expect([first, replay, laterChange, originalReplay]).toEqual([2, 2, 3, 2]);
+    expect(await host.passwordVersion("user-1")).toBe(3);
+    await expect(host.changePassword("user-1", proof, "pwd:44")).rejects.toMatchObject({ code: "PROOF_INVALID" });
   });
 
   it("binds generic step-up verification to its user and action", async () => {
