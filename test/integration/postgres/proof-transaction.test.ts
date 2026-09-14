@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Pool, PoolClient } from "pg";
 
 import { ProofService } from "../../../src/application/proof-service.js";
@@ -12,11 +12,29 @@ import { startPostgres } from "./helpers.js";
 const tenant = "tenant-proof-transaction" as TenantId;
 const now = new Date("2026-09-14T00:00:00.000Z");
 
+async function waitForBlockedConsumer(pool: Pool, blockingPid: number): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const { rows } = await pool.query<{ blocked: boolean }>(
+      `select exists (
+         select 1
+           from pg_stat_activity
+          where $1 = any(pg_blocking_pids(pid))
+            and query like '%sms_kit.otp_challenge%'
+       ) as blocked`,
+      [blockingPid],
+    );
+    if (rows[0]?.blocked === true) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("proof consumer did not block on the held challenge row");
+}
+
 describe("withPgProofTransaction", () => {
   let pool: Pool;
   let store: PgSmsStore;
   let proofService: ProofService;
   let stop: (() => Promise<void>) | undefined;
+  let currentTime = new Date(now);
   const hasher = new HmacHasher(Buffer.alloc(32, 14));
 
   beforeAll(async () => {
@@ -25,9 +43,13 @@ describe("withPgProofTransaction", () => {
     stop = postgres.stop;
     await migrateSmsKit(pool);
     store = new PgSmsStore(pool);
-    proofService = new ProofService({ store, hasher, clock: { now: () => new Date(now) } });
+    proofService = new ProofService({ store, hasher, clock: { now: () => new Date(currentTime) } });
     await pool.query("create table host_proof_operation (id text primary key, execution_count integer not null)");
   }, 120_000);
+
+  beforeEach(() => {
+    currentTime = new Date(now);
+  });
 
   afterAll(async () => stop?.());
 
@@ -132,5 +154,46 @@ describe("withPgProofTransaction", () => {
     expect(results.filter((result) => result.status === "rejected" && (result.reason as { code?: string }).code === "PROOF_INVALID")).toHaveLength(1);
     expect(executions).toBe(1);
     await expect(pool.query<{ count: string }>("select count(*)::text as count from host_proof_operation where id in ($1, $2)", ["password:45a", "password:45b"])).resolves.toMatchObject({ rows: [{ count: "1" }] });
+  });
+
+  it("rejects a proof that expires while its consumer waits for the challenge row lock", async () => {
+    const proof = await issueProof();
+    const proofHash = await hasher.hash(`${tenant}\u0000user-1\u0000password.change\u0000${proof}`);
+    const input = { tenantId: tenant, proof, subjectId: "user-1", action: "password.change", consumptionKey: "password:expires-while-waiting" };
+    const holder = await pool.connect();
+    let holderTransactionOpen = false;
+    let executeInvoked = false;
+
+    try {
+      await holder.query("begin");
+      holderTransactionOpen = true;
+      const holderPid = (await holder.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      await holder.query(
+        "select id from sms_kit.otp_challenge where tenant_id = $1 and proof_hash = $2 for update",
+        [tenant, proofHash],
+      );
+
+      const consumption = withPgProofTransaction(pool, proofService, input, {
+        execute: async () => {
+          executeInvoked = true;
+          return "executed";
+        },
+        replay: async () => "replayed",
+      });
+      await waitForBlockedConsumer(pool, holderPid);
+      currentTime = new Date(now.getTime() + 300_001);
+      await holder.query("rollback");
+      holderTransactionOpen = false;
+
+      await expect(consumption).rejects.toMatchObject({ code: "PROOF_INVALID" });
+      expect(executeInvoked).toBe(false);
+      await expect(pool.query(
+        "select consumed_at, consumed_by_key from sms_kit.otp_challenge where tenant_id = $1 and proof_hash = $2",
+        [tenant, proofHash],
+      )).resolves.toMatchObject({ rows: [{ consumed_at: null, consumed_by_key: null }] });
+    } finally {
+      if (holderTransactionOpen) await holder.query("rollback").catch(() => undefined);
+      holder.release();
+    }
   });
 });

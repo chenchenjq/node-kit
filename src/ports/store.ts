@@ -549,7 +549,8 @@ export interface ChallengeRepository {
     subjectId: string;
     action: string;
     consumptionKey: string;
-    now: Date;
+    /** Evaluated while the challenge row is locked so lock waits cannot stale expiry checks. */
+    now(): Date;
   }>, tx: SmsTransaction): Promise<ConsumeProofResult>;
 }
 

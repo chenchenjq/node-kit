@@ -74,7 +74,7 @@ export class ProofService {
       subjectId: input.subjectId,
       action: input.action,
       consumptionKey: input.consumptionKey,
-      now: this.dependencies.clock.now(),
+      now: () => this.dependencies.clock.now(),
     }, tx);
     if (!result.consumed) return invalidProof(result);
     return result;

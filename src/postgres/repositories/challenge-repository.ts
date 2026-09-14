@@ -105,13 +105,14 @@ export class PgChallengeRepository implements ChallengeRepository {
     if (current === undefined || current.subject_id !== input.subjectId || current.action !== input.action || current.verified_at === null || current.invalidated_at !== null || current.delivery_acceptance_status !== "accepted") {
       throw new SmsKitError("PROOF_INVALID", "proof is not valid for this subject and action");
     }
-    if (current.proof_expires_at === null || current.proof_expires_at <= input.now) return { consumed: false, reason: "expired" };
+    const now = input.now();
+    if (current.proof_expires_at === null || current.proof_expires_at <= now) return { consumed: false, reason: "expired" };
     if (current.consumed_at !== null) {
       return current.consumed_by_key === input.consumptionKey ? { consumed: true, replay: true } : { consumed: false, reason: "used" };
     }
     await client.query(
       "update sms_kit.otp_challenge set consumed_at = $1, consumed_by_key = $2 where id = $3",
-      [input.now, input.consumptionKey, current.id],
+      [now, input.consumptionKey, current.id],
     );
     return { consumed: true, replay: false };
   }

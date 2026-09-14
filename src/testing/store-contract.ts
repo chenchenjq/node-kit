@@ -141,16 +141,16 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const binding = { tenantId: tenant, subjectId: "user-1", action: "password.change", proof, now: factory.clock.now() };
       await factory.createVerifiedProof(binding);
       const results = await Promise.all([
-        store.transaction((tx) => store.challenges.consumeProof({ ...binding, consumptionKey: "operation-a" }, tx)),
-        store.transaction((tx) => store.challenges.consumeProof({ ...binding, consumptionKey: "operation-b" }, tx)),
+        store.transaction((tx) => store.challenges.consumeProof({ ...binding, consumptionKey: "operation-a", now: () => binding.now }, tx)),
+        store.transaction((tx) => store.challenges.consumeProof({ ...binding, consumptionKey: "operation-b", now: () => binding.now }, tx)),
       ]);
       expect(results.filter((result) => result.consumed)).toHaveLength(1);
 
       const replayProof = `proof:${factory.ids.next()}`;
       await factory.createVerifiedProof({ ...binding, proof: replayProof });
       const replay = await Promise.all([
-        store.transaction((tx) => store.challenges.consumeProof({ ...binding, proof: replayProof, consumptionKey: "operation-replay" }, tx)),
-        store.transaction((tx) => store.challenges.consumeProof({ ...binding, proof: replayProof, consumptionKey: "operation-replay" }, tx)),
+        store.transaction((tx) => store.challenges.consumeProof({ ...binding, proof: replayProof, consumptionKey: "operation-replay", now: () => binding.now }, tx)),
+        store.transaction((tx) => store.challenges.consumeProof({ ...binding, proof: replayProof, consumptionKey: "operation-replay", now: () => binding.now }, tx)),
       ]);
       expect(replay.every((result) => result.consumed)).toBe(true);
       expect(replay.map((result) => result.consumed ? result.replay : false).sort()).toEqual([false, true]);
@@ -163,9 +163,9 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const now = factory.clock.now();
       await factory.createVerifiedProof({ tenantId: tenant, subjectId: "user-1", action: "password.change", proof, now });
 
-      await expect(store.transaction((tx) => store.challenges.consumeProof({ tenantId: tenant, subjectId: "other-user", action: "password.change", proof, consumptionKey: "wrong", now }, tx)))
+      await expect(store.transaction((tx) => store.challenges.consumeProof({ tenantId: tenant, subjectId: "other-user", action: "password.change", proof, consumptionKey: "wrong", now: () => now }, tx)))
         .rejects.toMatchObject({ code: "PROOF_INVALID" });
-      await expect(store.transaction((tx) => store.challenges.consumeProof({ tenantId: tenant, subjectId: "user-1", action: "password.change", proof, consumptionKey: "right", now }, tx)))
+      await expect(store.transaction((tx) => store.challenges.consumeProof({ tenantId: tenant, subjectId: "user-1", action: "password.change", proof, consumptionKey: "right", now: () => now }, tx)))
         .resolves.toEqual({ consumed: true, replay: false });
     });
 
