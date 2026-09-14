@@ -14,6 +14,8 @@ export { SendService } from "./send-service.js";
 export type { EnqueueNotificationInput, SendInput, SendServiceDependencies } from "./send-service.js";
 export { ChallengeService } from "./challenge-service.js";
 export type { ChallengeServiceDependencies, IssueChallengeInput, IssueChallengeResult, VerifyChallengeInput, VerifyChallengeResult } from "./challenge-service.js";
+export { ProofService } from "./proof-service.js";
+export type { ConsumeProofInput, ProofServiceDependencies } from "./proof-service.js";
 export { SendWorker } from "./send-worker.js";
 export type { SendWorkerDependencies, SendWorkerRunInput } from "./send-worker.js";
 export { DispatchRecoveryService } from "./dispatch-recovery-service.js";
