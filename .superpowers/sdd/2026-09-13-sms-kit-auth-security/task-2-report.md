@@ -19,3 +19,10 @@
 - `npm run test:integration --workspace sms-kit -- proof-transaction.test.ts` — 2 passed.
 - `npm run typecheck --workspace sms-kit` — passed.
 - `npm run build --workspace sms-kit` — passed.
+
+## Fix round 1 — same-database replay fence
+
+- Root cause: `withPgProofTransaction` received the proof replay result but always invoked the single host callback, so a same-key replay could repeat a host mutation.
+- The helper now requires separate `execute` and `replay` functions. It invokes `execute` only for the first consumption and invokes `replay` only for a same-key replay, both while the proof row remains transaction-locked. This makes an unguarded replay mutation impossible through the helper API.
+- Added real PostgreSQL regressions for repeated and concurrent same-key host operations (one inserted host row), concurrent competing keys (exactly one success), and a host insert followed by a thrown error (both host row and proof consumption roll back).
+- Cross-database guidance remains unchanged: callers must use the exact `consumptionKey` as the downstream idempotency key.
