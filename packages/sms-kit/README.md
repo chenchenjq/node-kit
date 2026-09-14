@@ -2,6 +2,171 @@
 
 Private Node.js SMS toolkit with an Alibaba Cloud (Aliyun) provider. The package's default `npm test --workspace sms-kit` does not contact Aliyun. Live tests use separate scripts and are skipped unless explicitly opted in.
 
+## Install and public boundary
+
+Install this private workspace package through your organization's normal dependency workflow. A PostgreSQL host also needs `pg`; a Better Auth host adds `better-auth` only when it enables that adapter.
+
+```sh
+npm install sms-kit pg
+```
+
+`sms-kit` is server software. Its public subpaths deliberately separate browser-safe contracts from runtime implementations:
+
+| Subpath | Intended use |
+| --- | --- |
+| `sms-kit/core`, `sms-kit/ports` | Domain contracts and framework-neutral interfaces. |
+| `sms-kit/next/types` | Public admin DTOs for frontend code; prefer `import type`. |
+| `sms-kit/application`, `sms-kit/security`, `sms-kit/postgres`, `sms-kit/aliyun`, `sms-kit/better-auth`, `sms-kit/next` | Server-only implementations. Browser builds deliberately reject them. |
+| `sms-kit/testing` | Node/Vitest test helpers, not a browser runtime entry. |
+
+The root export contains no server implementation. Import the specific subpath that owns the capability. In a Next.js App Router host, set a sensitive Route Handler to the Node runtime and never import a sensitive subpath from a Client Component:
+
+```ts
+// app/api/admin/sms/[...path]/route.ts
+export const runtime = "nodejs";
+
+import { createSmsAdminHandler } from "sms-kit/next";
+
+const handler = createSmsAdminHandler({
+  basePath: "/api/admin/sms",
+  resolveActor: resolveTrustedActor,
+  resolveTrustedIp: resolveTrustedProxyIp,
+  authorizer: smsAuthorizer,
+  services: smsAdminServices,
+  ids,
+});
+
+export const GET = handler;
+export const POST = handler;
+export const PATCH = handler;
+```
+
+`resolveActor` and `resolveTrustedIp` are host security boundaries. Derive the tenant, actor, roles, and proxy IP there; never accept any of them from an admin request body, query string, or arbitrary header. Admin responses use `{ data, requestId }`, and the public DTO types are available without importing the server runtime:
+
+```ts
+import type { ApiSuccess, SmsOverviewDto } from "sms-kit/next/types";
+
+type OverviewResponse = ApiSuccess<SmsOverviewDto>;
+```
+
+## PostgreSQL bootstrap
+
+Run package migrations during a controlled deployment step before serving requests. The migrator owns its schema ledger, applies migrations transactionally, and serializes concurrent runs with an advisory lock; do not copy SQL files into an application migration manually.
+
+```ts
+import { Pool } from "pg";
+import { migrateSmsKit, PgSmsStore } from "sms-kit/postgres";
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+await migrateSmsKit(pool);
+
+const store = new PgSmsStore(pool);
+```
+
+The package build includes the migration assets required by `migrateSmsKit`. Keep the `Pool`, its lifecycle, and database credentials owned by the host.
+
+## Secrets, encryption, and protection contexts
+
+Provider credentials and callback tokens are stored as references, not values. `EnvSecretResolver` accepts only explicit `env://UPPERCASE_NAME` references. Supply any other resolver from the host's secret manager; do not log resolved values or attach them to error telemetry.
+
+```ts
+import {
+  AesGcmMessagePayloadProtector,
+  AesGcmPhoneNumberProtector,
+  EnvSecretResolver,
+  HmacHasher,
+  type AesKeyring,
+} from "sms-kit/security";
+
+const secretResolver = new EnvSecretResolver(process.env);
+const keyring: AesKeyring = hostManagedAesKeyring;
+const hmacKey: Buffer = hostManagedThirtyTwoByteHmacKey;
+const hasher = new HmacHasher(hmacKey);
+
+const phoneProtector = new AesGcmPhoneNumberProtector(keyring, hasher);
+const payloadProtector = new AesGcmMessagePayloadProtector(keyring);
+```
+
+The host-owned `AesKeyring` returns an active key ID and key bytes only at runtime. `HmacHasher` requires a 32-byte key. Do not reuse ciphertext across tenants, messages, or fields: a `ProtectionContext` binds envelope version, purpose, trusted tenant ID, record ID, and field name as authenticated data. `SendService` supplies those contexts for normal sends; direct uses of a protector must preserve the same binding.
+
+## Alibaba configuration and administration
+
+Create the provider with a resolver, never with literal AccessKeys:
+
+```ts
+import { createAliyunProvider } from "sms-kit/aliyun";
+
+const provider = createAliyunProvider({ secretResolver });
+```
+
+Use `ConfigService` or the mounted admin API to save the region, optional endpoint, and `accessKeyIdRef`, `accessKeySecretRef`, and `receiptCallbackTokenRef`. Every write carries its optimistic `version` and idempotency key. The provider resolves references only for a call, and neither APIs nor logs should reveal their values.
+
+The Next admin adapter exposes configuration, resource, verification, operation, and read routes under the chosen `basePath`. Give it only service instances built at the trusted server boundary. It validates strict request DTOs, requests the exact host permission, scopes operational reads to the trusted tenant, and redacts phones, secrets, OTPs, template variables, callback tokens, and raw provider payloads.
+
+Verification policy is independent from provider configuration. Manage OTP length/TTL/attempts, phone/IP limits, `systemDailyBudget`, and the manual circuit through `PolicyService.get()` and versioned `PolicyService.patch()` (or `GET/PATCH /verification`). A configured daily budget reserves capacity once per message; an open circuit rejects real sends. Do not treat a provider-config version as a policy version.
+
+## Resource synchronization and notification delivery
+
+Provider signatures and templates are system-wide resources. Use `ResourceSyncService.preview()` to fetch a short-lived candidate snapshot, choose approved signatures/templates and stable local template keys, then call `commit()` with the preview ID and candidate checksums. A preview expires after 24 hours; do not directly persist an arbitrary provider listing or reuse an expired checksum.
+
+For ordinary business notifications, send through `SendService`, not directly through the provider:
+
+```ts
+await sendService.enqueueNotification({
+  tenantId: trustedTenantId,
+  templateKey: "notice.shipped",
+  phone: recipientFromTrustedBusinessRecord,
+  variables: { orderNumber: "…" },
+  purpose: "order.shipped",
+  idempotencyKey: `order-shipped:${orderId}`,
+});
+```
+
+The trusted application layer supplies `tenantId`; it must never be copied from HTTP input. The service validates template variables, encrypts the phone and render parameters, persists the message and job before dispatch, and keeps provider acceptance separate from final delivery. `enqueueTestNotification()` is a separate allowlisted, permission-checked admin path. `sendOtpNow()` is for the authentication flow.
+
+Run the worker from an authenticated scheduler, not from a browser or request body. `SendWorker.runBatch()` leases queued notification jobs; `DispatchRecoveryService.runBatch()` marks abandoned dispatches conservatively as acceptance-unknown and never sends them again. A host adapter can bind both into `createSmsTaskHandler()` together with reconciliation, retention, rollup, and any approved resource-sync task:
+
+```ts
+import { createSmsTaskHandler } from "sms-kit/next";
+
+const taskHandler = createSmsTaskHandler({
+  verifyScheduler: verifyTrustedSchedulerRequest,
+  batchLimit: 100,
+  ids,
+  tasks: hostBoundSmsTasks,
+});
+```
+
+`hostBoundSmsTasks` must calculate service-specific inputs such as `workerId`, lease durations, and an `abandonedBefore` timestamp itself. The scheduler endpoint accepts only a predeclared task name and a bodyless POST; it cannot choose a tenant, raw job payload, or arbitrary service method.
+
+## Receipts, reconciliation, retention, and statistics
+
+Expose the Alibaba callback as a separate, public server route:
+
+```ts
+import { createAliyunReceiptHandler } from "sms-kit/next";
+
+const receiptHandler = createAliyunReceiptHandler({
+  receiptService,
+  clock,
+  verifyToken: verifyReceiptPathToken,
+});
+```
+
+Use an HTTPS callback URL whose final path segment is a high-entropy opaque token. `verifyToken` should use a host-controlled constant-time comparison. The handler checks the token before reading the body, applies payload and deadline limits, and returns only generic safe failures. Redact that path segment, phone numbers, OTPs, template parameters, credentials, and raw callback/provider payloads from proxy and application logs.
+
+Receipts that are structurally valid but do not belong to this system are acknowledged and counted as unmatched; they must not create a tenant, reveal data, or trigger a retry. Monitor `GET /receipt-health` for `unmatchedCount`, acceptance-unknown, final-delivery-unknown, backlog, budget, circuit, and warnings.
+
+Schedule `ReconcileService.runBatch({ limit })` for delivery-status queries. Reconciliation is a read/repair path for delivery state, not a second send path. Administrators can enqueue a targeted reconciliation through `POST /reconcile`; the result is a tenant-scoped job. Schedule `MaintenanceService.rollupDirtyDates({ limit })` and `MaintenanceService.applyRetention({ batchSize })` to keep aggregate statistics useful while applying the configured retention policy.
+
+Use the admin `/stats` route for explicit measurements. It reports `submitted`, `accepted`, `acceptanceRejected`, `acceptanceUnknown`, `deliveryWaiting`, `delivered`, `deliveryFailed`, `deliveryUnknownFinal`, and `retry`, with derived rates when meaningful. Never collapse provider acceptance into final delivery.
+
+## Testing without a provider
+
+Use `sms-kit/testing` only from Node/Vitest code. It exports `FakeClock`, `SequenceIdGenerator`, `createSafeMessageFixture`, and `runSmsStoreContract`; the fixture helpers intentionally avoid plaintext phone numbers and render values. Exercise provider behavior through an injected test implementation rather than a live account. The package's compatibility suite additionally proves that server-only entries cannot enter a Next Client Component.
+
+Keep live-test environment variables unset in local development and CI. The guarded live commands below are the only paths that may contact Aliyun.
+
 ## Better Auth phone-number callbacks
 
 `better-auth` is an optional peer dependency. Keep tenant and trusted-IP resolution at the server boundary. The host owns Better Auth's user-phone fields and its Better Auth schema migration; applying sms-kit's migrations does not create or backfill those fields. The host's existing-phone query must be tenant-scoped and must only permit login/reset delivery for an account that already exists.
