@@ -2,6 +2,24 @@
 
 Private Node.js SMS toolkit with an Alibaba Cloud (Aliyun) provider. The package's default `npm test --workspace sms-kit` does not contact Aliyun. Live tests use separate scripts and are skipped unless explicitly opted in.
 
+## Better Auth phone-number callbacks
+
+`better-auth` is an optional peer dependency. Keep tenant and trusted-IP resolution at the server boundary, then pass the adapter callbacks directly to the phone-number plugin:
+
+```ts
+import { phoneNumber } from "better-auth/plugins";
+import { createBetterAuthSmsAdapter } from "sms-kit/better-auth";
+
+const { sendOTP, sendPasswordResetOTP } = createBetterAuthSmsAdapter({
+  // sendService, transaction, rateLimits, policy, hasher, clock, sleeper, events,
+  // and server-owned resolveTenant, resolveTrustedIp, and isExistingPhone
+});
+
+const plugin = phoneNumber({ sendOTP, sendPasswordResetOTP, allowedAttempts: 3 });
+```
+
+The adapter only schedules delivery for an existing account found within the trusted tenant scope. It applies tenant, phone, and trusted-IP request limits before that lookup, and does not expose account existence through the callback result.
+
 ## Aliyun live checks
 
 Use a restricted test account, an approved signature whose name contains `测试` or `test`, an approved notification template whose name contains the same marker, and a test recipient you control. The message scenario sends one real SMS through Aliyun; Aliyun does not provide a no-delivery mode for `SendSms`. The checks do not change provider configuration or delete resources.
