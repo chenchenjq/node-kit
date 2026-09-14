@@ -1,6 +1,6 @@
 export { canonicalChecksum } from "./checksum.js";
 export { ConfigService } from "./config-service.js";
-export type { ConfigServiceDependencies } from "./config-service.js";
+export type { ConfigServiceDependencies, PatchProviderConfigInput, TestConnectionInput } from "./config-service.js";
 export { PolicyService, validateVerificationPolicy } from "./policy-service.js";
 export type { PolicyServiceDependencies } from "./policy-service.js";
 export { ResourceSyncService } from "./resource-sync-service.js";
@@ -10,8 +10,21 @@ export type {
   ResourceSyncServiceDependencies,
   ResourceSyncTemplateSelection,
 } from "./resource-sync-service.js";
+export { ResourceAdminService } from "./resource-admin-service.js";
+export type {
+  ResourceAdminImportTemplateInput,
+  ResourceAdminServiceDependencies,
+  ResourceAdminUpdateSignatureInput,
+  ResourceAdminUpdateTemplateInput,
+} from "./resource-admin-service.js";
 export { SendService } from "./send-service.js";
-export type { EnqueueNotificationInput, SendInput, SendServiceDependencies } from "./send-service.js";
+export type {
+  EnqueueNotificationInput,
+  EnqueueTestNotificationInput,
+  SendInput,
+  SendServiceDependencies,
+  TestNotificationMessage,
+} from "./send-service.js";
 export { ChallengeService } from "./challenge-service.js";
 export type { ChallengeServiceDependencies, IssueChallengeInput, IssueChallengeResult, VerifyChallengeInput, VerifyChallengeResult } from "./challenge-service.js";
 export { ProofService } from "./proof-service.js";

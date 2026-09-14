@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { idempotencyKeySchema, identifierSchema, isoDateTimeSchema, pageSchema, safeCountSchema, versionSchema } from "./common.js";
+import { idempotencyKeySchema, identifierSchema, isoDateTimeSchema, pageSchema, safeCountSchema, uuidSchema, versionSchema } from "./common.js";
 
 export const resourceChangeTypeSchema = z.enum(["new", "changed", "unavailable", "unchanged"]);
 export const resourceTypeSchema = z.enum(["signature", "template"]);
@@ -35,8 +35,8 @@ export const resourceSyncPreviewInputSchema = z.strictObject({
 export const resourceSyncCommitInputSchema = z.strictObject({
   version: versionSchema,
   idempotencyKey: idempotencyKeySchema,
-  syncId: identifierSchema,
-  candidates: z.array(z.strictObject({ id: identifierSchema, checksum: z.string().trim().min(1) })).min(1),
+  syncId: uuidSchema,
+  candidates: z.array(z.strictObject({ id: uuidSchema, checksum: z.string().trim().min(1) })).min(1),
 });
 
 export const resourceSyncCommitResultDtoSchema = z.strictObject({
@@ -81,7 +81,7 @@ export const templateDtoSchema = z.strictObject({
 export const importTemplateInputSchema = z.strictObject({
   version: versionSchema,
   idempotencyKey: idempotencyKeySchema,
-  candidateId: identifierSchema,
+  candidateId: uuidSchema,
   checksum: z.string().trim().min(1),
   templateKey: z.string().trim().min(1),
   purpose: z.string().trim().min(1),

@@ -24,6 +24,9 @@ function fixture(circuitOpen = false, templateType: Template["templateType"] = "
     transaction: async (work: any) => work({}),
     resources: {
       findTemplateByKey: async () => template(templateType),
+      // Sends take a transaction-scoped shared lock through the parent lookup
+      // so a concurrent stable-key mutation cannot orphan its snapshot.
+      findSignatureById: async () => ({ id: "signature-1", externalName: "Kit", enabled: true, externalStatus: "approved" }),
       listSignatures: async () => ({ items: [{ id: "signature-1", externalName: "Kit", enabled: true, externalStatus: "approved" }], total: 1 }),
     },
     config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "id", accessKeySecretRef: "secret", receiptCallbackTokenRef: "token", status: configured ? "ready" : "untested", enabled: configured }) },

@@ -25,7 +25,7 @@ describe("PostgreSQL SmsStore contract", () => {
 
   async function resetStore(): Promise<PgSmsStore> {
     await pool.query(`truncate table
-      sms_kit.provider_config, sms_kit.signature, sms_kit.template,
+      sms_kit.provider_config, sms_kit.admin_operation, sms_kit.signature, sms_kit.template,
       sms_kit.resource_sync, sms_kit.resource_sync_candidate,
       sms_kit.send_message, sms_kit.send_attempt, sms_kit.delivery_receipt, sms_kit.send_job,
       sms_kit.otp_challenge, sms_kit.rate_limit_bucket, sms_kit.audit_event,

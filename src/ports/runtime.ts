@@ -1,7 +1,8 @@
+import type { MainlandPhone } from "../core/phone.js";
 import type { MessageId, TenantId } from "../core/types.js";
 
 export type RedactedField = "phone" | "otp" | "proof" | "secret" | "template-params";
-export type SafeMetricName = "attempt" | "job" | "message" | "receipt" | "resource" | "rate-limit";
+export type SafeMetricName = "attempt" | "job" | "message" | "receipt" | "resource" | "rate-limit" | "signature" | "template";
 /**
  * A deliberately non-extensible diagnostic shape. It describes redaction and
  * aggregate counts, never customer-provided values or arbitrary key/value data.
@@ -17,7 +18,7 @@ export type SafeReceiptPayload = Readonly<{
 }>;
 
 const redactedFields = new Set<RedactedField>(["phone", "otp", "proof", "secret", "template-params"]);
-const metricNames = new Set<SafeMetricName>(["attempt", "job", "message", "receipt", "resource", "rate-limit"]);
+const metricNames = new Set<SafeMetricName>(["attempt", "job", "message", "receipt", "resource", "rate-limit", "signature", "template"]);
 
 /** Projects untrusted diagnostics to the finite persistence-safe metadata schema. */
 export function projectSafeEventMetadata(input: unknown): SafeEventMetadata {
@@ -95,4 +96,17 @@ export type SmsEvent = Readonly<{
 
 export interface EventSink {
   emit(event: SmsEvent): void | Promise<void>;
+}
+
+/**
+ * Host-owned policy for the one recipient that an administrator may use when
+ * exercising the SMS pipeline. The SMS kit never persists this policy or a
+ * plaintext recipient; it asks the host only after normalizing the number.
+ */
+export interface TestRecipientAllowlist {
+  allows(input: Readonly<{
+    tenantId: TenantId;
+    actorId: string;
+    phone: MainlandPhone;
+  }>): boolean | Promise<boolean>;
 }

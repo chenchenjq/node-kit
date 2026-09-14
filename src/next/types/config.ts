@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeSchema, versionSchema } from "./common.js";
+import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeSchema, versionedWriteSchema, versionSchema } from "./common.js";
 
 export const secretRefDtoSchema = z.strictObject({
   scheme: z.string().trim().min(1).max(64)
@@ -69,6 +69,9 @@ export const connectionTestResultDtoSchema = z.strictObject({
   config: providerConfigDtoSchema,
 });
 
+/** Connection tests write a versioned result, so retries need their own key. */
+export const testConnectionInputSchema = versionedWriteSchema;
+
 export const testSendInputSchema = z.strictObject({
   version: versionSchema,
   idempotencyKey: idempotencyKeySchema,
@@ -95,5 +98,6 @@ export type ProviderConfigStatus = z.infer<typeof providerConfigStatusSchema>;
 export type ProviderConfigDto = z.infer<typeof providerConfigDtoSchema>;
 export type UpdateProviderConfigInput = z.infer<typeof updateProviderConfigSchema>;
 export type ConnectionTestResultDto = z.infer<typeof connectionTestResultDtoSchema>;
+export type TestConnectionInput = z.infer<typeof testConnectionInputSchema>;
 export type TestSendInput = z.infer<typeof testSendInputSchema>;
 export type SmsOverviewDto = z.infer<typeof smsOverviewDtoSchema>;

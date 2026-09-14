@@ -45,12 +45,16 @@ describe("ConfigService", () => {
   it("marks a successfully tested configuration ready without persisting resolved credentials", async () => {
     const resolved: string[] = [];
     let connectionInput: unknown;
+    let connectionSummary: unknown;
     const service = new ConfigService({
       store: {
         config: {
           get: async () => ({ ...readyConfig, status: "untested" as const, enabled: false, version: 4 }),
           update: async () => readyConfig,
-          recordConnectionTest: async (input: Parameters<ConfigRepository["recordConnectionTest"]>[0]) => ({ ...readyConfig, status: input.status === "succeeded" ? "ready" as const : "degraded" as const, version: 5 }),
+          recordConnectionTest: async (input: Parameters<ConfigRepository["recordConnectionTest"]>[0]) => {
+            connectionSummary = input.summary;
+            return { ...readyConfig, status: input.status === "succeeded" ? "ready" as const : "degraded" as const, version: 5 };
+          },
         },
         audits: { append: async () => undefined },
         transaction: async (work: (tx: never) => Promise<unknown>) => work(undefined as never),
@@ -66,6 +70,49 @@ describe("ConfigService", () => {
     expect(resolved).toEqual(["env://ACCESS_KEY_ID", "env://ACCESS_KEY_SECRET"]);
     expect(connectionInput).toMatchObject({ accessKeyId: "env://ACCESS_KEY_ID", accessKeySecret: "env://ACCESS_KEY_SECRET" });
     expect(JSON.stringify(connectionInput)).not.toContain("resolved:");
+    expect(connectionSummary).toEqual({
+      counts: [{ name: "signature", value: 1 }, { name: "template", value: 2 }],
+    });
+  });
+
+  it("patches optional callback and enabled fields without replacing omitted values", async () => {
+    let updateInput: UpdateProviderConfigInput | undefined;
+    const service = new ConfigService({
+      store: {
+        adminOperations: {
+          find: async () => undefined,
+          claim: async () => ({ kind: "claimed" }),
+          complete: async () => undefined,
+        },
+        config: {
+          get: async () => readyConfig,
+          update: async (input: UpdateProviderConfigInput) => {
+            updateInput = input;
+            return { ...readyConfig, ...input, version: 4 };
+          },
+        },
+        audits: { append: async () => undefined },
+        transaction: async (work: (tx: never) => Promise<unknown>) => work(undefined as never),
+      } as never,
+      provider: {} as never,
+      secretResolver: {} as never,
+      authorizer: { assert: () => undefined },
+      clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+      ids: { next: () => "audit-patch" },
+      events: { emit: () => undefined },
+    });
+
+    await service.patch(actor, {
+      provider: "aliyun", region: readyConfig.region,
+      accessKeyIdRef: readyConfig.accessKeyIdRef, accessKeySecretRef: readyConfig.accessKeySecretRef,
+      expectedVersion: readyConfig.version, idempotencyKey: "config:preserve",
+    });
+
+    expect(updateInput).toMatchObject({
+      receiptCallbackTokenRef: readyConfig.receiptCallbackTokenRef,
+      enabled: true,
+      expectedVersion: readyConfig.version,
+    });
   });
 
   it("audits global configuration changes under the system tenant and normalizes secret failures", async () => {
@@ -95,5 +142,45 @@ describe("ConfigService", () => {
       expect.objectContaining({ tenantId: "__system__", actorId: "operator", action: "config.test_connection", errorCode: "PROVIDER_UNAVAILABLE" }),
     ]);
     expect(JSON.stringify(audits)).not.toContain("resolved-secret-value");
+  });
+
+  it("bounds a versioned connection probe so an unresponsive resolver cannot retain its transaction", async () => {
+    let recorded = 0;
+    let completed = 0;
+    const service = new ConfigService({
+      store: {
+        adminOperations: {
+          find: async () => undefined,
+          claim: async () => ({ kind: "claimed" }),
+          complete: async () => { completed += 1; },
+        },
+        config: {
+          get: async () => readyConfig,
+          update: async () => readyConfig,
+          recordConnectionTest: async () => {
+            recorded += 1;
+            return { ...readyConfig, status: "degraded" as const, enabled: false, lastTestStatus: "failed" as const, version: 4 };
+          },
+        },
+        audits: { append: async () => undefined },
+        transaction: async (work: (tx: never) => Promise<unknown>) => work(undefined as never),
+      } as never,
+      provider: { testConnection: async () => new Promise<never>(() => undefined) } as never,
+      secretResolver: { resolve: async () => new Promise<never>(() => undefined) },
+      authorizer: { assert: () => undefined },
+      clock: { now: () => new Date("2026-09-14T00:00:00.000Z") },
+      ids: { next: () => "audit-timeout" },
+      events: { emit: () => undefined },
+      connectionTestTimeoutMs: 5,
+    });
+
+    const deadline = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("connection probe did not time out")), 100));
+    await expect(Promise.race([
+      service.testConnection(actor, { expectedVersion: readyConfig.version, idempotencyKey: "config:probe-timeout" }),
+      deadline,
+    ])).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", message: "provider connection test failed" });
+
+    expect(recorded).toBe(1);
+    expect(completed).toBe(1);
   });
 });

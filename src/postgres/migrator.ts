@@ -14,6 +14,8 @@ const migrationFiles: readonly MigrationFile[] = [
   { version: 4, name: "0004_query_receipt_out_id.sql", url: new URL("./migrations/0004_query_receipt_out_id.sql", import.meta.url) },
   { version: 5, name: "0005_challenge_security.sql", url: new URL("./migrations/0005_challenge_security.sql", import.meta.url) },
   { version: 6, name: "0006_challenge_delivery_acceptance.sql", url: new URL("./migrations/0006_challenge_delivery_acceptance.sql", import.meta.url) },
+  { version: 7, name: "0007_admin_operation.sql", url: new URL("./migrations/0007_admin_operation.sql", import.meta.url) },
+  { version: 8, name: "0008_signature_active_identity.sql", url: new URL("./migrations/0008_signature_active_identity.sql", import.meta.url) },
 ];
 
 const bootstrapDdl = `
