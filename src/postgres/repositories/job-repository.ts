@@ -138,19 +138,44 @@ export class PgJobRepository implements JobRepository {
   }
 
   async ensureReconcile(input: Readonly<{ tenantId: Job["tenantId"]; messageId: MessageId; availableAt: Date; originAction?: JobOriginAction }>, tx?: SmsTransaction): Promise<Job> {
-    const { rows } = await db(this.pool, tx).query<Row>(
+    const requestedOrigin: unknown = input.originAction;
+    if (requestedOrigin !== undefined && requestedOrigin !== "sms.test" && requestedOrigin !== "receipt.reconcile") {
+      throw new SmsKitError("CONFIG_INVALID", "reconciliation job origin is invalid");
+    }
+    const database = db(this.pool, tx);
+    const dedupeKey = `reconcile:${input.messageId}`;
+    // A reconciliation worker fences its lease before locking the message.
+    // Callers that already hold the message lock must therefore reuse an
+    // existing job through an MVCC read, without taking the opposite job lock.
+    const existing = await database.query<Row>(
+      `select ${fields} from sms_kit.send_job
+        where tenant_id = $1 and job_type = 'reconcile' and dedupe_key = $2`,
+      [input.tenantId, dedupeKey],
+    );
+    if (existing.rows[0] !== undefined) return job(existing.rows[0]);
+
+    const inserted = await database.query<Row>(
       `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, origin_action, payload, created_at, updated_at)
        values ($1, $2, $3, 'reconcile', $4, 'pending', $5, 0, 1, $6, '{"kind":"reconcile"}'::jsonb, now(), now())
        on conflict (tenant_id, job_type, dedupe_key)
        -- The first creator establishes the action provenance. A later manual
        -- request may observe the existing job but must not relabel a worker job
        -- or grant a different future read permission.
-       do update set origin_action = sms_kit.send_job.origin_action
+       do nothing
        returning ${fields}`,
-      [randomUUID(), input.tenantId, `reconcile:${input.messageId}`, input.messageId, input.availableAt, input.originAction ?? null],
+      [randomUUID(), input.tenantId, dedupeKey, input.messageId, input.availableAt, input.originAction ?? null],
     );
-    if (rows[0] === undefined) throw new SmsKitError("STORAGE_FAILURE", "reconciliation job could not be read", true);
-    return job(rows[0]);
+    if (inserted.rows[0] !== undefined) return job(inserted.rows[0]);
+
+    // ON CONFLICT DO NOTHING waits for a concurrent first creator to commit;
+    // the next READ COMMITTED statement can then return that durable winner.
+    const raced = await database.query<Row>(
+      `select ${fields} from sms_kit.send_job
+        where tenant_id = $1 and job_type = 'reconcile' and dedupe_key = $2`,
+      [input.tenantId, dedupeKey],
+    );
+    if (raced.rows[0] === undefined) throw new SmsKitError("STORAGE_FAILURE", "reconciliation job could not be read", true);
+    return job(raced.rows[0]);
   }
 
   async lockExpiredSendJobs(input: Readonly<{ before: Date; limit: number }>, tx: SmsTransaction): Promise<readonly Job[]> {

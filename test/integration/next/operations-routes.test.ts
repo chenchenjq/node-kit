@@ -8,9 +8,12 @@ vi.mock("server-only", () => ({}));
 import { HealthService } from "../../../src/application/health-service.js";
 import { PolicyService } from "../../../src/application/policy-service.js";
 import { ReconcileAdminService } from "../../../src/application/reconcile-admin-service.js";
+import { SendService } from "../../../src/application/send-service.js";
+import { SendWorker } from "../../../src/application/send-worker.js";
 import { SmsKitError } from "../../../src/core/errors.js";
 import type { MessageId, TenantId, TemplateId } from "../../../src/core/types.js";
 import { createSmsAdminHandler } from "../../../src/next/index.js";
+import type { SmsProvider } from "../../../src/ports/provider.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
@@ -46,6 +49,24 @@ const testSenderA = {
   tenantId: tenantA,
   permissions: ["sms.test"],
 } as const satisfies AuthorizationActor;
+
+function deferred(): Readonly<{ promise: Promise<void>; resolve(): void }> {
+  let resolve!: () => void;
+  const promise = new Promise<void>((ready) => { resolve = ready; });
+  return { promise, resolve };
+}
+
+async function within<T>(promise: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), 10_000);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 const authorizer = {
   assert: (actor: AuthorizationActor, action: string) => {
@@ -355,6 +376,80 @@ describe("sms operations routes with PostgreSQL", () => {
     const verification = await request(adminA, "/verification");
     expect(verification.status).toBe(200);
     expect(await verification.json()).toMatchObject({ data: { version: current.version, circuitOpen: false } });
+    const configured = await store.config.update({
+      provider: "aliyun",
+      region: "cn-shanghai",
+      accessKeyIdRef: "env://OPERATIONS_ACCESS_KEY_ID",
+      accessKeySecretRef: "env://OPERATIONS_ACCESS_KEY_SECRET",
+      receiptCallbackTokenRef: "env://OPERATIONS_RECEIPT_TOKEN",
+      enabled: true,
+      expectedVersion: 0,
+    });
+    const readyConfig = await store.config.recordConnectionTest({
+      expectedVersion: configured.version,
+      status: "succeeded",
+      summary: {},
+      testedAt: now,
+    });
+    const acceptedProvider = {
+      testConnection: async () => ({ status: "ready", signatureCount: 1, templateCount: 1 }),
+      listSignatures: async () => ({ items: [] }),
+      listTemplates: async () => ({ items: [] }),
+      send: async () => ({ kind: "accepted", bizId: "biz-automatic-reconcile", requestId: "request-automatic-reconcile" }),
+      queryDelivery: async () => ({ kind: "page", items: [], hasNextPage: false }),
+      parseReceipt: () => ({ items: [], acknowledgement: { code: 0, msg: "OK" } }),
+    } as const satisfies SmsProvider;
+    const sendPhoneProtector = {
+      protect: async () => ({
+        ciphertext: "automatic-phone-ciphertext",
+        keyId: "automatic-phone-key",
+        lookupHash: `lookup:${fullPhone}`,
+        masked: "138****8000",
+        last4: "8000",
+      }),
+      unprotect: async () => fullPhone as never,
+    };
+    const sendPayloadProtector = {
+      seal: async () => ({ ciphertext: "automatic-params-ciphertext", keyId: "automatic-params-key" }),
+      open: async () => ({}),
+    };
+    const send = new SendService({
+      store,
+      provider: acceptedProvider,
+      phoneProtector: sendPhoneProtector,
+      payloadProtector: sendPayloadProtector,
+      clock: { now: () => now },
+      ids: { next: () => randomUUID(), messageId: () => randomUUID() as MessageId },
+      events: { emit: () => undefined },
+      providerTimeoutMs: 1_000,
+    });
+    const automaticallyScheduled = await send.enqueueNotification({
+      tenantId: tenantA,
+      templateKey: "notice.operations",
+      phone: fullPhone,
+      variables: {},
+      purpose: "notification",
+      idempotencyKey: `operations-automatic-reconcile:${randomUUID()}`,
+    });
+    await expect(new SendWorker({
+      store,
+      provider: acceptedProvider,
+      phoneProtector: sendPhoneProtector,
+      payloadProtector: sendPayloadProtector,
+      clock: { now: () => now },
+    }).runBatch({ workerId: "operations-send-worker", limit: 1, leaseMs: 60_000, providerTimeoutMs: 1_000 })).resolves.toBe(1);
+    const automaticallyScheduledMessage = automaticallyScheduled.id;
+    const automaticJobRow = await pool.query<{ id: string }>(
+      "select id from sms_kit.send_job where tenant_id = $1 and message_id = $2 and job_type = 'reconcile'",
+      [tenantA, automaticallyScheduledMessage],
+    );
+    const automaticJob = await store.jobs.get({ tenantId: tenantA, id: automaticJobRow.rows[0]!.id });
+    expect(automaticJob).toBeDefined();
+    if (automaticJob === undefined) throw new Error("expected automatic reconciliation job");
+    const automaticMessage = await store.messages.get({ tenantId: tenantA, id: automaticallyScheduledMessage });
+    expect(automaticMessage).toMatchObject({ acceptanceStatus: "accepted", deliveryStatus: "waiting" });
+    if (automaticMessage === undefined) throw new Error("expected automatically accepted message");
+
     const policyPatch = {
       version: current.version,
       idempotencyKey: `verification:open:${randomUUID()}`,
@@ -380,7 +475,7 @@ describe("sms operations routes with PostgreSQL", () => {
     // Idempotency records are tenant-scoped: another tenant cannot replay the
     // first tenant's policy result merely by knowing its key and request body.
     expect((await request(adminB, "/verification", "PATCH", policyPatch)).status).toBe(409);
-    expect(await store.config.get()).toMatchObject({ status: "unconfigured", version: 0 });
+    expect(await store.config.get()).toMatchObject({ status: "ready", version: readyConfig.version });
 
     const messageA = await seedMessage({
       tenantId: tenantA,
@@ -448,7 +543,7 @@ describe("sms operations routes with PostgreSQL", () => {
       `insert into sms_kit.send_job (
          id, tenant_id, dedupe_key, job_type, message_id, state, available_at,
          attempt_count, max_attempts, origin_action, payload, created_at, updated_at
-       ) values ($1, $2, $3, 'send', $4, 'pending', $5, 0, 3, 'sms.test', '{"kind":"none"}'::jsonb, $5, $5)`,
+       ) values ($1, $2, $3, 'send', $4, 'succeeded', $5, 0, 3, 'sms.test', '{"kind":"none"}'::jsonb, $5, $5)`,
       [testOriginJobId, tenantA, `operations-sms-test:${randomUUID()}`, messageA, now],
     );
     expect((await request(receiptReconcilerA, `/jobs/${testOriginJobId}`)).status).toBe(403);
@@ -456,28 +551,30 @@ describe("sms operations routes with PostgreSQL", () => {
     expect(testOriginJob.status).toBe(200);
     expect(JSON.stringify(await testOriginJob.json())).not.toContain("originAction");
 
-    const automaticallyScheduledMessage = await seedMessage({
-      tenantId: tenantA,
-      idempotencyKey: `operations-automatic-reconcile:${randomUUID()}`,
-      acceptanceStatus: "accepted",
-      deliveryStatus: "waiting",
-      providerBizId: "biz-automatic-reconcile",
-      attemptCount: 1,
-    });
-    const automaticJob = await store.jobs.ensureReconcile({
-      tenantId: tenantA,
-      messageId: automaticallyScheduledMessage,
-      availableAt: now,
-    });
     expect(automaticJob.originAction).toBeUndefined();
-    const manuallyRequestedExisting = await request(adminA, "/reconcile", "POST", {
-      version: 1,
+    expect((await request(receiptReconcilerA, "/reconcile", "POST", {
+      version: automaticMessage.version + 1,
+      idempotencyKey: `reconcile:stale:${automaticallyScheduledMessage}`,
+      messageId: automaticallyScheduledMessage,
+    })).status).toBe(409);
+    const automaticReconcileInput = {
+      version: automaticMessage.version,
       idempotencyKey: `reconcile:existing:${automaticallyScheduledMessage}`,
       messageId: automaticallyScheduledMessage,
-    });
-    expect(manuallyRequestedExisting.status).toBe(409);
+    };
+    const manuallyRequestedExisting = await request(receiptReconcilerA, "/reconcile", "POST", automaticReconcileInput);
+    expect(manuallyRequestedExisting.status).toBe(200);
+    expect((await manuallyRequestedExisting.json()).data.id).toBe(automaticJob.id);
+    const automaticReplay = await request(receiptReconcilerA, "/reconcile", "POST", automaticReconcileInput);
+    expect(automaticReplay.status).toBe(200);
+    expect((await automaticReplay.json()).data.id).toBe(automaticJob.id);
     expect((await store.jobs.get({ tenantId: tenantA, id: automaticJob.id }))?.originAction).toBeUndefined();
+    await expect(pool.query<{ count: string }>(
+      "select count(*)::text as count from sms_kit.send_job where tenant_id = $1 and message_id = $2 and job_type = 'reconcile'",
+      [tenantA, automaticallyScheduledMessage],
+    )).resolves.toMatchObject({ rows: [{ count: "1" }] });
     expect((await request(receiptReconcilerA, `/jobs/${automaticJob.id}`)).status).toBe(404);
+    expect((await request(adminA, `/jobs/${automaticJob.id}`)).status).toBe(404);
 
     const smsOriginMessage = await seedMessage({
       tenantId: tenantA,
@@ -525,6 +622,103 @@ describe("sms operations routes with PostgreSQL", () => {
 
     const receiptHealth = await request(adminA, "/receipt-health");
     expect(receiptHealth.status).toBe(200);
-    expect(await receiptHealth.json()).toMatchObject({ data: { systemBudgetRemaining: 500, circuitOpen: true } });
+    expect(await receiptHealth.json()).toMatchObject({ data: { systemBudgetRemaining: 499, circuitOpen: true } });
+  });
+
+  it("does not deadlock a manual reconciliation against a worker finishing the same PostgreSQL job", async () => {
+    const messageId = await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-reconcile-lock-order:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "waiting",
+      providerBizId: `biz-reconcile-lock-order:${randomUUID()}`,
+      attemptCount: 1,
+    });
+    const job = await store.jobs.ensureReconcile({ tenantId: tenantA, messageId, availableAt: now });
+    const leased = (await store.jobs.leaseReconciliation({
+      owner: "operations-reconcile-lock-order-worker",
+      leaseMs: 60_000,
+      limit: 100,
+      now,
+    })).find((candidate) => candidate.id === job.id);
+    expect(leased?.leaseToken).toBeDefined();
+    if (leased?.leaseToken === undefined) throw new Error("expected reconciliation lease");
+
+    const workerLockedJob = deferred();
+    const adminReachedEnsure = deferred();
+    const workerIssuedMessageLock = deferred();
+    const originalEnsureReconcile = store.jobs.ensureReconcile;
+    store.jobs.ensureReconcile = async (input, tx) => {
+      if (tx !== undefined && input.messageId === messageId) {
+        adminReachedEnsure.resolve();
+        await workerIssuedMessageLock.promise;
+      }
+      return originalEnsureReconcile.call(store.jobs, input, tx);
+    };
+
+    const reconcile = new ReconcileAdminService({
+      store,
+      authorizer,
+      clock: { now: () => now },
+      ids: { next: () => randomUUID() },
+    });
+    const input = {
+      expectedVersion: 1,
+      idempotencyKey: `reconcile:lock-order:${messageId}`,
+      messageId,
+    };
+    let worker: Promise<void> | undefined;
+    let admin: ReturnType<typeof reconcile.enqueue> | undefined;
+    let outcomes: readonly PromiseSettledResult<unknown>[] | undefined;
+    try {
+      worker = store.transaction(async (tx) => {
+        await store.jobs.renew({
+          tenantId: tenantA,
+          id: leased.id,
+          leaseToken: leased.leaseToken!,
+          leaseMs: 60_000,
+          now,
+        }, tx);
+        workerLockedJob.resolve();
+        await adminReachedEnsure.promise;
+        const messageUpdate = store.messages.completeQueryDelivery({
+          tenantId: tenantA,
+          id: messageId,
+          status: "delivered",
+          occurredAt: now,
+        }, tx);
+        workerIssuedMessageLock.resolve();
+        await messageUpdate;
+        await store.jobs.succeed({ tenantId: tenantA, id: leased.id, leaseToken: leased.leaseToken! }, tx);
+      });
+      await within(workerLockedJob.promise, "worker job lock");
+      admin = reconcile.enqueue(receiptReconcilerA, input);
+      outcomes = await within(Promise.allSettled([admin, worker]), "reconciliation lock-order race");
+    } finally {
+      // Release either side if setup failed before the intended lock cycle,
+      // then restore the repository before awaiting transaction cleanup.
+      adminReachedEnsure.resolve();
+      workerIssuedMessageLock.resolve();
+      store.jobs.ensureReconcile = originalEnsureReconcile;
+      await within(Promise.allSettled([
+        ...(admin === undefined ? [] : [admin]),
+        ...(worker === undefined ? [] : [worker]),
+      ]), "reconciliation race cleanup");
+    }
+
+    if (outcomes === undefined) throw new Error("reconciliation lock-order race did not run");
+
+    expect(outcomes.map((outcome) => outcome.status === "fulfilled"
+      ? "fulfilled"
+      : `${(outcome.reason as SmsKitError).code}:${(outcome.reason as SmsKitError).causeCode ?? "none"}`))
+      .toEqual(["fulfilled", "fulfilled"]);
+    const scheduled = outcomes[0];
+    if (scheduled?.status !== "fulfilled") throw scheduled?.reason;
+    expect(scheduled.value).toMatchObject({ kind: "scheduled", job: { id: job.id } });
+    await expect(reconcile.enqueue(receiptReconcilerA, input)).resolves.toMatchObject({
+      kind: "scheduled",
+      job: { id: job.id },
+    });
+    await expect(store.jobs.get({ tenantId: tenantA, id: job.id })).resolves.toMatchObject({ state: "succeeded" });
   });
 });
