@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   apiFailureSchema,
   messageDtoSchema,
+  phoneDtoSchema,
   resourceSyncPreviewInputSchema,
+  secretRefDtoSchema,
   smsStatsDtoSchema,
   updateProviderConfigSchema,
   verificationSettingsDtoSchema,
@@ -77,6 +79,35 @@ describe("public Next admin DTO contracts", () => {
     expect(dto.phone).toEqual({ masked: "138****8000", last4Available: true });
     expect(JSON.stringify(dto)).not.toContain("+8613800138000");
     expect(() => messageDtoSchema.parse({ ...messageDtoFixture(), phoneNumber: "+8613800138000" })).toThrow();
+  });
+
+  it("rejects a full phone number in the masked phone field", () => {
+    expect(phoneDtoSchema.parse({ masked: "***0000", last4Available: true })).toEqual({
+      masked: "***0000",
+      last4Available: true,
+    });
+    expect(() => phoneDtoSchema.parse({ masked: "+8613800138000", last4Available: true })).toThrow();
+    expect(() => phoneDtoSchema.parse({ masked: "13800138000", last4Available: true })).toThrow();
+  });
+
+  it.each([
+    ["AccessKey ID", "LTAI5tExampleAccessKey"],
+    ["AccessKey Secret", "example-access-key-secret"],
+    ["callback token", "callback-token-example"],
+  ])("rejects a raw %s in a masked secret reference", (_label, rawSecret) => {
+    expect(() => secretRefDtoSchema.parse({
+      scheme: "env",
+      maskedName: rawSecret,
+      configured: true,
+    })).toThrow();
+  });
+
+  it("accepts ordinary redacted secret reference names", () => {
+    expect(secretRefDtoSchema.parse({
+      scheme: "env",
+      maskedName: "ALIYUN_***_SECRET",
+      configured: true,
+    })).toEqual({ scheme: "env", maskedName: "ALIYUN_***_SECRET", configured: true });
   });
 
   it("keeps verification policy and provider versions independent", () => {
