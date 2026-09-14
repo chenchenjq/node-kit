@@ -22,3 +22,16 @@
 - `node --input-type=module -e 'await import("./packages/sms-kit/dist/core/index.js")'` — passed (`core import ok`) while the Better Auth adapter remains a separate optional-peer entry point.
 
 `better-auth` 1.7.4's declaration dependencies are not compatible with this repository's TypeScript 7 checker when library checking is enabled, so the package build/typecheck configurations now skip third-party declaration checking while retaining checking for SMS Kit source and contract tests.
+
+## Fix round 1
+
+- Centralized callback and pre-route error handling in one deterministic envelope. Every failure leaving either surface is a newly allocated, redacted `STORAGE_FAILURE`; no host error message, fields, cause code, or error object is rethrown. Sleeper failures now have the same safe result after known and unknown branches.
+- Added `createBetterAuthPasswordResetPreRouteGuard()`. It wraps the complete `/phone-number/request-password-reset` route, which is necessary because Better Auth 1.7.4 deliberately skips `sendPasswordResetOTP` for unknown users. The existing-account callback reuses the guard's async request preflight instead of charging limits twice.
+- Documented that `advanced.backgroundTasks.handler` must not be configured on the guarded Better Auth instance: the 1.7.4 route detaches the callback through that handler, preventing guarded request error propagation and reliable preflight reuse.
+- Added a fixture that builds `sms-kit`, copies only its `core` export plus its real `libphonenumber-js` dependency into a temporary package, asserts `better-auth` is physically absent there, and successfully imports `sms-kit/core`.
+
+## Fix-round verification
+
+- `npm run test:contract --workspace sms-kit -- better-auth-adapter.test.ts better-auth-optional-peer.test.ts better-auth-types.test.ts` — 4 files, 14 tests passed.
+- `npm run typecheck --workspace sms-kit` — passed.
+- `npm run build --workspace sms-kit` — passed.

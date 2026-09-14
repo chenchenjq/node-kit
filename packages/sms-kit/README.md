@@ -4,21 +4,40 @@ Private Node.js SMS toolkit with an Alibaba Cloud (Aliyun) provider. The package
 
 ## Better Auth phone-number callbacks
 
-`better-auth` is an optional peer dependency. Keep tenant and trusted-IP resolution at the server boundary, then pass the adapter callbacks directly to the phone-number plugin:
+`better-auth` is an optional peer dependency. Keep tenant and trusted-IP resolution at the server boundary. Better Auth 1.7.4's `/phone-number/request-password-reset` route looks up the user and returns before invoking `sendPasswordResetOTP` for an unknown phone, so direct callbacks alone cannot equalize that route. Create both the callbacks and the complete-route guard:
 
 ```ts
 import { phoneNumber } from "better-auth/plugins";
-import { createBetterAuthSmsAdapter } from "sms-kit/better-auth";
+import {
+  createBetterAuthPasswordResetPreRouteGuard,
+  createBetterAuthSmsAdapter,
+} from "sms-kit/better-auth";
 
-const { sendOTP, sendPasswordResetOTP } = createBetterAuthSmsAdapter({
+const adapterOptions = {
   // sendService, transaction, rateLimits, policy, hasher, clock, sleeper, events,
   // and server-owned resolveTenant, resolveTrustedIp, and isExistingPhone
-});
+};
+const { sendOTP, sendPasswordResetOTP } = createBetterAuthSmsAdapter(adapterOptions);
+const resetGuard = createBetterAuthPasswordResetPreRouteGuard(adapterOptions);
 
 const plugin = phoneNumber({ sendOTP, sendPasswordResetOTP, allowedAttempts: 3 });
 ```
 
-The adapter only schedules delivery for an existing account found within the trusted tenant scope. It applies tenant, phone, and trusted-IP request limits before that lookup, and does not expose account existence through the callback result.
+At the host boundary, parse the reset request body with the same validation as your route and wrap the complete Better Auth handler call. `context` must be a trusted request context consumed by the two resolver functions; a host using request-local trusted context can pass `undefined`.
+
+```ts
+if (request.method === "POST" && new URL(request.url).pathname.endsWith("/phone-number/request-password-reset")) {
+  const { phoneNumber } = await request.clone().json();
+  return resetGuard.run({
+    phoneNumber,
+    context: undefined,
+    next: () => auth.handler(request),
+  });
+}
+return auth.handler(request);
+```
+
+The guard performs the tenant, phone, and trusted-IP limits and tenant-scoped lookup before the route, then applies one response envelope around the route's known and unknown branches. While using this guard, do **not** configure Better Auth's `advanced.backgroundTasks.handler` on that Better Auth instance: version 1.7.4 detaches the reset callback through that handler, so its scheduling failure cannot be returned through the guarded request and the shared reset preflight cannot be relied on. The adapter only schedules delivery for an existing account and does not expose account existence through the callback result.
 
 ## Aliyun live checks
 
