@@ -6,6 +6,7 @@ import { createBetterAuthPasswordResetPreRouteGuard, createBetterAuthSmsAdapter,
 import { SmsKitError } from "../../src/core/errors.js";
 import type { TenantId } from "../../src/core/types.js";
 import type { SmsTransaction } from "../../src/ports/store.js";
+import { HmacHasher } from "../../src/security/hmac-hasher.js";
 
 const tenant = "tenant-a" as TenantId;
 const context = undefined;
@@ -54,10 +55,15 @@ class QueueScheduler {
 
 function createOptions(existing = true, sleeperError?: Error, lookupError?: Error) {
   const callOrder: string[] = [];
+  const issuanceRequests: Array<Record<string, unknown>> = [];
+  const hashedInputs: string[] = [];
+  const realHasher = new HmacHasher(Buffer.alloc(32, 17));
+  let now = new Date("2026-09-13T00:00:00.000Z");
+  let issuance = { id: "verification:issuance-1", expiresAt: new Date("2026-09-13T00:05:00.000Z") };
   const sendService = {
     calls: [] as Array<Record<string, unknown>>,
     async sendOtpNow(input: Record<string, unknown>) {
-      if (!this.calls.some((call) => call.idempotencyKey === input.idempotencyKey)) this.calls.push(input);
+      this.calls.push(input);
       return {} as never;
     },
   };
@@ -73,27 +79,38 @@ function createOptions(existing = true, sleeperError?: Error, lookupError?: Erro
     },
     resolveTenant: async () => tenant,
     resolveTrustedIp: async () => "203.0.113.1",
+    resolveOtpIssuance: async (input) => {
+      issuanceRequests.push(input as unknown as Record<string, unknown>);
+      return issuance;
+    },
     scheduler,
     transaction: async <T>(work: (tx: SmsTransaction) => Promise<T>) => work({} as SmsTransaction),
     rateLimits: {
       lock: async ({ scopeHash }) => {
-        if (scopeHash.includes("phone")) callOrder.push("phone-limit");
-        else if (scopeHash.includes("ip")) callOrder.push("ip-limit");
-        else callOrder.push("tenant-limit");
+        if (scopeHash.startsWith("ip:")) callOrder.push("ip-limit");
+        else if (scopeHash.startsWith("tenant:")) callOrder.push("tenant-limit");
+        else callOrder.push("phone-limit");
       },
       increment: async () => 1,
       countSince: async () => 1,
     },
     policy: { get: async () => policy, update: async () => policy, holdBudget: async () => { throw new Error("not used"); }, releaseBudget: async () => false },
-    hasher: { hash: async (value: string) => value.replace(/[^a-z]/g, "") },
-    clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+    hasher: { hash: async (value: string) => {
+      hashedInputs.push(value);
+      return realHasher.hash(value);
+    } },
+    clock: { now: () => new Date(now) },
     sleeper: { sleep: async (milliseconds) => {
       delays.push(milliseconds);
       if (sleeperError !== undefined) throw sleeperError;
     } },
     events: { emit: async (event) => { events.push(event as Record<string, unknown>); } },
   };
-  return { options, sendService, scheduler, events, callOrder, delays };
+  return {
+    options, sendService, scheduler, events, callOrder, delays, issuanceRequests, hashedInputs,
+    setIssuance(value: { id: string; expiresAt: Date }): void { issuance = value; },
+    setNow(value: Date): void { now = value; },
+  };
 }
 
 describe("Better Auth SMS adapter", () => {
@@ -130,16 +147,100 @@ describe("Better Auth SMS adapter", () => {
     expect(unknown.delays).toEqual([250]);
   });
 
-  it("uses one direct-send idempotency key for a repeated Better Auth callback", async () => {
+  it("uses one issuance-scoped direct-send key across repeated callbacks and adapter instances", async () => {
     const { options, sendService, scheduler } = createOptions();
-    const adapter = createBetterAuthSmsAdapter(options);
 
-    await adapter.sendOTP(args, context);
-    await adapter.sendOTP(args, context);
+    await createBetterAuthSmsAdapter(options).sendOTP(args, context);
+    await createBetterAuthSmsAdapter(options).sendOTP(args, context);
     await scheduler.drain();
 
-    expect(sendService.calls).toHaveLength(1);
+    expect(sendService.calls).toHaveLength(2);
+    expect(sendService.calls[0]?.idempotencyKey).toBe(sendService.calls[1]?.idempotencyKey);
     expect(JSON.stringify(sendService.calls.map((call) => call.idempotencyKey))).not.toContain(args.code);
+  });
+
+  it("uses a fresh key for a later issuance even when Better Auth repeats the same numeric code", async () => {
+    const harness = createOptions();
+    const adapter = createBetterAuthSmsAdapter(harness.options);
+
+    await adapter.sendOTP(args, context);
+    harness.setIssuance({ id: "verification:issuance-2", expiresAt: new Date("2026-09-13T00:05:00.000Z") });
+    await adapter.sendOTP(args, context);
+    await harness.scheduler.drain();
+
+    expect(harness.sendService.calls).toHaveLength(2);
+    expect(harness.sendService.calls[0]?.idempotencyKey).not.toBe(harness.sendService.calls[1]?.idempotencyKey);
+    expect(JSON.stringify(harness.hashedInputs)).not.toContain(args.code);
+  });
+
+  it("resolves the exact trusted issuance without passing OTP digits", async () => {
+    const harness = createOptions();
+
+    await createBetterAuthSmsAdapter(harness.options).sendOTP(args, context);
+
+    expect(harness.issuanceRequests).toEqual([{ tenantId: tenant, phone: "+8613800138000", purpose: "login", context }]);
+    expect(JSON.stringify(harness.issuanceRequests)).not.toContain(args.code);
+  });
+
+  it("maps expired issuance correlation to the safe response envelope", async () => {
+    const harness = createOptions();
+    const secretIssuance = "verification:secret-expired-issuance";
+    harness.setIssuance({ id: secretIssuance, expiresAt: new Date("2026-09-13T00:00:00.000Z") });
+
+    const error = await captureError(() => createBetterAuthSmsAdapter(harness.options).sendOTP(args, context));
+
+    expect(error).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(JSON.stringify(error)).not.toContain(secretIssuance);
+    expect(JSON.stringify(error)).not.toContain(args.code);
+    expect(harness.scheduler.tasks).toHaveLength(0);
+  });
+
+  it("rechecks issuance expiry before a delayed background send", async () => {
+    const harness = createOptions();
+
+    await createBetterAuthSmsAdapter(harness.options).sendOTP(args, context);
+    harness.setNow(new Date("2026-09-13T00:05:00.000Z"));
+    await harness.scheduler.drain();
+
+    expect(harness.sendService.calls).toHaveLength(0);
+    expect(harness.events).toContainEqual(expect.objectContaining({ code: "STORAGE_FAILURE" }));
+    expect(JSON.stringify(harness.events)).not.toContain(args.code);
+  });
+
+  it("fails closed when the background clock is invalid", async () => {
+    const harness = createOptions();
+
+    await createBetterAuthSmsAdapter(harness.options).sendOTP(args, context);
+    harness.setNow(new Date(Number.NaN));
+    await harness.scheduler.drain();
+
+    expect(harness.sendService.calls).toHaveLength(0);
+    expect(harness.events).toContainEqual(expect.objectContaining({ code: "STORAGE_FAILURE" }));
+    expect(JSON.stringify(harness.events)).not.toContain(args.code);
+  });
+
+  it("rejects safely when issuance expires while deriving its idempotency key", async () => {
+    const harness = createOptions();
+    const expiresAt = new Date("2026-09-13T00:05:00.000Z");
+    const underlyingHasher = harness.options.hasher;
+    harness.setIssuance({ id: "verification:expires-during-hash", expiresAt });
+    const options = {
+      ...harness.options,
+      hasher: {
+        async hash(value: string): Promise<string> {
+          const result = await underlyingHasher.hash(value);
+          if (value.includes("better-auth:issuance-idempotency:v2")) harness.setNow(expiresAt);
+          return result;
+        },
+      },
+    };
+
+    const error = await captureError(() => createBetterAuthSmsAdapter(options).sendOTP(args, context));
+
+    expect(error).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(JSON.stringify(error)).not.toContain("expires-during-hash");
+    expect(JSON.stringify(error)).not.toContain(args.code);
+    expect(harness.scheduler.tasks).toHaveLength(0);
   });
 
   it("applies phone, IP and tenant limits before the tenant-scoped account lookup", async () => {

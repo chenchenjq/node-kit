@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import { ChallengeService } from "../../src/application/challenge-service.js";
 import { ProofService } from "../../src/application/proof-service.js";
@@ -7,6 +8,8 @@ import {
   createBetterAuthPasswordResetPreRouteGuard,
   createBetterAuthSmsAdapter,
   type BetterAuthCallbackContext,
+  type BetterAuthOtpIssuance,
+  type BetterAuthSmsAdapterOptions,
 } from "../../src/better-auth/index.js";
 import type { TenantId } from "../../src/core/types.js";
 import { createResourceSyncCandidate, type SmsTransaction } from "../../src/ports/store.js";
@@ -41,8 +44,12 @@ class QueuedScheduler {
 
 export type BetterAuthTestHost = Readonly<{
   fakeProvider: Readonly<{ calls: { send: Array<{ templateKey: string; purpose: string }> } }>;
-  requestLoginOtp(phoneNumber: string): Promise<void>;
-  requestPasswordResetOtp(phoneNumber: string): Promise<void>;
+  createOtpIssuance(): BetterAuthOtpIssuance;
+  advanceTime(milliseconds: number): void;
+  requestLoginOtp(phoneNumber: string, issuance?: BetterAuthOtpIssuance): Promise<void>;
+  requestPasswordResetOtp(phoneNumber: string, issuance?: BetterAuthOtpIssuance): Promise<void>;
+  authDeliveryCounts(purpose: "better-auth:login" | "better-auth:passwordReset"): Promise<Readonly<{ messages: number; attempts: number; reservations: number }>>;
+  storedAuthData(): Promise<readonly Record<string, unknown>[]>;
   issueAndVerifyPasswordChallenge(): Promise<string>;
   changePassword(userId: string, proof: string, consumptionKey: string): Promise<number>;
   passwordVersion(userId: string): Promise<number | undefined>;
@@ -92,6 +99,7 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
   await configureProvider(store);
   await pool.query("create table auth_flow_user (id text primary key, phone_number text not null unique, password_version integer not null)");
   await pool.query("create table auth_flow_password_change_outcome (consumption_key text primary key, user_id text not null, password_version integer not null)");
+  await pool.query("create table auth_flow_otp_issuance (id text primary key, tenant_id text not null, phone_number text not null, purpose text not null, expires_at timestamptz not null)");
   await pool.query("insert into auth_flow_user (id, phone_number, password_version) values ($1, $2, 1)", ["user-1", knownPhone]);
 
   const hasher = new HmacHasher(Buffer.alloc(32, 41));
@@ -132,13 +140,26 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
   });
   const proofService = new ProofService({ store, hasher, clock });
   const scheduler = new QueuedScheduler();
+  const otpIssuanceContext = new AsyncLocalStorage<BetterAuthOtpIssuance>();
   const isExistingPhone = async (_tenantId: TenantId, phone: string): Promise<boolean> =>
     (await pool.query("select 1 from auth_flow_user where phone_number = $1", [phone])).rowCount === 1;
-  const adapterOptions = {
+  const adapterOptions: BetterAuthSmsAdapterOptions = {
     sendService,
     isExistingPhone,
     resolveTenant: async () => tenantId,
     resolveTrustedIp: async () => "203.0.113.42",
+    resolveOtpIssuance: async ({ tenantId: trustedTenantId, phone, purpose }) => {
+      const issuance = otpIssuanceContext.getStore();
+      if (issuance === undefined) throw new Error("trusted OTP issuance context is missing");
+      const persisted = await pool.query<{ id: string; expires_at: Date }>(
+        `select id, expires_at from auth_flow_otp_issuance
+          where id = $1 and tenant_id = $2 and phone_number = $3 and purpose = $4`,
+        [issuance.id, trustedTenantId, phone, purpose],
+      );
+      const exact = persisted.rows[0];
+      if (exact === undefined) throw new Error("trusted OTP issuance does not match the callback");
+      return { id: exact.id, expiresAt: exact.expires_at };
+    },
     scheduler,
     transaction: async <T>(work: (tx: SmsTransaction) => Promise<T>) => store.transaction(work),
     rateLimits: store.rateLimits,
@@ -148,10 +169,21 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
     sleeper: { sleep: async () => undefined },
     events: { emit: async () => undefined },
   };
-  const callbacks = createBetterAuthSmsAdapter(adapterOptions);
-  const resetGuard = createBetterAuthPasswordResetPreRouteGuard(adapterOptions);
   const context = undefined as BetterAuthCallbackContext;
   let challengeSequence = 0;
+  let issuanceSequence = 0;
+
+  function createOtpIssuance(): BetterAuthOtpIssuance {
+    return { id: `fixture-verification-${++issuanceSequence}`, expiresAt: new Date(now.getTime() + 300_000) };
+  }
+
+  async function recordOtpIssuance(phoneNumber: string, purpose: "login" | "passwordReset", issuance: BetterAuthOtpIssuance): Promise<void> {
+    await pool.query(
+      `insert into auth_flow_otp_issuance (id, tenant_id, phone_number, purpose, expires_at)
+       values ($1, $2, $3, $4, $5) on conflict (id) do nothing`,
+      [issuance.id, tenantId, phoneNumber, purpose, issuance.expiresAt],
+    );
+  }
 
   async function issueAndVerify(action: "password.change" | "step.up", idempotencyKey: string): Promise<string> {
     now = new Date(now.getTime() + 61_000);
@@ -161,20 +193,49 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
 
   return {
     fakeProvider,
-    async requestLoginOtp(phoneNumber): Promise<void> {
-      await callbacks.sendOTP({ phoneNumber, code: otpCode }, context);
+    createOtpIssuance,
+    advanceTime(milliseconds): void {
+      now = new Date(now.getTime() + milliseconds);
+    },
+    async requestLoginOtp(phoneNumber, issuance = createOtpIssuance()): Promise<void> {
+      const callbacks = createBetterAuthSmsAdapter(adapterOptions);
+      await recordOtpIssuance(phoneNumber, "login", issuance);
+      await otpIssuanceContext.run(issuance, () => callbacks.sendOTP({ phoneNumber, code: otpCode }, context));
       await scheduler.drain();
     },
-    async requestPasswordResetOtp(phoneNumber): Promise<void> {
-      await resetGuard.run({
-        phoneNumber,
-        context,
-        next: async () => {
-          if (await isExistingPhone(tenantId, phoneNumber)) await callbacks.sendPasswordResetOTP?.({ phoneNumber, code: otpCode }, context);
-          return undefined;
-        },
-      });
+    async requestPasswordResetOtp(phoneNumber, issuance = createOtpIssuance()): Promise<void> {
+      const callbacks = createBetterAuthSmsAdapter(adapterOptions);
+      const resetGuard = createBetterAuthPasswordResetPreRouteGuard(adapterOptions);
+      await recordOtpIssuance(phoneNumber, "passwordReset", issuance);
+      await otpIssuanceContext.run(issuance, () => resetGuard.run({
+          phoneNumber,
+          context,
+          next: async () => {
+            if (await isExistingPhone(tenantId, phoneNumber)) await callbacks.sendPasswordResetOTP?.({ phoneNumber, code: otpCode }, context);
+            return undefined;
+          },
+        }));
       await scheduler.drain();
+    },
+    async authDeliveryCounts(purpose): Promise<Readonly<{ messages: number; attempts: number; reservations: number }>> {
+      const result = await pool.query<{ messages: number; attempts: number; reservations: number }>(
+        `select count(distinct message.id)::integer as messages,
+                count(distinct attempt.id)::integer as attempts,
+                count(distinct reservation.message_id)::integer as reservations
+           from sms_kit.send_message message
+           left join sms_kit.send_attempt attempt on attempt.message_id = message.id
+           left join sms_kit.send_budget_reservation reservation on reservation.message_id = message.id
+          where message.tenant_id = $1 and message.purpose = $2`,
+        [tenantId, purpose],
+      );
+      return result.rows[0] ?? { messages: 0, attempts: 0, reservations: 0 };
+    },
+    async storedAuthData(): Promise<readonly Record<string, unknown>[]> {
+      return (await pool.query<Record<string, unknown>>(
+        `select idempotency_key, metadata, phone_ciphertext, render_params_ciphertext
+           from sms_kit.send_message where tenant_id = $1 and purpose like 'better-auth:%'`,
+        [tenantId],
+      )).rows;
     },
     issueAndVerifyPasswordChallenge: () => issueAndVerify("password.change", `user-1:password.change:${++challengeSequence}`),
     async changePassword(userId, proof, consumptionKey): Promise<number> {

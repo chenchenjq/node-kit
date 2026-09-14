@@ -120,11 +120,11 @@ import { createAliyunProvider } from "sms-kit/aliyun";
 const provider = createAliyunProvider({ secretResolver });
 ```
 
-Use `ConfigService` or the mounted admin API to save the region, optional endpoint, and `accessKeyIdRef`, `accessKeySecretRef`, and `receiptCallbackTokenRef`. Every write carries its optimistic `version` and idempotency key. The provider resolves references only for a call, and neither APIs nor logs should reveal their values.
+Use `ConfigService` or the mounted admin API to save the region, optional endpoint, and `accessKeyIdRef`, `accessKeySecretRef`, and `receiptCallbackTokenRef`. A public endpoint is a credential-free HTTPS origin such as `https://dysmsapi.aliyuncs.com` or `https://[2001:db8::1]:8443`; userinfo, a non-root path, query, and fragment are rejected. The configured origin is preserved in storage and API responses, while the Aliyun client boundary supplies only its `host[:port]` authority to the SDK. Omit it to use the SDK default. Every write carries its optimistic `version` and idempotency key. The provider resolves references only for a call, and neither APIs nor logs should reveal their values.
 
 The Next admin adapter exposes configuration, resource, verification, operation, and read routes under the chosen `basePath`. Give it only service instances built at the trusted server boundary. It validates strict request DTOs, requests the exact host permission, scopes operational reads to the trusted tenant, and redacts phones, secrets, OTPs, template variables, callback tokens, and raw provider payloads.
 
-Verification policy is independent from provider configuration. Manage OTP length/TTL/attempts, phone/IP limits, `systemDailyBudget`, and the manual circuit through `PolicyService.get()` and versioned `PolicyService.patch()` (or `GET/PATCH /verification`). A configured daily budget reserves capacity once per message; an open circuit rejects real sends. Do not treat a provider-config version as a policy version.
+Verification policy is independent from provider configuration. Manage OTP length/TTL/attempts, phone/IP limits, `systemDailyBudget`, and the manual circuit through `PolicyService.get()` and versioned `PolicyService.patch()` (or `GET/PATCH /verification`). Phone hourly and daily limits are trailing 1-hour and 24-hour windows, serialized with the phone/purpose transaction lock; they are not epoch-aligned buckets. Cooldown events are retained for the maximum supported interval so raising that policy cannot erase recent history. A configured daily budget reserves capacity once per message; an open circuit rejects real sends. Do not treat a provider-config version as a policy version.
 
 ## Resource synchronization and notification delivery
 
@@ -190,7 +190,7 @@ semantic dedupe key.
 
 Receipts that are structurally valid but do not belong to this system are acknowledged and counted as unmatched; they must not create a tenant, reveal data, or trigger a retry. Monitor `GET /receipt-health` for `unmatchedCount`, acceptance-unknown, final-delivery-unknown, backlog, budget, circuit, and warnings.
 
-Schedule `ReconcileService.runBatch({ limit })` for delivery-status queries. Reconciliation is a read/repair path for delivery state, not a second send path. Administrators can enqueue a targeted reconciliation through `POST /reconcile`; the result is a tenant-scoped job. If that request reuses an existing system job, sms-kit records a durable, narrow `receipt.reconcile` operation/job authorization without rewriting the job origin; `/jobs/:id` still requires that permission and never lets it override an `sms.test` origin. Schedule `MaintenanceService.rollupDirtyDates({ limit })` and `MaintenanceService.applyRetention({ batchSize })` to keep aggregate statistics useful while applying the configured retention policy.
+Schedule `ReconcileService.runBatch({ limit })` for delivery-status queries. Reconciliation is a read/repair path for delivery state, not a second send path. Its Alibaba `sendDate` and 30-day eligibility come from the latest authoritative accepted/unknown Attempt's persisted `dispatchMarkedAt`, never the earlier queue submission time. Eligibility is based on `Asia/Shanghai` calendar dates: the current date and preceding 29 dates are queryable. A missing, contradictory, or future dispatch history is deferred as a storage failure instead of querying the wrong date. Administrators can enqueue a targeted reconciliation through `POST /reconcile`; the result is a tenant-scoped job. If that request reuses an existing system job, sms-kit records a durable, narrow `receipt.reconcile` operation/job authorization without rewriting the job origin; `/jobs/:id` still requires that permission and never lets it override an `sms.test` origin. Schedule `MaintenanceService.rollupDirtyDates({ limit })` and `MaintenanceService.applyRetention({ batchSize })` to keep aggregate statistics useful while applying the configured retention policy.
 
 `GET /messages/:id` returns the tenant-authorized, redacted operational
 timeline: stable attempt state/times, provider request IDs, stable sms-kit error
@@ -223,6 +223,7 @@ const adapterOptions = {
   sendService,
   resolveTenant: (context) => tenantFromTrustedSession(context),
   resolveTrustedIp: (context) => ipFromTrustedProxy(context),
+  resolveOtpIssuance: (input) => betterAuthIssuances.resolveExact(input),
   isExistingPhone: (tenantId, phone) => users.existsByPhone(tenantId, phone),
   scheduler: { schedule: (task) => waitUntil(task()) },
   transaction: (work) => smsStore.transaction(work),
@@ -251,6 +252,10 @@ const auth = betterAuth({
   })],
 });
 ```
+
+`resolveOtpIssuance` is required and must return `{ id, expiresAt }` for the exact Better Auth verification record created for this callback. The ID is opaque, durable, stable across retries and processes, and unique for every new issuance even when Better Auth generates the same digits. Capture or assign that ID in Better Auth's `databaseHooks.verification.create.before` hook and carry it through trusted request-local state to the callback; do not query the latest record by phone, accept a client header, invent a fresh callback nonce, or rely on a process-local cache as the authority. The adapter validates expiry both before scheduling and immediately before sending, returning only its generic safe envelope on failure.
+
+The direct-send key is a versioned keyed HMAC over tenant, purpose, normalized phone, and issuance ID; OTP digits are deliberately absent and neither the raw ID nor raw HMAC input is persisted or logged. PostgreSQL's tenant/message uniqueness then suppresses duplicate callbacks durably while distinct issuances remain distinct. Callback retries still traverse the request anti-abuse limits before account lookup. Keep the HMAC key stable until every issuance and scheduled callback made with it has expired or completed.
 
 Expose those same host-owned mappings to the admin verification read model;
 do not duplicate them as invented database fields:

@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { SmsKitError } from "../core/errors.js";
 import { normalizeMainlandPhone } from "../core/phone.js";
 import type { TenantId } from "../core/types.js";
@@ -7,6 +9,8 @@ import type { SmsTransaction } from "../ports/store.js";
 import type {
   BetterAuthCallbackContext,
   BetterAuthOtpInput,
+  BetterAuthOtpIssuance,
+  BetterAuthOtpPurpose,
   BetterAuthPasswordResetPreRouteGuard,
   BetterAuthPasswordResetPreRouteGuardInput,
   BetterAuthSendOtp,
@@ -15,7 +19,7 @@ import type {
   BetterAuthSmsCallbacks,
 } from "./types.js";
 
-type Purpose = "login" | "passwordReset";
+type Purpose = BetterAuthOtpPurpose;
 type ResponseEnvelope = { readonly startedAt: Date; callbackFailed: boolean };
 type Preflight = Readonly<{ owner: BetterAuthSmsAdapterOptions; tenantId: TenantId; phone: string; exists: boolean; envelope?: ResponseEnvelope }>;
 
@@ -30,6 +34,21 @@ function requireTrustedTenant(tenantId: TenantId): void {
 
 function storageFailure(): SmsKitError {
   return new SmsKitError("STORAGE_FAILURE", "SMS delivery is temporarily unavailable", true);
+}
+
+type ActiveIssuance = Readonly<{ id: string; expiresAtMs: number }>;
+
+function activeIssuance(value: BetterAuthOtpIssuance, now: Date): ActiveIssuance | undefined {
+  const valid = typeof value === "object"
+    && value !== null
+    && typeof value.id === "string"
+    && value.id.length > 0
+    && value.id.length <= 512
+    && value.id === value.id.trim()
+    && value.expiresAt instanceof Date
+    && Number.isFinite(value.expiresAt.getTime())
+    && value.expiresAt.getTime() > now.getTime();
+  return valid ? { id: value.id, expiresAtMs: value.expiresAt.getTime() } : undefined;
 }
 
 function windowStart(now: Date, seconds: number): Date {
@@ -145,17 +164,33 @@ async function scheduleKnownPhone(
   preflight: Preflight,
 ): Promise<void> {
   if (!preflight.exists) return;
-  const idempotencyHash = await options.hasher.hash(`better-auth:send:${preflight.tenantId}\u0000${preflight.phone}\u0000${input.code}`);
+  const resolvedIssuance = await options.resolveOtpIssuance({
+    tenantId: preflight.tenantId,
+    phone: preflight.phone,
+    purpose,
+    context,
+  });
+  const issuance = activeIssuance(resolvedIssuance, options.clock.now());
+  if (issuance === undefined) throw storageFailure();
+  const idempotencyHash = await options.hasher.hash(JSON.stringify([
+    "better-auth:issuance-idempotency:v2",
+    preflight.tenantId,
+    purpose,
+    preflight.phone,
+    issuance.id,
+  ]));
   const templateKey = purpose === "login" ? (options.templates?.login ?? DEFAULT_TEMPLATES.login) : (options.templates?.passwordReset ?? DEFAULT_TEMPLATES.passwordReset);
   const task = async (): Promise<void> => {
     try {
+      const executedAtMs = options.clock.now().getTime();
+      if (!Number.isFinite(executedAtMs) || issuance.expiresAtMs <= executedAtMs) throw storageFailure();
       await options.sendService.sendOtpNow({
         tenantId: preflight.tenantId,
         templateKey,
         phone: preflight.phone,
         variables: { code: input.code },
         purpose: `better-auth:${purpose}`,
-        idempotencyKey: `better-auth:${purpose}:${idempotencyHash}`,
+        idempotencyKey: `better-auth:v2:${purpose}:${idempotencyHash}`,
       });
     } catch {
       await emitFailure(options);
@@ -163,6 +198,8 @@ async function scheduleKnownPhone(
   };
 
   try {
+    const scheduledAtMs = options.clock.now().getTime();
+    if (!Number.isFinite(scheduledAtMs) || issuance.expiresAtMs <= scheduledAtMs) throw storageFailure();
     await options.scheduler.schedule(task, context);
   } catch {
     if (preflight.envelope !== undefined) preflight.envelope.callbackFailed = true;
@@ -223,4 +260,3 @@ export function createBetterAuthPasswordResetPreRouteGuard(options: BetterAuthSm
     },
   };
 }
-import { AsyncLocalStorage } from "node:async_hooks";

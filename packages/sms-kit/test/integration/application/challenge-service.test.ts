@@ -286,7 +286,7 @@ describe("ChallengeService", () => {
     expect((await pool.query("select terminal_error_code from sms_kit.otp_challenge where idempotency_key = $1", [limitedInput.idempotencyKey])).rows).toEqual([{ terminal_error_code: "RATE_LIMITED" }]);
   });
 
-  it("uses one selected policy snapshot for challenge rate enforcement and recording", async () => {
+  it("uses one selected policy snapshot while retaining cooldown history for the supported maximum", async () => {
     const originalGet = store.policy.get.bind(store.policy);
     let reads = 0;
     store.policy.get = async (tx) => {
@@ -299,7 +299,7 @@ describe("ChallengeService", () => {
       const cooldown = await pool.query<{ seconds: string }>("select extract(epoch from expires_at - window_start)::text as seconds from sms_kit.rate_limit_bucket where scope_hash like '%challenge:auth.password_change'");
 
       expect(reads).toBe(2);
-      expect(cooldown.rows).toContainEqual({ seconds: "60.000000" });
+      expect(cooldown.rows).toContainEqual({ seconds: "3600.000000" });
       expect((await pool.query("select policy_version, otp_ttl_seconds from sms_kit.otp_challenge where id = $1", [issued.id])).rows).toEqual([{ policy_version: "1", otp_ttl_seconds: 300 }]);
     } finally {
       store.policy.get = originalGet;

@@ -15,6 +15,7 @@ const tenantId = "reconcile-tenant" as TenantId;
 class Clock {
   constructor(private value = new Date("2026-09-14T00:00:00.000Z")) {}
   now(): Date { return new Date(this.value); }
+  set(value: Date): void { this.value = new Date(value); }
   advance(ms: number): void { this.value = new Date(this.value.getTime() + ms); }
 }
 
@@ -53,16 +54,48 @@ describe("ReconcileService", () => {
   }, 120_000);
   afterAll(async () => stop?.());
 
-  async function seedUnknown(providerBizId?: string): Promise<string> {
+  async function seedUnknown(providerBizId?: string, timing: Readonly<{ submittedAt?: Date; dispatchMarkedAt?: Date }> = {}): Promise<string> {
+    const submittedAt = timing.submittedAt ?? clock.now();
+    const dispatchMarkedAt = timing.dispatchMarkedAt ?? clock.now();
     const created = await store.messages.createWithSendJob({
       id: crypto.randomUUID() as never, tenantId, idempotencyKey: crypto.randomUUID(), templateId: templateId as never,
       templateKeySnapshot: "reconcile.delivery", externalTemplateCodeSnapshot: "SMS_RECONCILE", signatureNameSnapshot: "Reconcile",
-      purpose: "notification", phoneCiphertext: "ciphertext", phoneKeyId: "phone-k1", phoneHash: "phone-hash", phoneLast4: "0000", phoneMasked: "138****0000", variableNames: [], submittedAt: clock.now(),
+      purpose: "notification", phoneCiphertext: "ciphertext", phoneKeyId: "phone-k1", phoneHash: "phone-hash", phoneLast4: "0000", phoneMasked: "138****0000", variableNames: [], submittedAt,
     });
-    const attempt = await store.attempts.createStarted({ tenantId, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: clock.now() });
+    const attempt = await store.attempts.createStarted({ tenantId, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt });
     await store.messages.completeAcceptance({ tenantId, dispatchToken: attempt.dispatchToken, status: "unknown", evidence: "same-dispatch-response", ...(providerBizId === undefined ? {} : { providerBizId }), finalErrorCode: "ACCEPTANCE_UNKNOWN", occurredAt: clock.now() });
+    await store.attempts.completeByDispatchToken({ tenantId, dispatchToken: attempt.dispatchToken, status: "unknown", errorCode: "ACCEPTANCE_UNKNOWN", occurredAt: clock.now() });
     await store.jobs.ensureReconcile({ tenantId, messageId: created.message.id, availableAt: clock.now() });
     return created.message.id;
+  }
+
+  async function seedRetriedQueued(input: Readonly<{ submittedAt: Date; firstDispatchAt: Date; finalDispatchAt: Date }>): Promise<string> {
+    const messageId = crypto.randomUUID() as never;
+    const sendJobId = crypto.randomUUID();
+    await store.messages.createWithSendJob({
+      id: messageId, tenantId, idempotencyKey: crypto.randomUUID(), templateId: templateId as never,
+      templateKeySnapshot: "reconcile.delivery", externalTemplateCodeSnapshot: "SMS_RECONCILE", signatureNameSnapshot: "Reconcile",
+      purpose: "notification", phoneCiphertext: "ciphertext", phoneKeyId: "phone-k1", phoneHash: "phone-hash", phoneLast4: "0000", phoneMasked: "138****0000", variableNames: [],
+      renderParamsCiphertext: "params", renderParamsKeyId: "params-k1", submittedAt: input.submittedAt,
+      sendJob: { id: sendJobId, dedupeKey: `send:${sendJobId}`, availableAt: input.submittedAt, maxAttempts: 3 },
+    });
+    const [firstJob] = await store.jobs.lease({ tenantId, jobType: "send", owner: "retry-1", leaseMs: 60_000, limit: 1, now: input.firstDispatchAt });
+    if (firstJob?.leaseToken === undefined) throw new Error("first send lease missing");
+    const firstAttempt = await store.attempts.createStarted({ tenantId, messageId, dispatchMode: "queued", leaseToken: firstJob.leaseToken, dispatchMarkedAt: input.firstDispatchAt });
+    await store.attempts.completeByDispatchToken({ tenantId, dispatchToken: firstAttempt.dispatchToken, status: "rejected", providerCode: "THROTTLED", errorCode: "THROTTLED", occurredAt: input.firstDispatchAt });
+    await store.jobs.reschedule({ tenantId, id: firstJob.id, leaseToken: firstJob.leaseToken, availableAt: input.finalDispatchAt, errorCode: "THROTTLED" });
+
+    const [finalJob] = await store.jobs.lease({ tenantId, jobType: "send", owner: "retry-2", leaseMs: 60_000, limit: 1, now: input.finalDispatchAt });
+    if (finalJob?.leaseToken === undefined) throw new Error("final send lease missing");
+    const finalAttempt = await store.attempts.createStarted({ tenantId, messageId, dispatchMode: "queued", leaseToken: finalJob.leaseToken, dispatchMarkedAt: input.finalDispatchAt });
+    await store.transaction(async (tx) => {
+      await store.jobs.getForUpdate({ tenantId, id: finalJob.id }, tx);
+      await store.messages.completeAcceptance({ tenantId, dispatchToken: finalAttempt.dispatchToken, status: "unknown", evidence: "same-dispatch-response", finalErrorCode: "ACCEPTANCE_UNKNOWN", occurredAt: input.finalDispatchAt }, tx);
+      await store.attempts.completeByDispatchToken({ tenantId, dispatchToken: finalAttempt.dispatchToken, status: "unknown", errorCode: "ACCEPTANCE_UNKNOWN", occurredAt: input.finalDispatchAt }, tx);
+      await store.jobs.ensureReconcile({ tenantId, messageId, availableAt: input.finalDispatchAt }, tx);
+      await store.jobs.succeed({ tenantId, id: finalJob.id, leaseToken: finalJob.leaseToken! }, tx);
+    });
+    return messageId;
   }
 
   async function clearPendingReconciliation(): Promise<void> {
@@ -157,5 +190,78 @@ describe("ReconcileService", () => {
     await reconcile.runBatch({ limit: 1 });
 
     await expect(pool.query<{ provider_biz_id: string | null; provider_out_id: string | null; source: string }>("select provider_biz_id, provider_out_id, source from sms_kit.delivery_receipt where message_id = $1 order by received_at desc limit 1", [targetId])).resolves.toMatchObject({ rows: [{ provider_biz_id: null, provider_out_id: targetId, source: "query" }] });
+  });
+
+  it("uses the final persisted retry attempt across Shanghai midnight instead of the queued submission", async () => {
+    await clearPendingReconciliation();
+    const messageId = await seedRetriedQueued({
+      submittedAt: new Date("2026-08-01T00:00:00.000Z"),
+      firstDispatchAt: new Date("2026-08-15T15:59:58.000Z"),
+      finalDispatchAt: new Date("2026-08-15T16:00:00.100Z"),
+    });
+    clock.set(new Date("2026-09-13T16:00:00.000Z"));
+    const provider = new PagedProvider().withPages([{ kind: "page", items: [], hasNextPage: false }]);
+    const reconcile = new ReconcileService({ store, provider, phoneProtector: { unprotect: async () => "13800138000" as never }, clock, events: { emit: () => undefined } });
+
+    await reconcile.runBatch({ limit: 1 });
+
+    expect(provider.calls.map(({ region: _region, accessKeyId: _id, accessKeySecret: _secret, ...query }) => query)).toEqual([
+      { phoneNumber: "13800138000", sendDate: "20260816", currentPage: 1, pageSize: 50 },
+    ]);
+    await expect(store.attempts.listForMessage({ tenantId, messageId: messageId as never })).resolves.toMatchObject([
+      { attemptNo: 1, status: "rejected", dispatchMarkedAt: new Date("2026-08-15T15:59:58.000Z") },
+      { attemptNo: 2, status: "unknown", dispatchMarkedAt: new Date("2026-08-15T16:00:00.100Z") },
+    ]);
+    await expect(store.messages.get({ tenantId, id: messageId as never })).resolves.toMatchObject({ deliveryStatus: "waiting" });
+  });
+
+  it("uses the current Shanghai date and preceding 29 dates as the inclusive query window", async () => {
+    await clearPendingReconciliation();
+    clock.set(new Date("2026-09-13T16:00:00.100Z"));
+    const expiredId = await seedUnknown(undefined, {
+      submittedAt: new Date("2026-08-15T15:59:59.900Z"),
+      dispatchMarkedAt: new Date("2026-08-15T15:59:59.900Z"),
+    });
+    const eligibleId = await seedUnknown(undefined, {
+      submittedAt: new Date("2026-08-15T16:00:00.000Z"),
+      dispatchMarkedAt: new Date("2026-08-15T16:00:00.000Z"),
+    });
+    const provider = new PagedProvider().withPages([{ kind: "page", items: [], hasNextPage: false }]);
+    const reconcile = new ReconcileService({ store, provider, phoneProtector: { unprotect: async () => "13800138000" as never }, clock, events: { emit: () => undefined } });
+
+    await reconcile.runBatch({ limit: 2 });
+
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls[0]).toMatchObject({ sendDate: "20260816" });
+    await expect(store.messages.get({ tenantId, id: expiredId as never })).resolves.toMatchObject({ deliveryStatus: "unknown_final" });
+    await expect(store.messages.get({ tenantId, id: eligibleId as never })).resolves.toMatchObject({ deliveryStatus: "waiting" });
+  });
+
+  it("defers missing, contradictory, or future authoritative attempt histories as storage failures", async () => {
+    await clearPendingReconciliation();
+    clock.set(new Date("2026-09-14T00:00:00.000Z"));
+    const missing = await store.messages.createWithSendJob({
+      id: crypto.randomUUID() as never, tenantId, idempotencyKey: crypto.randomUUID(), templateId: templateId as never,
+      templateKeySnapshot: "reconcile.delivery", externalTemplateCodeSnapshot: "SMS_RECONCILE", signatureNameSnapshot: "Reconcile",
+      purpose: "notification", phoneCiphertext: "ciphertext", phoneKeyId: "phone-k1", phoneHash: "phone-hash", phoneLast4: "0000", phoneMasked: "138****0000", variableNames: [], submittedAt: clock.now(),
+    });
+    await pool.query("update sms_kit.send_message set acceptance_status = 'unknown', delivery_status = 'waiting' where id = $1", [missing.message.id]);
+    await store.jobs.ensureReconcile({ tenantId, messageId: missing.message.id, availableAt: clock.now() });
+
+    const contradictoryId = await seedUnknown(undefined, { dispatchMarkedAt: new Date("2026-09-13T23:59:58.000Z") });
+    const contradictoryAttempt = await store.attempts.createStarted({ tenantId, messageId: contradictoryId as never, dispatchMode: "direct", dispatchMarkedAt: new Date("2026-09-13T23:59:59.000Z") });
+    await store.attempts.completeByDispatchToken({ tenantId, dispatchToken: contradictoryAttempt.dispatchToken, status: "rejected", errorCode: "REJECTED", occurredAt: clock.now() });
+    const futureId = await seedUnknown(undefined, { dispatchMarkedAt: new Date("2026-09-14T01:00:00.000Z") });
+    const provider = new PagedProvider();
+    const reconcile = new ReconcileService({ store, provider, phoneProtector: { unprotect: async () => "13800138000" as never }, clock, events: { emit: () => undefined } });
+
+    await reconcile.runBatch({ limit: 3 });
+
+    expect(provider.calls).toHaveLength(0);
+    for (const messageId of [missing.message.id, contradictoryId, futureId]) {
+      await expect(pool.query("select state, last_error_code from sms_kit.send_job where message_id = $1 and job_type = 'reconcile'", [messageId])).resolves.toMatchObject({
+        rows: [{ state: "pending", last_error_code: "STORAGE_FAILURE" }],
+      });
+    }
   });
 });

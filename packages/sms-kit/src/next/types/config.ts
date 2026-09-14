@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { isProviderEndpointOrigin } from "../../core/provider-endpoint.js";
 import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeSchema, versionedWriteSchema, versionSchema } from "./common.js";
 
 export const secretRefDtoSchema = z.strictObject({
@@ -15,12 +16,8 @@ export const secretRefDtoSchema = z.strictObject({
 
 export const providerConfigStatusSchema = z.enum(["unconfigured", "untested", "ready", "degraded", "disabled"]);
 
-const providerEndpointSchema = z.url({ protocol: /^https$/ }).max(2_048).refine((value) => {
-  const authorityStart = value.indexOf("://") + 3;
-  const authority = value.slice(authorityStart).split(/[/?#]/, 1)[0] ?? "";
-  return !authority.includes("@") && !value.includes("?") && !value.includes("#");
-}, {
-  message: "provider endpoint must not contain userinfo, query parameters, or a fragment",
+const providerEndpointSchema = z.string().max(2_048).refine(isProviderEndpointOrigin, {
+  message: "provider endpoint must be an HTTPS origin without userinfo, path, query parameters, or a fragment",
 });
 
 export const providerConfigDtoSchema = z.discriminatedUnion("status", [

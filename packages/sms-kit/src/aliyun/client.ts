@@ -15,6 +15,7 @@ import type {
   AliyunSignPage,
   AliyunTemplatePage,
 } from "./api.js";
+import { aliyunSdkEndpointAuthority } from "../core/provider-endpoint.js";
 
 export type AliyunClientCredentials = Readonly<{
   region: string;
@@ -34,7 +35,7 @@ export class AliyunSdkClientFactory implements AliyunClientFactory {
       regionId: credentials.region,
       accessKeyId: credentials.accessKeyId,
       accessKeySecret: credentials.accessKeySecret,
-      ...(credentials.endpoint === undefined ? {} : { endpoint: credentials.endpoint }),
+      ...(credentials.endpoint === undefined ? {} : { endpoint: aliyunSdkEndpointAuthority(credentials.endpoint) }),
     };
     const client = new DysmsapiSdk.default.default(
       config as ConstructorParameters<typeof DysmsapiSdk.default.default>[0],

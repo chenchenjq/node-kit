@@ -35,6 +35,41 @@ describe("simulated authentication flows", () => {
     ]);
   });
 
+  it("durably suppresses retries for one issuance but sends a later same-code issuance", async () => {
+    const before = await host.authDeliveryCounts("better-auth:login");
+    host.advanceTime(61_000);
+    const firstIssuance = host.createOtpIssuance();
+
+    await host.requestLoginOtp("+8613800138000", firstIssuance);
+    host.advanceTime(61_000);
+    await host.requestLoginOtp("+8613800138000", firstIssuance);
+    const afterRetry = await host.authDeliveryCounts("better-auth:login");
+
+    expect(host.fakeProvider.calls.send).toHaveLength(1);
+    expect(afterRetry).toEqual({
+      messages: before.messages + 1,
+      attempts: before.attempts + 1,
+      reservations: before.reservations + 1,
+    });
+
+    host.advanceTime(61_000);
+    const laterIssuance = host.createOtpIssuance();
+    await host.requestLoginOtp("+8613800138000", laterIssuance);
+    const afterLaterIssuance = await host.authDeliveryCounts("better-auth:login");
+
+    expect(host.fakeProvider.calls.send).toHaveLength(2);
+    expect(afterLaterIssuance).toEqual({
+      messages: before.messages + 2,
+      attempts: before.attempts + 2,
+      reservations: before.reservations + 2,
+    });
+    const stored = JSON.stringify(await host.storedAuthData());
+    expect(stored).not.toContain("654321");
+    expect(stored).not.toContain("+8613800138000");
+    expect(stored).not.toContain(firstIssuance.id);
+    expect(stored).not.toContain(laterIssuance.id);
+  });
+
   it("requires a consumed proof in the password-change transaction", async () => {
     const proof = await host.issueAndVerifyPasswordChallenge();
 
