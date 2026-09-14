@@ -318,7 +318,13 @@ export class SendService {
           renderParamsKeyId: protectedParams.keyId,
           metadata: { redactedFields: ["phone", "template-params"], counts: [{ name: "message", value: 1 }] },
           submittedAt,
-          sendJob: { id: this.dependencies.ids.next(), dedupeKey: messageIdempotencyKey, availableAt: submittedAt, maxAttempts: 3 },
+          sendJob: {
+            id: this.dependencies.ids.next(),
+            dedupeKey: messageIdempotencyKey,
+            availableAt: submittedAt,
+            maxAttempts: 3,
+            originAction: "sms.test",
+          },
         }, tx);
         if (!created.created) {
           // The operation claim and message insert share a transaction, so an

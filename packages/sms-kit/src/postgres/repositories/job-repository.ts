@@ -4,24 +4,43 @@ import type { Pool, PoolClient } from "pg";
 
 import { SmsKitError } from "../../core/errors.js";
 import type { MessageId } from "../../core/types.js";
-import type { Job, JobRepository, SmsTransaction } from "../../ports/store.js";
+import type { Job, JobOriginAction, JobRepository, SmsTransaction } from "../../ports/store.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
-type Row = { id: string; tenant_id: string; dedupe_key: string; job_type: Job["jobType"]; message_id: string | null; state: Job["state"]; available_at: Date; lease_owner: string | null; lease_token: string | null; lease_generation: string; lease_until: Date | null; attempt_count: number; max_attempts: number; last_error_code: string | null; payload: Job["payload"] };
+type Row = { id: string; tenant_id: string; dedupe_key: string; job_type: Job["jobType"]; message_id: string | null; state: Job["state"]; available_at: Date; lease_owner: string | null; lease_token: string | null; lease_generation: string; lease_until: Date | null; attempt_count: number; max_attempts: number; last_error_code: string | null; origin_action: string | null; payload: Job["payload"] };
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function db(pool: Pool, tx?: SmsTransaction): Pool | PoolClient { return tx === undefined ? pool : (tx as PgSmsTransaction).client; }
-function job(row: Row): Job { return { id: row.id, tenantId: row.tenant_id as Job["tenantId"], dedupeKey: row.dedupe_key, jobType: row.job_type, ...(row.message_id === null ? {} : { messageId: row.message_id as MessageId }), state: row.state, availableAt: row.available_at, ...(row.lease_owner === null ? {} : { leaseOwner: row.lease_owner }), ...(row.lease_token === null ? {} : { leaseToken: row.lease_token }), leaseGeneration: Number(row.lease_generation), ...(row.lease_until === null ? {} : { leaseUntil: row.lease_until }), attemptCount: row.attempt_count, maxAttempts: row.max_attempts, ...(row.last_error_code === null ? {} : { lastErrorCode: row.last_error_code }), payload: row.payload }; }
-const fields = "id, tenant_id, dedupe_key, job_type, message_id, state, available_at, lease_owner, lease_token, lease_generation, lease_until, attempt_count, max_attempts, last_error_code, payload";
+function originAction(row: Row): JobOriginAction | undefined {
+  if (row.origin_action === null) return undefined;
+  if (row.origin_action === "sms.test" || row.origin_action === "receipt.reconcile") return row.origin_action;
+  throw new SmsKitError("STORAGE_FAILURE", "job origin is invalid", true);
+}
+function job(row: Row): Job {
+  const action = originAction(row);
+  return {
+    id: row.id, tenantId: row.tenant_id as Job["tenantId"], dedupeKey: row.dedupe_key, jobType: row.job_type,
+    ...(row.message_id === null ? {} : { messageId: row.message_id as MessageId }), state: row.state,
+    availableAt: row.available_at, ...(row.lease_owner === null ? {} : { leaseOwner: row.lease_owner }),
+    ...(row.lease_token === null ? {} : { leaseToken: row.lease_token }), leaseGeneration: Number(row.lease_generation),
+    ...(row.lease_until === null ? {} : { leaseUntil: row.lease_until }), attemptCount: row.attempt_count,
+    maxAttempts: row.max_attempts, ...(row.last_error_code === null ? {} : { lastErrorCode: row.last_error_code }),
+    ...(action === undefined ? {} : { originAction: action }), payload: row.payload,
+  };
+}
+const fields = "id, tenant_id, dedupe_key, job_type, message_id, state, available_at, lease_owner, lease_token, lease_generation, lease_until, attempt_count, max_attempts, last_error_code, origin_action, payload";
 const targetFields = fields.split(", ").map((field) => `job.${field}`).join(", ");
 
 export class PgJobRepository implements JobRepository {
   constructor(private readonly pool: Pool) {}
 
   async get(input: Readonly<{ tenantId: Job["tenantId"]; id: string }>, tx?: SmsTransaction): Promise<Job | undefined> {
+    if (!uuidPattern.test(input.id)) return undefined;
     const { rows } = await db(this.pool, tx).query<Row>(`select ${fields} from sms_kit.send_job where tenant_id = $1 and id = $2`, [input.tenantId, input.id]);
     return rows[0] === undefined ? undefined : job(rows[0]);
   }
 
   async getForUpdate(input: Readonly<{ tenantId: Job["tenantId"]; id: string }>, tx: SmsTransaction): Promise<Job | undefined> {
+    if (!uuidPattern.test(input.id)) return undefined;
     const { rows } = await db(this.pool, tx).query<Row>(`select ${fields} from sms_kit.send_job where tenant_id = $1 and id = $2 for update`, [input.tenantId, input.id]);
     return rows[0] === undefined ? undefined : job(rows[0]);
   }
@@ -35,7 +54,7 @@ export class PgJobRepository implements JobRepository {
        ) update sms_kit.send_job j set state = 'leased', lease_owner = $5,
          lease_token = md5(random()::text || clock_timestamp()::text || j.id::text)::uuid,
          lease_generation = lease_generation + 1, lease_until = $3 + ($6 * interval '1 millisecond'), updated_at = now()
-       from candidate c where j.id = c.id returning j.id, j.tenant_id, j.dedupe_key, j.job_type, j.message_id, j.state, j.available_at, j.lease_owner, j.lease_token, j.lease_generation, j.lease_until, j.attempt_count, j.max_attempts, j.last_error_code, j.payload`,
+       from candidate c where j.id = c.id returning j.id, j.tenant_id, j.dedupe_key, j.job_type, j.message_id, j.state, j.available_at, j.lease_owner, j.lease_token, j.lease_generation, j.lease_until, j.attempt_count, j.max_attempts, j.last_error_code, j.origin_action, j.payload`,
       [input.tenantId ?? null, input.jobType ?? null, input.now, input.limit, input.owner, input.leaseMs],
     );
     return rows.map(job);
@@ -118,13 +137,20 @@ export class PgJobRepository implements JobRepository {
     return result.rowCount === 1;
   }
 
-  async ensureReconcile(input: Readonly<{ tenantId: Job["tenantId"]; messageId: MessageId; availableAt: Date }>, tx?: SmsTransaction): Promise<void> {
-    await db(this.pool, tx).query(
-      `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, payload, created_at, updated_at)
-       values ($1, $2, $3, 'reconcile', $4, 'pending', $5, 0, 1, '{"kind":"reconcile"}'::jsonb, now(), now())
-       on conflict (tenant_id, job_type, dedupe_key) do nothing`,
-      [randomUUID(), input.tenantId, `reconcile:${input.messageId}`, input.messageId, input.availableAt],
+  async ensureReconcile(input: Readonly<{ tenantId: Job["tenantId"]; messageId: MessageId; availableAt: Date; originAction?: JobOriginAction }>, tx?: SmsTransaction): Promise<Job> {
+    const { rows } = await db(this.pool, tx).query<Row>(
+      `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, origin_action, payload, created_at, updated_at)
+       values ($1, $2, $3, 'reconcile', $4, 'pending', $5, 0, 1, $6, '{"kind":"reconcile"}'::jsonb, now(), now())
+       on conflict (tenant_id, job_type, dedupe_key)
+       -- The first creator establishes the action provenance. A later manual
+       -- request may observe the existing job but must not relabel a worker job
+       -- or grant a different future read permission.
+       do update set origin_action = sms_kit.send_job.origin_action
+       returning ${fields}`,
+      [randomUUID(), input.tenantId, `reconcile:${input.messageId}`, input.messageId, input.availableAt, input.originAction ?? null],
     );
+    if (rows[0] === undefined) throw new SmsKitError("STORAGE_FAILURE", "reconciliation job could not be read", true);
+    return job(rows[0]);
   }
 
   async lockExpiredSendJobs(input: Readonly<{ before: Date; limit: number }>, tx: SmsTransaction): Promise<readonly Job[]> {

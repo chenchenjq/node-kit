@@ -1,10 +1,19 @@
 import type { Pool, PoolClient } from "pg";
 
-import type { HealthCounts, HealthRepository, SmsTransaction } from "../../ports/store.js";
+import { SmsKitError } from "../../core/errors.js";
+import type { HealthCounts, HealthRepository, SmsTransaction, StatisticCount } from "../../ports/store.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
 type Queryable = Pool | PoolClient;
 function db(pool: Pool, tx?: SmsTransaction): Queryable { return tx === undefined ? pool : (tx as PgSmsTransaction).client; }
+function count(value: string | undefined): StatisticCount {
+  const raw = value ?? "0";
+  if (!/^(?:0|[1-9][0-9]*)$/.test(raw)) {
+    throw new SmsKitError("STORAGE_FAILURE", "health count is invalid", true);
+  }
+  const parsed = BigInt(raw);
+  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
+}
 
 export class PgHealthRepository implements HealthRepository {
   constructor(private readonly pool: Pool) {}
@@ -26,9 +35,9 @@ export class PgHealthRepository implements HealthRepository {
       (select max(received_at) from sms_kit.delivery_receipt where tenant_id = $1 and source = 'callback') as last_receipt_at`, [input.tenantId, input.now]);
     const row = rows[0];
     return {
-      pendingJobs: Number(row?.pending_jobs ?? 0), acceptanceUnknown: Number(row?.acceptance_unknown ?? 0), finalUnknown: Number(row?.final_unknown ?? 0),
-      unmatchedReceipts: Number(row?.unmatched_receipts ?? 0), heldBudgetCount: Number(row?.held_budget_count ?? 0),
-      usableTemplates: Number(row?.usable_templates ?? 0), waitingMessages: Number(row?.waiting_messages ?? 0),
+      pendingJobs: count(row?.pending_jobs), acceptanceUnknown: count(row?.acceptance_unknown), finalUnknown: count(row?.final_unknown),
+      unmatchedReceipts: count(row?.unmatched_receipts), heldBudgetCount: count(row?.held_budget_count),
+      usableTemplates: count(row?.usable_templates), waitingMessages: count(row?.waiting_messages),
       ...(row?.oldest_waiting_at == null ? {} : { oldestWaitingAt: row.oldest_waiting_at }),
       ...(row?.oldest_pending_job_at == null ? {} : { oldestPendingJobAt: row.oldest_pending_job_at }),
       ...(row?.last_receipt_at === null || row?.last_receipt_at === undefined ? {} : { lastReceiptAt: row.last_receipt_at }),

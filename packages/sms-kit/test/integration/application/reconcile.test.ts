@@ -126,9 +126,10 @@ describe("ReconcileService", () => {
     await store.stats.rollupDirtyDates({ tenantId, limit: 10 });
     const [stats] = await store.stats.query({ tenantId, from: new Date("2026-09-14T00:00:00.000Z"), to: new Date("2026-09-15T00:00:00.000Z") });
     expect(stats).toBeDefined();
-    expect(stats!.acceptedCount).toBeLessThanOrEqual(stats!.submittedCount);
-    expect(stats!.deliveredCount).toBeLessThanOrEqual(stats!.acceptedCount);
-    expect(stats!.deliveryWaitingCount + stats!.deliveredCount + stats!.deliveryFailedCount + stats!.deliveryUnknownFinalCount).toBeLessThanOrEqual(stats!.submittedCount);
+    const count = (value: number | string) => BigInt(value);
+    expect(count(stats!.acceptedCount)).toBeLessThanOrEqual(count(stats!.submittedCount));
+    expect(count(stats!.deliveredCount)).toBeLessThanOrEqual(count(stats!.acceptedCount));
+    expect(count(stats!.deliveryWaitingCount) + count(stats!.deliveredCount) + count(stats!.deliveryFailedCount) + count(stats!.deliveryUnknownFinalCount)).toBeLessThanOrEqual(count(stats!.submittedCount));
   });
 
   it("reclaims an expired reconciliation lease and fences its former token", async () => {

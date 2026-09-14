@@ -9,6 +9,7 @@ import {
   messageDtoSchema,
   providerConfigDtoSchema,
   secretRefDtoSchema,
+  smsErrorCodeSchema,
   smsOverviewDtoSchema,
   type TestSendInput,
   type TestConnectionInput,
@@ -77,7 +78,10 @@ export function providerConfigDto(config: ProviderConfig) {
 }
 
 /** Explicit message projection drops ciphertext, hashes, parameters, and the full phone number. */
-export function messageDto(message: Pick<Message, "id" | "phoneMasked" | "phoneLast4" | "templateKeySnapshot" | "purpose" | "acceptanceStatus" | "deliveryStatus" | "submittedAt" | "providerBizId" | "finalErrorCode"> & Readonly<{ attemptCount?: number }>) {
+export function messageDto(message: Pick<Message, "id" | "phoneMasked" | "phoneLast4" | "templateKeySnapshot" | "purpose" | "acceptanceStatus" | "deliveryStatus" | "submittedAt" | "providerBizId" | "finalErrorCode"> & Readonly<{ attemptCount?: number | string }>) {
+  const finalErrorCode = message.finalErrorCode === undefined
+    ? undefined
+    : smsErrorCodeSchema.safeParse(message.finalErrorCode);
   return messageDtoSchema.parse({
     id: message.id,
     phone: { masked: message.phoneMasked ?? null, last4Available: message.phoneLast4 !== undefined },
@@ -88,7 +92,7 @@ export function messageDto(message: Pick<Message, "id" | "phoneMasked" | "phoneL
     submittedAt: date(message.submittedAt),
     attemptCount: message.attemptCount ?? 0,
     ...(message.providerBizId === undefined ? {} : { providerBizId: message.providerBizId }),
-    ...(message.finalErrorCode === undefined ? {} : { finalErrorCode: message.finalErrorCode }),
+    ...(finalErrorCode === undefined || !finalErrorCode.success ? {} : { finalErrorCode: finalErrorCode.data }),
   });
 }
 

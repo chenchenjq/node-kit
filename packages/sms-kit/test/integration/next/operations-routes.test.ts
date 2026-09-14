@@ -1,0 +1,530 @@
+import { randomUUID } from "node:crypto";
+
+import type { Pool } from "pg";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
+
+import { HealthService } from "../../../src/application/health-service.js";
+import { PolicyService } from "../../../src/application/policy-service.js";
+import { ReconcileAdminService } from "../../../src/application/reconcile-admin-service.js";
+import { SmsKitError } from "../../../src/core/errors.js";
+import type { MessageId, TenantId, TemplateId } from "../../../src/core/types.js";
+import { createSmsAdminHandler } from "../../../src/next/index.js";
+import type { AuthorizationActor } from "../../../src/ports/security.js";
+import { migrateSmsKit } from "../../../src/postgres/migrator.js";
+import { PgSmsStore } from "../../../src/postgres/store.js";
+import { startPostgres } from "../postgres/helpers.js";
+
+const now = new Date("2026-09-14T12:00:00.000Z");
+const tenantA = "tenant-operations-a" as TenantId;
+const tenantB = "tenant-operations-b" as TenantId;
+const fullPhone = "+8613800138000";
+
+const adminA = {
+  id: "admin-operations-a",
+  tenantId: tenantA,
+  permissions: ["config.read", "config.write", "message.read", "stats.read", "receipt.reconcile", "sms.test"],
+} as const satisfies AuthorizationActor;
+const adminB = {
+  id: "admin-operations-b",
+  tenantId: tenantB,
+  permissions: ["config.read", "config.write", "message.read", "stats.read", "receipt.reconcile", "sms.test"],
+} as const satisfies AuthorizationActor;
+const messageReaderA = {
+  id: "reader-operations-a",
+  tenantId: tenantA,
+  permissions: ["message.read", "stats.read"],
+} as const satisfies AuthorizationActor;
+const receiptReconcilerA = {
+  id: "reconciler-operations-a",
+  tenantId: tenantA,
+  permissions: ["receipt.reconcile"],
+} as const satisfies AuthorizationActor;
+const testSenderA = {
+  id: "test-sender-operations-a",
+  tenantId: tenantA,
+  permissions: ["sms.test"],
+} as const satisfies AuthorizationActor;
+
+const authorizer = {
+  assert: (actor: AuthorizationActor, action: string) => {
+    if (!(actor.permissions ?? []).includes(action)) throw new SmsKitError("PERMISSION_DENIED", "not allowed");
+  },
+  assertAny: (actor: AuthorizationActor, actions: readonly string[]) => {
+    if (!actions.some((action) => (actor.permissions ?? []).includes(action))) {
+      throw new SmsKitError("PERMISSION_DENIED", "not allowed");
+    }
+  },
+};
+
+describe("sms operations routes with PostgreSQL", () => {
+  let stop: (() => Promise<void>) | undefined;
+  let store: PgSmsStore;
+  let pool: Pool;
+  let policy: PolicyService<AuthorizationActor>;
+  let health: HealthService;
+  let templateId: TemplateId;
+  const phoneHashCalls: string[] = [];
+  const phoneProtector = {
+    lookupHash: async (phone: string) => {
+      phoneHashCalls.push(phone);
+      return `lookup:${phone}`;
+    },
+  };
+
+  beforeAll(async () => {
+    const postgres = await startPostgres();
+    stop = postgres.stop;
+    pool = postgres.pool;
+    await migrateSmsKit(pool);
+    store = new PgSmsStore(pool);
+    const signatureId = randomUUID();
+    templateId = randomUUID() as TemplateId;
+    await pool.query(
+      `insert into sms_kit.signature (
+         id, external_key, external_name, external_status, external_type,
+         enabled, imported_at, last_synced_at, created_at, updated_at
+       ) values ($1, $2, $3, 'approved', 'normal', true, $4, $4, $4, $4)`,
+      [signatureId, `operations-signature:${signatureId}`, "Operations", now],
+    );
+    await pool.query(
+      `insert into sms_kit.template (
+         id, signature_id, template_key, external_code, external_name,
+         external_status, template_type, purpose, content_snapshot,
+         variable_schema, enabled, imported_at, last_synced_at, created_at, updated_at
+       ) values ($1, $2, 'notice.operations', $3, 'Operations', 'approved',
+         'notification', 'notification', 'fixture', '[]'::jsonb, true, $4, $4, $4, $4)`,
+      [templateId, signatureId, `SMS_OPERATIONS_${signatureId.replaceAll("-", "")}`, now],
+    );
+    policy = new PolicyService({
+      store,
+      authorizer,
+      clock: { now: () => now },
+      ids: { next: () => randomUUID() },
+    });
+    health = new HealthService({ store, clock: { now: () => now } });
+  }, 120_000);
+
+  afterAll(async () => stop?.());
+
+  function handler(actor: AuthorizationActor) {
+    return createSmsAdminHandler({
+      resolveActor: async () => actor,
+      resolveTrustedIp: () => "203.0.113.10",
+      authorizer,
+      services: {
+        task4: {
+          store,
+          policy,
+          health,
+          reconcile: new ReconcileAdminService({ store, authorizer, clock: { now: () => now }, ids: { next: () => randomUUID() } }),
+          phoneProtector,
+          clock: { now: () => now },
+        },
+      },
+      ids: { next: () => randomUUID(), messageId: () => randomUUID() as MessageId },
+    });
+  }
+
+  async function request(actor: AuthorizationActor, path: string, method = "GET", body?: unknown): Promise<Response> {
+    return handler(actor)(new Request(`https://app.test/api/admin/sms${path}`, {
+      method,
+      ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    }));
+  }
+
+  async function seedMessage(input: Readonly<{
+    tenantId: TenantId;
+    idempotencyKey: string;
+    acceptanceStatus: "accepted" | "unknown";
+    deliveryStatus: "waiting" | "delivered";
+    providerBizId: string;
+    attemptCount: number;
+    templateKey?: string;
+    purpose?: string;
+    submittedAt?: Date;
+  }>): Promise<MessageId> {
+    const id = randomUUID() as MessageId;
+    const submittedAt = input.submittedAt ?? now;
+    const created = await store.messages.createWithSendJob({
+      id,
+      tenantId: input.tenantId,
+      idempotencyKey: input.idempotencyKey,
+      templateId,
+      templateKeySnapshot: input.templateKey ?? "notice.operations",
+      externalTemplateCodeSnapshot: "SMS_OPERATIONS",
+      signatureNameSnapshot: "Operations",
+      purpose: input.purpose ?? "notification",
+      phoneCiphertext: "ciphertext:never-returned",
+      phoneKeyId: "phone-key-1",
+      phoneHash: `lookup:${fullPhone}`,
+      phoneLast4: "8000",
+      phoneMasked: "138****8000",
+      variableNames: ["orderNo"],
+      renderParamsCiphertext: "variables:never-returned",
+      renderParamsKeyId: "params-key-1",
+      metadata: { redactedFields: ["phone", "template-params"], counts: [{ name: "message", value: 1 }] },
+      submittedAt,
+    });
+    expect(created.created).toBe(true);
+
+    // The repository owns tenancy/row projection; this fixture only advances
+    // the seeded message into an operational state the admin handler can read.
+    await pool.query(
+      `update sms_kit.send_message
+          set acceptance_status = $1,
+              delivery_status = $2,
+              provider_biz_id = $3,
+              accepted_at = $4::timestamptz,
+              delivered_at = case when $2::text = 'delivered' then $4::timestamptz else null end,
+              version = 1
+        where tenant_id = $5 and id = $6`,
+      [input.acceptanceStatus, input.deliveryStatus, input.providerBizId, submittedAt, input.tenantId, id],
+    );
+    for (let attemptNo = 1; attemptNo <= input.attemptCount; attemptNo += 1) {
+      await pool.query(
+        `insert into sms_kit.send_attempt (
+           id, message_id, attempt_no, status, dispatch_mode, dispatch_token,
+           dispatch_marked_at, occurred_at
+         ) values ($1, $2, $3, 'accepted', 'direct', $4, $5, $5)`,
+        [randomUUID(), id, attemptNo, randomUUID(), submittedAt],
+      );
+    }
+    return id;
+  }
+
+  it("keeps message, receipt-health, and statistics reads tenant-scoped, explicit, and redacted", async () => {
+    const messageA = await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-read-a:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "waiting",
+      providerBizId: "biz-operations-a",
+      attemptCount: 2,
+    });
+    const messageB = await seedMessage({
+      tenantId: tenantB,
+      idempotencyKey: `operations-read-b:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "delivered",
+      providerBizId: "biz-operations-b",
+      attemptCount: 1,
+    });
+    // Snapshots and provider identifiers predate the bounded *request* input
+    // contract. Their response DTOs must remain able to render valid legacy
+    // rows rather than turning a read into a 500.
+    const legacyTemplateKey = `legacy.${"k".repeat(300)}`;
+    const legacyProviderBizId = "b".repeat(300);
+    const legacyMessageA = await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-read-a-legacy:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "waiting",
+      providerBizId: legacyProviderBizId,
+      attemptCount: 1,
+      templateKey: legacyTemplateKey,
+    });
+    await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-read-a-old:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "waiting",
+      providerBizId: "biz-operations-a-old",
+      attemptCount: 1,
+      submittedAt: new Date("2026-09-12T12:00:00.000Z"),
+    });
+    await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-read-a-delivered:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "delivered",
+      providerBizId: "biz-operations-a-delivered",
+      attemptCount: 1,
+    });
+    await pool.query(
+      `insert into sms_kit.daily_stat (
+         tenant_id, stat_date, template_id, template_key, purpose,
+         submitted_count, accepted_count, acceptance_rejected_count,
+         acceptance_unknown_count, delivery_waiting_count, delivered_count,
+         delivery_failed_count, delivery_unknown_final_count, retry_count, updated_at
+       ) values
+         ($1, '2026-09-14', $3, 'notice.operations', 'notification', 8, 4, 2, 2, 1, 2, 1, 0, 3, $4),
+         ($1, '2026-09-14', $3, 'notice.operations', 'verification', 7, 7, 0, 0, 0, 7, 0, 0, 0, $4),
+         ($1, '2026-09-14', $3, 'notice.other', 'notification', 99, 99, 0, 0, 0, 99, 0, 0, 0, $4),
+         ($1, '2026-09-14', $3, 'notice.large', 'notification', 9007199254740992, 9007199254740991, 0, 0, 0, 0, 0, 0, 0, $4),
+         ($2, '2026-09-14', $3, 'notice.operations', 'notification', 50, 50, 0, 0, 0, 50, 0, 0, 0, $4)`,
+      [tenantA, tenantB, templateId, now],
+    );
+    await pool.query(
+      `insert into sms_kit.delivery_receipt (
+         id, message_id, tenant_id, match_status, dedupe_key, provider_out_id,
+         delivery_status, occurred_at, received_at, source, redacted_payload
+       ) values ($1, null, null, 'unmatched', $2, $3, 'failed', $4, $4, 'callback', '{"redactedFields":["phone"]}'::jsonb)`,
+      [randomUUID(), `unmatched:${randomUUID()}`, `unmatched-out:${randomUUID()}`, now],
+    );
+
+    phoneHashCalls.length = 0;
+    const listed = await request(
+      adminA,
+      `/messages?page=1&pageSize=20&from=2026-09-14T00%3A00%3A00.000Z&to=2026-09-15T00%3A00%3A00.000Z&acceptanceStatus=accepted&deliveryStatus=waiting&templateKey=notice.operations&purpose=notification&phone=${encodeURIComponent(fullPhone)}`,
+    );
+    expect(listed.status).toBe(200);
+    const listBody = await listed.json();
+    expect(listBody.data).toMatchObject({
+      page: 1,
+      pageSize: 20,
+      total: 1,
+      items: [{
+        id: messageA,
+        acceptanceStatus: "accepted",
+        deliveryStatus: "waiting",
+        attemptCount: 2,
+        phone: { masked: "138****8000", last4Available: true },
+      }],
+    });
+    expect(phoneHashCalls).toEqual([fullPhone]);
+    expect(JSON.stringify(listBody)).not.toContain("13800138000");
+    expect(JSON.stringify(listBody)).not.toContain("ciphertext:never-returned");
+    expect(JSON.stringify(listBody)).not.toContain("variables:never-returned");
+
+    const detail = await request(adminA, `/messages/${messageA}`);
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({ data: { id: messageA, acceptedAt: now.toISOString(), attemptCount: 2 } });
+    const legacyDetail = await request(adminA, `/messages/${legacyMessageA}`);
+    expect(legacyDetail.status).toBe(200);
+    expect(await legacyDetail.json()).toMatchObject({ data: {
+      id: legacyMessageA,
+      templateKey: legacyTemplateKey,
+      providerBizId: legacyProviderBizId,
+    } });
+    expect((await request(adminA, `/messages/${messageB}`)).status).toBe(404);
+    expect((await request(adminA, "/messages/not-a-postgres-uuid")).status).toBe(404);
+    expect((await request(adminA, "/messages?from=2026-09-14T00%3A00%3A00.000Z")).status).toBe(400);
+    const oversizedTemplateKey = "a".repeat(257);
+    expect((await request(adminA, `/messages?templateKey=${oversizedTemplateKey}`)).status).toBe(400);
+
+    const stats = await request(adminA, "/stats?from=2026-09-14T00%3A00%3A00.000Z&to=2026-09-15T00%3A00%3A00.000Z&templateKey=notice.operations&purpose=notification");
+    expect(stats.status).toBe(200);
+    expect(await stats.json()).toMatchObject({ data: {
+      submitted: 8,
+      accepted: 4,
+      acceptanceRejected: 2,
+      acceptanceUnknown: 2,
+      deliveryWaiting: 1,
+      delivered: 2,
+      deliveryFailed: 1,
+      deliveryUnknownFinal: 0,
+      retry: 3,
+      acceptanceRate: 0.5,
+      deliveryRate: 0.5,
+    } });
+    const statusFilteredStats = await request(adminA, "/stats?from=2026-09-14T00%3A00%3A00.000Z&to=2026-09-15T00%3A00%3A00.000Z&templateKey=notice.operations&purpose=notification&acceptanceStatus=accepted&deliveryStatus=waiting");
+    expect(statusFilteredStats.status).toBe(200);
+    expect(await statusFilteredStats.json()).toMatchObject({ data: {
+      submitted: 1,
+      accepted: 1,
+      acceptanceRejected: 0,
+      acceptanceUnknown: 0,
+      deliveryWaiting: 1,
+      delivered: 0,
+      deliveryFailed: 0,
+      deliveryUnknownFinal: 0,
+      retry: 1,
+      acceptanceRate: 1,
+      deliveryRate: 0,
+    } });
+    const largeStats = await request(adminA, "/stats?from=2026-09-14T00%3A00%3A00.000Z&to=2026-09-15T00%3A00%3A00.000Z&templateKey=notice.large&purpose=notification");
+    expect(largeStats.status).toBe(200);
+    expect(await largeStats.json()).toMatchObject({ data: {
+      submitted: "9007199254740992",
+      accepted: 9007199254740991,
+      acceptanceRate: 0.999999999999,
+    } });
+    expect((await request(adminA, "/stats?from=2025-01-01T00%3A00%3A00.000Z&to=2026-09-14T00%3A00%3A00.000Z")).status).toBe(400);
+    expect((await request(adminA, "/stats?from=2026-09-14T12%3A00%3A00.000Z&to=2026-09-15T12%3A00%3A00.000Z")).status).toBe(400);
+    expect((await request(adminA, `/stats?templateKey=${oversizedTemplateKey}`)).status).toBe(400);
+
+    const receiptHealth = await request(adminA, "/receipt-health");
+    expect(receiptHealth.status).toBe(200);
+    expect(await receiptHealth.json()).toMatchObject({ data: { unmatchedCount: 1, systemBudgetRemaining: null, circuitOpen: false } });
+  });
+
+  it("replays versioned policy and reconciliation writes without changing provider readiness and gates jobs by their originating action", async () => {
+    const current = await store.policy.get();
+    const verification = await request(adminA, "/verification");
+    expect(verification.status).toBe(200);
+    expect(await verification.json()).toMatchObject({ data: { version: current.version, circuitOpen: false } });
+    const policyPatch = {
+      version: current.version,
+      idempotencyKey: `verification:open:${randomUUID()}`,
+      otpLength: 6,
+      otpTtlSeconds: 300,
+      otpMaxAttempts: 3,
+      proofTtlSeconds: 300,
+      phoneMinIntervalSeconds: 60,
+      phoneHourlyLimit: 5,
+      phoneDailyLimit: 10,
+      ipWindowSeconds: 600,
+      ipWindowLimit: 20,
+      systemDailyBudget: 500,
+      circuitOpen: true,
+      circuitReason: "provider incident",
+    };
+    const updated = await request(adminA, "/verification", "PATCH", policyPatch);
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({ data: { version: current.version + 1, systemDailyBudget: 500, circuitOpen: true } });
+    const replayed = await request(adminA, "/verification", "PATCH", policyPatch);
+    expect(replayed.status).toBe(200);
+    expect(await replayed.json()).toMatchObject({ data: { version: current.version + 1, circuitOpen: true } });
+    // Idempotency records are tenant-scoped: another tenant cannot replay the
+    // first tenant's policy result merely by knowing its key and request body.
+    expect((await request(adminB, "/verification", "PATCH", policyPatch)).status).toBe(409);
+    expect(await store.config.get()).toMatchObject({ status: "unconfigured", version: 0 });
+
+    const messageA = await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-reconcile-a:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "waiting",
+      providerBizId: "biz-reconcile-a",
+      attemptCount: 1,
+    });
+    const messageDetail = await request(adminA, `/messages/${messageA}`);
+    expect(messageDetail.status).toBe(200);
+    const detailBody = await messageDetail.json();
+    expect(detailBody.data.version).toBe(1);
+
+    const reconcileInput = {
+      version: detailBody.data.version,
+      idempotencyKey: `reconcile:${messageA}`,
+      messageId: messageA,
+      providerBizId: "biz-reconcile-a",
+    };
+    const scheduled = await request(adminA, "/reconcile", "POST", reconcileInput);
+    expect(scheduled.status).toBe(200);
+    const scheduledBody = await scheduled.json();
+    expect(scheduledBody.data).toMatchObject({
+      jobType: "reconcile",
+      state: "pending",
+      messageId: messageA,
+      attemptCount: 0,
+    });
+    const replay = await request(adminA, "/reconcile", "POST", reconcileInput);
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).data.id).toBe(scheduledBody.data.id);
+    expect((await request(adminB, "/reconcile", "POST", reconcileInput)).status).toBe(404);
+    expect((await request(adminA, "/reconcile", "POST", {
+      version: detailBody.data.version,
+      idempotencyKey: `reconcile:missing-target:${randomUUID()}`,
+    })).status).toBe(400);
+    expect((await request(adminA, "/reconcile", "POST", {
+      version: detailBody.data.version,
+      idempotencyKey: `reconcile:invalid-target:${randomUUID()}`,
+      messageId: "not-a-postgres-uuid",
+    })).status).toBe(404);
+    const oversizedBizId = "b".repeat(129);
+    expect((await request(adminA, "/reconcile", "POST", {
+      version: detailBody.data.version,
+      idempotencyKey: `reconcile:oversized-biz:${randomUUID()}`,
+      providerBizId: oversizedBizId,
+    })).status).toBe(400);
+    await expect(new ReconcileAdminService({ store, authorizer, clock: { now: () => now }, ids: { next: () => randomUUID() } }).enqueue(adminA, {
+      expectedVersion: detailBody.data.version,
+      idempotencyKey: `reconcile:direct-oversized-biz:${randomUUID()}`,
+      providerBizId: oversizedBizId,
+    })).rejects.toMatchObject({ code: "CONFIG_INVALID" } satisfies Partial<SmsKitError>);
+
+    expect((await request(messageReaderA, `/jobs/${scheduledBody.data.id}`)).status).toBe(403);
+    expect((await request(receiptReconcilerA, `/jobs/${scheduledBody.data.id}`)).status).toBe(200);
+    const job = await request(adminA, `/jobs/${scheduledBody.data.id}`);
+    expect(job.status).toBe(200);
+    expect(await job.json()).toMatchObject({ data: { id: scheduledBody.data.id, jobType: "reconcile" } });
+    expect((await request(adminB, `/jobs/${scheduledBody.data.id}`)).status).toBe(404);
+    expect((await request(adminA, "/jobs/not-a-postgres-uuid")).status).toBe(404);
+
+    const testOriginJobId = randomUUID();
+    await pool.query(
+      `insert into sms_kit.send_job (
+         id, tenant_id, dedupe_key, job_type, message_id, state, available_at,
+         attempt_count, max_attempts, origin_action, payload, created_at, updated_at
+       ) values ($1, $2, $3, 'send', $4, 'pending', $5, 0, 3, 'sms.test', '{"kind":"none"}'::jsonb, $5, $5)`,
+      [testOriginJobId, tenantA, `operations-sms-test:${randomUUID()}`, messageA, now],
+    );
+    expect((await request(receiptReconcilerA, `/jobs/${testOriginJobId}`)).status).toBe(403);
+    const testOriginJob = await request(testSenderA, `/jobs/${testOriginJobId}`);
+    expect(testOriginJob.status).toBe(200);
+    expect(JSON.stringify(await testOriginJob.json())).not.toContain("originAction");
+
+    const automaticallyScheduledMessage = await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-automatic-reconcile:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "waiting",
+      providerBizId: "biz-automatic-reconcile",
+      attemptCount: 1,
+    });
+    const automaticJob = await store.jobs.ensureReconcile({
+      tenantId: tenantA,
+      messageId: automaticallyScheduledMessage,
+      availableAt: now,
+    });
+    expect(automaticJob.originAction).toBeUndefined();
+    const manuallyRequestedExisting = await request(adminA, "/reconcile", "POST", {
+      version: 1,
+      idempotencyKey: `reconcile:existing:${automaticallyScheduledMessage}`,
+      messageId: automaticallyScheduledMessage,
+    });
+    expect(manuallyRequestedExisting.status).toBe(409);
+    expect((await store.jobs.get({ tenantId: tenantA, id: automaticJob.id }))?.originAction).toBeUndefined();
+    expect((await request(receiptReconcilerA, `/jobs/${automaticJob.id}`)).status).toBe(404);
+
+    const smsOriginMessage = await seedMessage({
+      tenantId: tenantA,
+      idempotencyKey: `operations-sms-origin-reconcile:${randomUUID()}`,
+      acceptanceStatus: "accepted",
+      deliveryStatus: "waiting",
+      providerBizId: "biz-sms-origin-reconcile",
+      attemptCount: 1,
+    });
+    const smsOriginReconcileJob = await store.jobs.ensureReconcile({
+      tenantId: tenantA,
+      messageId: smsOriginMessage,
+      availableAt: now,
+      originAction: "sms.test",
+    });
+    const smsOriginInput = {
+      version: 1,
+      idempotencyKey: `reconcile:sms-origin:${smsOriginMessage}`,
+      messageId: smsOriginMessage,
+    };
+    expect((await request(receiptReconcilerA, "/reconcile", "POST", smsOriginInput)).status).toBe(403);
+    const crossOriginReconcile = await request(adminA, "/reconcile", "POST", smsOriginInput);
+    expect(crossOriginReconcile.status).toBe(200);
+    expect((await crossOriginReconcile.json()).data.id).toBe(smsOriginReconcileJob.id);
+    // The durable receipt-reconcile replay retains the source-action fence.
+    expect((await request(receiptReconcilerA, "/reconcile", "POST", smsOriginInput)).status).toBe(403);
+
+    // Model the narrow race after the preliminary replay lookup: the durable
+    // claim below returns an already-completed sms.test-origin operation. The
+    // caller must still be checked before that snapshot becomes a JobDto.
+    const originalFind = store.adminOperations.find.bind(store.adminOperations);
+    let bypassReplayLookup = true;
+    store.adminOperations.find = async (input, tx) => {
+      if (bypassReplayLookup && input.operation === "receipt.reconcile" && input.idempotencyKey === smsOriginInput.idempotencyKey) {
+        bypassReplayLookup = false;
+        return undefined;
+      }
+      return originalFind(input, tx);
+    };
+    try {
+      expect((await request(receiptReconcilerA, "/reconcile", "POST", smsOriginInput)).status).toBe(403);
+    } finally {
+      store.adminOperations.find = originalFind;
+    }
+
+    const receiptHealth = await request(adminA, "/receipt-health");
+    expect(receiptHealth.status).toBe(200);
+    expect(await receiptHealth.json()).toMatchObject({ data: { systemBudgetRemaining: 500, circuitOpen: true } });
+  });
+});

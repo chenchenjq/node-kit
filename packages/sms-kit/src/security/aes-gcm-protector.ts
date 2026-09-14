@@ -4,6 +4,7 @@ import { SmsKitError } from "../core/errors.js";
 import { maskMainlandPhone, normalizeMainlandPhone, type MainlandPhone } from "../core/phone.js";
 import type {
   MessagePayloadProtector,
+  PhoneLookupHasher,
   PhoneNumberProtector,
   ProtectionContext,
 } from "../ports/security.js";
@@ -216,11 +217,15 @@ export class AesGcmMessagePayloadProtector implements MessagePayloadProtector {
   }
 }
 
-export class AesGcmPhoneNumberProtector implements PhoneNumberProtector {
+export class AesGcmPhoneNumberProtector implements PhoneNumberProtector, PhoneLookupHasher {
   constructor(
     private readonly keyring: AesKeyring,
     private readonly hasher: HmacHasher,
   ) {}
+
+  async lookupHash(phone: MainlandPhone): Promise<string> {
+    return this.hasher.hash(phone);
+  }
 
   async protect(
     phone: MainlandPhone,
@@ -230,7 +235,7 @@ export class AesGcmPhoneNumberProtector implements PhoneNumberProtector {
     return {
       ciphertext: sealBytes(key.bytes, key.id, Buffer.from(phone, "utf8"), context),
       keyId: key.id,
-      lookupHash: await this.hasher.hash(phone),
+      lookupHash: await this.lookupHash(phone),
       masked: maskMainlandPhone(phone),
       last4: phone.slice(-4),
     };

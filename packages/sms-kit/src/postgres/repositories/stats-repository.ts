@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 
+import { SmsKitError } from "../../core/errors.js";
 import type { DailyStats, SmsTransaction, StatsRepository } from "../../ports/store.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
@@ -18,12 +19,21 @@ async function transaction<T>(pool: Pool, tx: SmsTransaction | undefined, work: 
   try { await client.query("begin"); const result = await work(client); await client.query("commit"); return result; }
   catch (error) { await client.query("rollback"); throw error; } finally { client.release(); }
 }
+/** Preserve PostgreSQL bigint counters exactly at the repository boundary. */
+function count(value: string): number | string {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new SmsKitError("STORAGE_FAILURE", "statistics count is invalid", true);
+  }
+  const parsed = BigInt(value);
+  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
+}
+
 function stats(row: StatRow): DailyStats {
   return {
     tenantId: row.tenant_id as DailyStats["tenantId"], statDate: row.stat_date, templateKey: row.template_key, purpose: row.purpose,
-    submittedCount: Number(row.submitted_count), acceptedCount: Number(row.accepted_count), acceptanceRejectedCount: Number(row.acceptance_rejected_count),
-    acceptanceUnknownCount: Number(row.acceptance_unknown_count), deliveryWaitingCount: Number(row.delivery_waiting_count), deliveredCount: Number(row.delivered_count),
-    deliveryFailedCount: Number(row.delivery_failed_count), deliveryUnknownFinalCount: Number(row.delivery_unknown_final_count), retryCount: Number(row.retry_count),
+    submittedCount: count(row.submitted_count), acceptedCount: count(row.accepted_count), acceptanceRejectedCount: count(row.acceptance_rejected_count),
+    acceptanceUnknownCount: count(row.acceptance_unknown_count), deliveryWaitingCount: count(row.delivery_waiting_count), deliveredCount: count(row.delivered_count),
+    deliveryFailedCount: count(row.delivery_failed_count), deliveryUnknownFinalCount: count(row.delivery_unknown_final_count), retryCount: count(row.retry_count),
   };
 }
 
@@ -44,14 +54,63 @@ export class PgStatsRepository implements StatsRepository {
   constructor(private readonly pool: Pool) {}
 
   async query(input: Parameters<StatsRepository["query"]>[0], tx?: SmsTransaction): Promise<readonly DailyStats[]> {
-    const { rows } = await db(this.pool, tx).query<StatRow>(
+    const client = db(this.pool, tx);
+    if (input.acceptanceStatus !== undefined || input.deliveryStatus !== undefined) {
+      return this.queryMessageStatusStats(client, input);
+    }
+
+    const where = ["tenant_id = $1", "stat_date >= $2::date", "stat_date < $3::date"];
+    const values: unknown[] = [input.tenantId, input.from.toISOString().slice(0, 10), input.to.toISOString().slice(0, 10)];
+    const add = (column: string, value: unknown) => { values.push(value); where.push(`${column} = $${values.length}`); };
+    if (input.templateKey !== undefined) add("template_key", input.templateKey);
+    if (input.purpose !== undefined) add("purpose", input.purpose);
+    const { rows } = await client.query<StatRow>(
       `select tenant_id, stat_date::text, template_key, purpose, submitted_count::text, accepted_count::text,
               acceptance_rejected_count::text, acceptance_unknown_count::text, delivery_waiting_count::text,
               delivered_count::text, delivery_failed_count::text, delivery_unknown_final_count::text, retry_count::text
          from sms_kit.daily_stat
-        where tenant_id = $1 and stat_date >= $2::date and stat_date < $3::date
+        where ${where.join(" and ")}
         order by stat_date, template_key, purpose`,
-      [input.tenantId, input.from.toISOString().slice(0, 10), input.to.toISOString().slice(0, 10)],
+      values,
+    );
+    return rows.map(stats);
+  }
+
+  /**
+   * A daily aggregate only retains marginal status totals. When callers ask
+   * for an acceptance/delivery pair, aggregate source messages so the result
+   * represents their intersection rather than an ambiguous pair of margins.
+   */
+  private async queryMessageStatusStats(
+    client: Queryable,
+    input: Parameters<StatsRepository["query"]>[0],
+  ): Promise<readonly DailyStats[]> {
+    const where = ["m.tenant_id = $1", "m.submitted_at >= $2", "m.submitted_at < $3"];
+    const values: unknown[] = [input.tenantId, input.from, input.to];
+    const add = (column: string, value: unknown) => { values.push(value); where.push(`${column} = $${values.length}`); };
+    if (input.templateKey !== undefined) add("m.template_key_snapshot", input.templateKey);
+    if (input.purpose !== undefined) add("m.purpose", input.purpose);
+    if (input.acceptanceStatus !== undefined) add("m.acceptance_status", input.acceptanceStatus);
+    if (input.deliveryStatus !== undefined) add("m.delivery_status", input.deliveryStatus);
+    const { rows } = await client.query<StatRow>(
+      `select m.tenant_id,
+              (m.submitted_at at time zone 'UTC')::date::text as stat_date,
+              m.template_key_snapshot as template_key,
+              m.purpose,
+              count(*)::text as submitted_count,
+              (count(*) filter (where m.acceptance_status = 'accepted'))::text as accepted_count,
+              (count(*) filter (where m.acceptance_status = 'rejected'))::text as acceptance_rejected_count,
+              (count(*) filter (where m.acceptance_status = 'unknown'))::text as acceptance_unknown_count,
+              (count(*) filter (where m.delivery_status = 'waiting'))::text as delivery_waiting_count,
+              (count(*) filter (where m.delivery_status = 'delivered'))::text as delivered_count,
+              (count(*) filter (where m.delivery_status = 'failed'))::text as delivery_failed_count,
+              (count(*) filter (where m.delivery_status = 'unknown_final'))::text as delivery_unknown_final_count,
+              coalesce(sum((select greatest(count(*) - 1, 0) from sms_kit.send_attempt a where a.message_id = m.id)), 0)::text as retry_count
+         from sms_kit.send_message m
+        where ${where.join(" and ")}
+        group by m.tenant_id, (m.submitted_at at time zone 'UTC')::date, m.template_key_snapshot, m.purpose
+        order by (m.submitted_at at time zone 'UTC')::date, m.template_key_snapshot, m.purpose`,
+      values,
     );
     return rows.map(stats);
   }

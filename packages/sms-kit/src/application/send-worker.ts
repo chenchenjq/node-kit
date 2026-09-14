@@ -169,7 +169,7 @@ export class SendWorker {
         const message = await messages.completeAcceptance({ tenantId: job.tenantId, dispatchToken, status: "accepted", evidence: "same-dispatch-response", providerBizId: result.bizId, providerRequestId: result.requestId, occurredAt }, tx);
         if (attempt.status !== "accepted") await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "accepted", providerRequestId: result.requestId, latencyMs, occurredAt }, tx);
         await messages.clearRenderParams({ tenantId: job.tenantId, id: message.id }, tx);
-        await jobs.ensureReconcile({ tenantId: job.tenantId, messageId: message.id, availableAt: occurredAt }, tx);
+        await jobs.ensureReconcile({ tenantId: job.tenantId, messageId: message.id, availableAt: occurredAt, ...(job.originAction === undefined ? {} : { originAction: job.originAction }) }, tx);
         if (ownsLease) await jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
         return;
       }
@@ -181,7 +181,7 @@ export class SendWorker {
         const message = await messages.completeAcceptance({ tenantId: job.tenantId, dispatchToken, status: "unknown", evidence: "same-dispatch-response", finalErrorCode: result.code, occurredAt }, tx);
         await attempts.completeByDispatchToken({ tenantId: job.tenantId, dispatchToken, status: "unknown", errorCode: result.code, latencyMs, occurredAt }, tx);
         await messages.clearRenderParams({ tenantId: job.tenantId, id: message.id }, tx);
-        await jobs.ensureReconcile({ tenantId: job.tenantId, messageId: message.id, availableAt: occurredAt }, tx);
+        await jobs.ensureReconcile({ tenantId: job.tenantId, messageId: message.id, availableAt: occurredAt, ...(job.originAction === undefined ? {} : { originAction: job.originAction }) }, tx);
         if (ownsLease) await jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken: job.leaseToken! }, tx);
         return;
       }

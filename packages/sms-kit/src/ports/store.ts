@@ -18,7 +18,9 @@ export type AdminOperationName =
   | "signature.update"
   | "template.import"
   | "template.update"
-  | "sms.test.send";
+  | "sms.test.send"
+  | "policy.update"
+  | "receipt.reconcile";
 
 export type AdminOperationClaim =
   | Readonly<{ kind: "claimed" }>
@@ -362,15 +364,25 @@ export type CreateMessageInput = Readonly<{
   renderParamsKeyId?: string;
   metadata?: SafeEventMetadata;
   submittedAt: Date;
-  sendJob?: Readonly<{ id: string; dedupeKey: string; availableAt: Date; maxAttempts: number }>;
+  sendJob?: Readonly<{
+    id: string;
+    dedupeKey: string;
+    availableAt: Date;
+    maxAttempts: number;
+    /** A send job can only originate from the administrative test-send action. */
+    originAction?: "sms.test";
+  }>;
 }>;
 export type TenantMessageQuery = Readonly<{
   tenantId: TenantId;
   page: number;
   pageSize: number;
+  submittedFrom?: Date;
+  submittedTo?: Date;
   acceptanceStatus?: AcceptanceStatus;
   deliveryStatus?: DeliveryStatus;
   templateKey?: string;
+  purpose?: string;
   phoneHash?: string;
 }>;
 
@@ -382,7 +394,7 @@ export interface MessageRepository {
   get(input: Readonly<{ tenantId: TenantId; id: MessageId }>, tx?: SmsTransaction): Promise<Message | undefined>;
   /** Locks the message and its authoritative dispatch attempt together. */
   lockByDispatchToken(input: Readonly<{ tenantId: TenantId; dispatchToken: string }>, tx: SmsTransaction): Promise<Message | undefined>;
-  list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number }>;
+  list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number | string }>;
   findByProviderBizId(input: Readonly<{ tenantId: TenantId; bizId: string }>, tx?: SmsTransaction): Promise<Message | undefined>;
   /** Callback-only lookup: both opaque provider references must name one message. */
   lockByReceiptReference(input: Readonly<{ outId: string; bizId: string }>, tx: SmsTransaction): Promise<Message | undefined>;
@@ -462,6 +474,8 @@ export interface AttemptRepository {
     jobs: ReadonlyArray<Readonly<{ tenantId: TenantId; id: string; leaseToken: string }>>;
     limit: number;
   }>, tx: SmsTransaction): Promise<readonly Attempt[]>;
+  /** Counts only attempts belonging to a message in the trusted tenant. */
+  countForMessage(input: Readonly<{ tenantId: TenantId; messageId: MessageId }>, tx?: SmsTransaction): Promise<number | string>;
 }
 
 export type DeliveryReceipt = Readonly<{
@@ -497,6 +511,8 @@ export interface ReceiptRepository {
   }>, tx?: SmsTransaction): Promise<{ receipt: DeliveryReceipt; created: boolean }>;
 }
 
+export type JobOriginAction = "sms.test" | "receipt.reconcile";
+
 export type Job = Readonly<{
   id: string;
   tenantId: TenantId;
@@ -512,6 +528,8 @@ export type Job = Readonly<{
   attemptCount: number;
   maxAttempts: number;
   lastErrorCode?: string;
+  /** Internal authorization metadata; never included in a public JobDto. */
+  originAction?: JobOriginAction;
   payload: JobPayload;
 }>;
 export type JobPayload =
@@ -535,7 +553,12 @@ export interface JobRepository {
   tryReschedule(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; availableAt: Date; errorCode?: string }>, tx?: SmsTransaction): Promise<boolean>;
   tryFail(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string; errorCode: string; terminal: boolean }>, tx?: SmsTransaction): Promise<boolean>;
   /** Creates at most one reconciliation job per message, even under concurrent recovery. */
-  ensureReconcile(input: Readonly<{ tenantId: TenantId; messageId: MessageId; availableAt: Date }>, tx?: SmsTransaction): Promise<void>;
+  ensureReconcile(input: Readonly<{
+    tenantId: TenantId;
+    messageId: MessageId;
+    availableAt: Date;
+    originAction?: JobOriginAction;
+  }>, tx?: SmsTransaction): Promise<Job>;
   /** Locks expired send jobs before a separate fresh marker recheck. */
   lockExpiredSendJobs(input: Readonly<{ before: Date; limit: number }>, tx: SmsTransaction): Promise<readonly Job[]>;
   returnToPendingIfNoStarted(input: Readonly<{ tenantId: TenantId; id: string; leaseToken: string }>, tx: SmsTransaction): Promise<boolean>;
@@ -658,23 +681,35 @@ export interface AuditRepository {
   }>;
 }
 
+/** JSON-safe nonnegative counter: a decimal string is used above JS-safe range. */
+export type StatisticCount = number | string;
+
 export type DailyStats = Readonly<{
   tenantId: TenantId;
   statDate: string;
   templateKey: string;
   purpose: string;
-  submittedCount: number;
-  acceptedCount: number;
-  acceptanceRejectedCount: number;
-  acceptanceUnknownCount: number;
-  deliveryWaitingCount: number;
-  deliveredCount: number;
-  deliveryFailedCount: number;
-  deliveryUnknownFinalCount: number;
-  retryCount: number;
+  submittedCount: StatisticCount;
+  acceptedCount: StatisticCount;
+  acceptanceRejectedCount: StatisticCount;
+  acceptanceUnknownCount: StatisticCount;
+  deliveryWaitingCount: StatisticCount;
+  deliveredCount: StatisticCount;
+  deliveryFailedCount: StatisticCount;
+  deliveryUnknownFinalCount: StatisticCount;
+  retryCount: StatisticCount;
 }>;
 export interface StatsRepository {
-  query(input: Readonly<{ tenantId: TenantId; from: Date; to: Date }>, tx?: SmsTransaction): Promise<readonly DailyStats[]>;
+  /** Status filters select the exact acceptance/delivery intersection, never marginal daily counters. */
+  query(input: Readonly<{
+    tenantId: TenantId;
+    from: Date;
+    to: Date;
+    templateKey?: string;
+    purpose?: string;
+    acceptanceStatus?: AcceptanceStatus;
+    deliveryStatus?: DeliveryStatus;
+  }>, tx?: SmsTransaction): Promise<readonly DailyStats[]>;
   /** Omitting tenantId lets the maintenance worker consume globally ordered dirty keys. */
   rollupDirtyDates(input: Readonly<{ tenantId?: TenantId; limit: number }>, tx?: SmsTransaction): Promise<number>;
 }
@@ -693,16 +728,16 @@ export interface MaintenanceRepository {
 }
 
 export type HealthCounts = Readonly<{
-  usableTemplates?: number;
-  waitingMessages?: number;
+  usableTemplates?: StatisticCount;
+  waitingMessages?: StatisticCount;
   oldestWaitingAt?: Date;
   oldestPendingJobAt?: Date;
-  pendingJobs: number;
-  acceptanceUnknown: number;
-  finalUnknown: number;
+  pendingJobs: StatisticCount;
+  acceptanceUnknown: StatisticCount;
+  finalUnknown: StatisticCount;
   /** System-owned receipts deliberately have no tenant/message details. */
-  unmatchedReceipts: number;
-  heldBudgetCount?: number;
+  unmatchedReceipts: StatisticCount;
+  heldBudgetCount?: StatisticCount;
   lastReceiptAt?: Date;
 }>;
 export interface HealthRepository {

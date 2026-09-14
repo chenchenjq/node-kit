@@ -8,6 +8,7 @@ import type { PgSmsTransaction } from "../transaction.js";
 import { markMessageStatsDirty } from "./stats-repository.js";
 
 type Queryable = Pool | PoolClient;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type MessageRow = {
   id: string; tenant_id: string; idempotency_key: string; template_id: string; template_key_snapshot: string;
   external_template_code_snapshot: string; signature_name_snapshot: string; purpose: string; phone_ciphertext: string | null;
@@ -43,6 +44,15 @@ function message(row: MessageRow): Message {
     ...(row.finalized_at === null ? {} : { finalizedAt: row.finalized_at }), version: Number(row.version),
   };
 }
+
+/** PostgreSQL bigint counts are exposed without silently losing precision. */
+function count(value: string): number | string {
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new SmsKitError("STORAGE_FAILURE", "message count is invalid", true);
+  }
+  const parsed = BigInt(value);
+  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : parsed.toString();
+}
 const selectMessage = "id, tenant_id, idempotency_key, template_id, template_key_snapshot, external_template_code_snapshot, signature_name_snapshot, purpose, phone_ciphertext, phone_key_id, phone_hash, phone_last4, phone_masked, variable_names, render_params_ciphertext, render_params_key_id, metadata, acceptance_status, delivery_status, provider_biz_id, provider_request_id, final_error_code, submitted_at, accepted_at, delivered_at, finalized_at, version";
 const selectMessageFromJoin = selectMessage.split(", ").map((field) => `m.${field}`).join(", ");
 
@@ -60,6 +70,12 @@ export class PgMessageRepository implements MessageRepository {
   }
 
   async createWithSendJob(input: CreateMessageInput, tx?: SmsTransaction): Promise<{ message: Message; created: boolean }> {
+    // Keep the public creation path aligned with the durable origin/job-type
+    // check. JavaScript callers can bypass TypeScript's narrowed port type.
+    const originAction: unknown = input.sendJob?.originAction;
+    if (originAction !== undefined && originAction !== "sms.test") {
+      throw new SmsKitError("CONFIG_INVALID", "send job origin is invalid");
+    }
     return transaction(this.pool, tx, async (db) => {
       const inserted = await db.query<MessageRow>(
         `insert into sms_kit.send_message (id, tenant_id, idempotency_key, template_id, template_key_snapshot, external_template_code_snapshot, signature_name_snapshot, purpose, phone_ciphertext, phone_key_id, phone_hash, phone_last4, phone_masked, variable_names, render_params_ciphertext, render_params_key_id, metadata, acceptance_status, delivery_status, provider_biz_id, provider_request_id, final_error_code, submitted_at, accepted_at, delivered_at, finalized_at, version, created_at, updated_at)
@@ -76,11 +92,11 @@ export class PgMessageRepository implements MessageRepository {
       }
       if (input.sendJob !== undefined) {
         const job = await db.query<{ id: string; message_id: string | null }>(
-          `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, payload, created_at, updated_at)
-           values ($1, $2, $3, 'send', $4, 'pending', $5, 0, $6, '{"kind":"none"}'::jsonb, now(), now())
+          `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, origin_action, payload, created_at, updated_at)
+           values ($1, $2, $3, 'send', $4, 'pending', $5, 0, $6, $7, '{"kind":"none"}'::jsonb, now(), now())
            on conflict (tenant_id, job_type, dedupe_key) do nothing
            returning id, message_id`,
-          [input.sendJob.id, input.tenantId, input.sendJob.dedupeKey, input.id, input.sendJob.availableAt, input.sendJob.maxAttempts],
+          [input.sendJob.id, input.tenantId, input.sendJob.dedupeKey, input.id, input.sendJob.availableAt, input.sendJob.maxAttempts, input.sendJob.originAction ?? null],
         );
         if (job.rows[0] === undefined) {
           const existing = await db.query<{ id: string; message_id: string | null }>("select id, message_id from sms_kit.send_job where tenant_id = $1 and job_type = 'send' and dedupe_key = $2 for update", [input.tenantId, input.sendJob.dedupeKey]);
@@ -95,6 +111,10 @@ export class PgMessageRepository implements MessageRepository {
   }
 
   async get(input: Readonly<{ tenantId: Message["tenantId"]; id: Message["id"] }>, tx?: SmsTransaction): Promise<Message | undefined> {
+    // PostgreSQL UUID casts must not turn a public missing-resource lookup
+    // into a storage error. Other port implementations remain free to use
+    // their own identifier representation.
+    if (!uuidPattern.test(input.id)) return undefined;
     const { rows } = await queryable(this.pool, tx).query<MessageRow>(`select ${selectMessage} from sms_kit.send_message where tenant_id = $1 and id = $2${tx === undefined ? "" : " for update"}`, [input.tenantId, input.id]);
     return rows[0] === undefined ? undefined : message(rows[0]);
   }
@@ -109,20 +129,23 @@ export class PgMessageRepository implements MessageRepository {
     return rows[0] === undefined ? undefined : message(rows[0]);
   }
 
-  async list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number }> {
+  async list(input: TenantMessageQuery, tx?: SmsTransaction): Promise<{ items: readonly Message[]; total: number | string }> {
     const where = ["tenant_id = $1"];
     const values: unknown[] = [input.tenantId];
-    const add = (column: string, value: unknown) => { values.push(value); where.push(`${column} = $${values.length}`); };
-    if (input.acceptanceStatus !== undefined) add("acceptance_status", input.acceptanceStatus);
-    if (input.deliveryStatus !== undefined) add("delivery_status", input.deliveryStatus);
-    if (input.templateKey !== undefined) add("template_key_snapshot", input.templateKey);
-    if (input.phoneHash !== undefined) add("phone_hash", input.phoneHash);
+    const add = (condition: string, value: unknown) => { values.push(value); where.push(`${condition} $${values.length}`); };
+    if (input.acceptanceStatus !== undefined) add("acceptance_status =", input.acceptanceStatus);
+    if (input.deliveryStatus !== undefined) add("delivery_status =", input.deliveryStatus);
+    if (input.templateKey !== undefined) add("template_key_snapshot =", input.templateKey);
+    if (input.purpose !== undefined) add("purpose =", input.purpose);
+    if (input.phoneHash !== undefined) add("phone_hash =", input.phoneHash);
+    if (input.submittedFrom !== undefined) add("submitted_at >=", input.submittedFrom);
+    if (input.submittedTo !== undefined) add("submitted_at <", input.submittedTo);
     const filter = where.join(" and ");
     const db = queryable(this.pool, tx);
-    const count = await db.query<{ total: string }>(`select count(*)::text as total from sms_kit.send_message where ${filter}`, values);
+    const countResult = await db.query<{ total: string }>(`select count(*)::text as total from sms_kit.send_message where ${filter}`, values);
     values.push(input.pageSize, (input.page - 1) * input.pageSize);
     const items = await db.query<MessageRow>(`select ${selectMessage} from sms_kit.send_message where ${filter} order by submitted_at desc, id desc limit $${values.length - 1} offset $${values.length}`, values);
-    return { items: items.rows.map(message), total: Number(count.rows[0]?.total ?? "0") };
+    return { items: items.rows.map(message), total: count(countResult.rows[0]?.total ?? "0") };
   }
 
   async findByProviderBizId(input: Readonly<{ tenantId: Message["tenantId"]; bizId: string }>, tx?: SmsTransaction): Promise<Message | undefined> {
