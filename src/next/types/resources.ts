@@ -91,8 +91,12 @@ export const importTemplateInputSchema = z.strictObject({
 export const updateTemplateInputSchema = z.strictObject({
   version: versionSchema,
   idempotencyKey: idempotencyKeySchema,
+  /** Renames are accepted only for unused keys; the resource service fences used keys with CONCURRENT_MODIFICATION. */
+  templateKey: z.string().trim().min(1).optional(),
   enabled: z.boolean().optional(),
   purpose: z.string().trim().min(1).optional(),
+}).refine((value) => value.templateKey !== undefined || value.enabled !== undefined || value.purpose !== undefined, {
+  message: "at least one template field must be updated",
 });
 
 export const signaturePageDtoSchema = pageSchema(signatureDtoSchema);
