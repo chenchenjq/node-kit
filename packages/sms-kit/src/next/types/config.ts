@@ -3,7 +3,8 @@ import { z } from "zod";
 import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeSchema, versionSchema } from "./common.js";
 
 export const secretRefDtoSchema = z.strictObject({
-  scheme: z.literal("env"),
+  scheme: z.string().trim().min(1).max(64)
+    .regex(/^[a-z][a-z0-9+.-]*$/, "secret reference scheme must be a lowercase URI scheme identifier"),
   maskedName: z.string().trim().min(3).max(256)
     .regex(
       /^(?:\*{3}|[A-Z][A-Z0-9]{0,7}_\*{3}_[A-Z][A-Z0-9]{0,7})$/,
@@ -13,6 +14,15 @@ export const secretRefDtoSchema = z.strictObject({
 });
 
 export const providerConfigStatusSchema = z.enum(["unconfigured", "untested", "ready", "degraded", "disabled"]);
+
+const providerEndpointSchema = z.url({ protocol: /^https$/ }).max(2_048).refine((value) => {
+  const authorityStart = value.indexOf("://") + 3;
+  const authority = value.slice(authorityStart).split(/[/?#]/, 1)[0] ?? "";
+  return !authority.includes("@") && !value.includes("?") && !value.includes("#");
+}, {
+  message: "provider endpoint must not contain userinfo, query parameters, or a fragment",
+});
+
 export const providerConfigDtoSchema = z.discriminatedUnion("status", [
   z.strictObject({
     provider: z.literal("aliyun"),
@@ -26,7 +36,7 @@ export const providerConfigDtoSchema = z.discriminatedUnion("status", [
     status: z.enum(["untested", "ready", "degraded", "disabled"]),
     enabled: z.boolean(),
     region: z.string().trim().min(1),
-    endpoint: z.string().trim().min(1).optional(),
+    endpoint: providerEndpointSchema.optional(),
     accessKeyIdRef: secretRefDtoSchema,
     accessKeySecretRef: secretRefDtoSchema,
     receiptCallbackTokenRef: secretRefDtoSchema,
@@ -44,7 +54,7 @@ export const updateProviderConfigSchema = z.strictObject({
   idempotencyKey: idempotencyKeySchema,
   provider: z.literal("aliyun").optional(),
   region: z.string().trim().min(1),
-  endpoint: z.string().trim().min(1).optional(),
+  endpoint: providerEndpointSchema.optional(),
   accessKeyIdRef: secretReferenceInputSchema,
   accessKeySecretRef: secretReferenceInputSchema,
   receiptCallbackTokenRef: secretReferenceInputSchema.optional(),
