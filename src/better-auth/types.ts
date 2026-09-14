@@ -15,6 +15,14 @@ export type BetterAuthSendPasswordResetOtp = NonNullable<PhoneNumberOptions["sen
 export type BetterAuthOtpInput = Parameters<BetterAuthSendOtp>[0];
 export type BetterAuthCallbackContext = Parameters<BetterAuthSendOtp>[1];
 export type BetterAuthSmsCallbacks = Pick<PhoneNumberOptions, "sendOTP" | "sendPasswordResetOTP">;
+export type BetterAuthOtpPurpose = "login" | "passwordReset";
+export type BetterAuthOtpIssuance = Readonly<{ id: string; expiresAt: Date }>;
+export type BetterAuthOtpIssuanceInput = Readonly<{
+  tenantId: TenantId;
+  phone: string;
+  purpose: BetterAuthOtpPurpose;
+  context: BetterAuthCallbackContext;
+}>;
 
 /** Wrap the complete Better Auth password-reset route, not only its callback. */
 export type BetterAuthPasswordResetPreRouteGuardInput<T> = Readonly<{
@@ -33,6 +41,11 @@ export type BetterAuthSmsAdapterOptions = Readonly<{
   isExistingPhone(tenantId: TenantId, phone: string): Promise<boolean>;
   resolveTenant(context: BetterAuthCallbackContext): Promise<TenantId>;
   resolveTrustedIp(context: BetterAuthCallbackContext): Promise<string | undefined>;
+  /**
+   * Resolves the exact host-owned Better Auth verification issuance. Its opaque
+   * ID must remain stable for retries and differ for every newly issued OTP.
+   */
+  resolveOtpIssuance(input: BetterAuthOtpIssuanceInput): Promise<BetterAuthOtpIssuance>;
   scheduler: BackgroundTaskScheduler<BetterAuthCallbackContext>;
   /** Runs rate enforcement and the account lookup under one host transaction. */
   transaction<T>(work: (tx: SmsTransaction) => Promise<T>): Promise<T>;

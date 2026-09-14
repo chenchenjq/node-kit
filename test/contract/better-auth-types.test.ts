@@ -11,6 +11,7 @@ it("is accepted by the installed Better Auth phone plugin", () => {
     isExistingPhone: async () => true,
     resolveTenant: async () => "tenant-a" as TenantId,
     resolveTrustedIp: async () => undefined,
+    resolveOtpIssuance: async () => ({ id: "verification:issuance-1", expiresAt: new Date(Date.now() + 300_000) }),
     scheduler: { schedule: () => undefined },
     transaction: async <T>(work: (tx: SmsTransaction) => Promise<T>) => work({} as SmsTransaction),
     rateLimits: { lock: async () => undefined, increment: async () => 1, countSince: async () => 1 },

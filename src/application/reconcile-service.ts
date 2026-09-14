@@ -7,7 +7,7 @@ import type { PhoneNumberProtector } from "../ports/security.js";
 import type { Job, Message, SmsStore } from "../ports/store.js";
 
 const pageSize = 50;
-const queryWindowMs = 30 * 24 * 60 * 60 * 1_000;
+const millisecondsPerDay = 24 * 60 * 60 * 1_000;
 
 export type ReconcileServiceDependencies = Readonly<{
   store: SmsStore;
@@ -21,14 +21,17 @@ export type ReconcileServiceDependencies = Readonly<{
 }>;
 export type ReconcileRunInput = Readonly<{ limit: number }>;
 
-function shanghaiDate(date: Date): string {
+function shanghaiDate(date: Date): Readonly<{ sendDate: string; dayNumber: number }> {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
   }).formatToParts(date);
   const value = (type: string) => parts.find((part) => part.type === type)?.value;
   const year = value("year"); const month = value("month"); const day = value("day");
   if (year === undefined || month === undefined || day === undefined) throw new RangeError("cannot derive Alibaba send date");
-  return `${year}${month}${day}`;
+  return {
+    sendDate: `${year}${month}${day}`,
+    dayNumber: Math.floor(Date.UTC(Number(year), Number(month) - 1, Number(day)) / millisecondsPerDay),
+  };
 }
 
 function receiptKey(message: Message, bizId: string, status: "delivered" | "failed", occurredAt: Date): string {
@@ -70,7 +73,24 @@ export class ReconcileService {
       await this.dependencies.store.jobs.trySucceed({ tenantId: job.tenantId, id: job.id, leaseToken });
       return;
     }
-    if (message.submittedAt.getTime() < now.getTime() - queryWindowMs) {
+    const attempts = await this.dependencies.store.attempts.listForMessage({ tenantId: job.tenantId, messageId: message.id });
+    const dispatchAttempt = attempts[attempts.length - 1];
+    if (dispatchAttempt === undefined || dispatchAttempt.status !== message.acceptanceStatus || !["accepted", "unknown"].includes(dispatchAttempt.status)) {
+      await this.reschedule(job, "STORAGE_FAILURE");
+      return;
+    }
+    if (!Number.isFinite(dispatchAttempt.dispatchMarkedAt.getTime()) || dispatchAttempt.dispatchMarkedAt.getTime() > now.getTime()) {
+      await this.reschedule(job, "STORAGE_FAILURE");
+      return;
+    }
+    const dispatchDate = shanghaiDate(dispatchAttempt.dispatchMarkedAt);
+    const today = shanghaiDate(now);
+    const ageInCalendarDays = today.dayNumber - dispatchDate.dayNumber;
+    if (ageInCalendarDays < 0) {
+      await this.reschedule(job, "STORAGE_FAILURE");
+      return;
+    }
+    if (ageInCalendarDays >= 30) {
       await this.finalizeUnknown(job, message, now);
       return;
     }
@@ -98,7 +118,7 @@ export class ReconcileService {
       const result = await this.dependencies.provider.queryDelivery({
         region: config.region, ...(config.endpoint === undefined ? {} : { endpoint: config.endpoint }),
         accessKeyId: config.accessKeyIdRef, accessKeySecret: config.accessKeySecretRef,
-        phoneNumber, sendDate: shanghaiDate(message.submittedAt), currentPage, pageSize,
+        phoneNumber, sendDate: dispatchDate.sendDate, currentPage, pageSize,
         ...(message.providerBizId === undefined ? {} : { bizId: message.providerBizId }),
       });
       if (result.kind === "unknown") { await this.reschedule(job, result.code); return; }

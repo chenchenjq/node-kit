@@ -2,6 +2,9 @@ export { createBetterAuthPasswordResetPreRouteGuard, createBetterAuthSmsAdapter 
 export type {
   BetterAuthCallbackContext,
   BetterAuthOtpInput,
+  BetterAuthOtpIssuance,
+  BetterAuthOtpIssuanceInput,
+  BetterAuthOtpPurpose,
   BetterAuthPasswordResetPreRouteGuard,
   BetterAuthPasswordResetPreRouteGuardInput,
   BetterAuthSendOtp,

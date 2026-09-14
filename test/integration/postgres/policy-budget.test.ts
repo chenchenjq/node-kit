@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { enforcePhoneSendPolicy } from "../../../src/application/send-policy.js";
 import type { MessageId, TenantId } from "../../../src/core/types.js";
+import type { VerificationPolicy } from "../../../src/ports/policy.js";
 import type { CreateMessageInput } from "../../../src/ports/store.js";
 import { SmsKitError } from "../../../src/core/errors.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
@@ -105,5 +107,86 @@ describe("PostgreSQL policy budgets", () => {
 
     await expect(store.transaction((tx) => store.policy.holdBudget({ tenantId: tenant, messageId: message.id, now }, tx)))
       .rejects.toMatchObject({ code: "CIRCUIT_OPEN" } satisfies Partial<SmsKitError>);
+  });
+
+  it("enforces phone hourly and daily limits as trailing windows across epoch boundaries", async () => {
+    const basePolicy: VerificationPolicy = {
+      version: 1, otpLength: 6, otpTtlSeconds: 300, otpMaxAttempts: 3, proofTtlSeconds: 300,
+      phoneMinIntervalSeconds: 0, phoneHourlyLimit: 2, phoneDailyLimit: 100,
+      ipWindowSeconds: 60, ipWindowLimit: 100, systemDailyBudget: null, circuitOpen: false,
+    };
+    const enforce = (phoneHash: string, now: string, policy = basePolicy) => store.transaction((tx) => enforcePhoneSendPolicy({
+      policy, rateLimits: store.rateLimits, tenantId: "tenant-sliding" as TenantId,
+      phoneHash, purpose: "verification", now: new Date(now), tx,
+    }));
+
+    await enforce("hourly", "2026-09-14T00:59:50.000Z");
+    await enforce("hourly", "2026-09-14T01:00:10.000Z");
+    await expect(enforce("hourly", "2026-09-14T01:00:20.000Z"))
+      .rejects.toMatchObject({ code: "RATE_LIMITED" } satisfies Partial<SmsKitError>);
+    await expect(enforce("hourly", "2026-09-14T01:59:50.001Z")).resolves.toBeUndefined();
+
+    const dailyPolicy = { ...basePolicy, phoneHourlyLimit: 100, phoneDailyLimit: 2 };
+    await enforce("daily", "2026-09-14T23:59:50.000Z", dailyPolicy);
+    await enforce("daily", "2026-09-15T00:00:10.000Z", dailyPolicy);
+    await expect(enforce("daily", "2026-09-15T00:00:20.000Z", dailyPolicy))
+      .rejects.toMatchObject({ code: "RATE_LIMITED" } satisfies Partial<SmsKitError>);
+    await expect(enforce("daily", "2026-09-15T23:59:50.001Z", dailyPolicy)).resolves.toBeUndefined();
+  });
+
+  it("serializes trailing phone counts and rolls back the rejected event", async () => {
+    const policy: VerificationPolicy = {
+      version: 1, otpLength: 6, otpTtlSeconds: 300, otpMaxAttempts: 3, proofTtlSeconds: 300,
+      phoneMinIntervalSeconds: 0, phoneHourlyLimit: 1, phoneDailyLimit: 1,
+      ipWindowSeconds: 60, ipWindowLimit: 100, systemDailyBudget: null, circuitOpen: false,
+    };
+    const now = new Date("2026-09-16T00:00:00.000Z");
+    const phoneHash = `concurrent:${randomUUID()}`;
+    const purpose = "verification";
+    const results = await Promise.allSettled([1, 2].map(() => store.transaction((tx) => enforcePhoneSendPolicy({
+      policy, rateLimits: store.rateLimits, tenantId: "tenant-sliding" as TenantId,
+      phoneHash, purpose, now, tx,
+    }))));
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected" && (result.reason as SmsKitError).code === "RATE_LIMITED")).toHaveLength(1);
+    const counts = await pool.query<{ scope_hash: string; count: number }>(
+      `select scope_hash, sum(count)::integer as count from sms_kit.rate_limit_bucket
+       where tenant_id = $1 and scope_hash in ($2, $3) group by scope_hash order by scope_hash`,
+      ["tenant-sliding", `daily:${phoneHash}:${purpose}`, `hourly:${phoneHash}:${purpose}`],
+    );
+    expect(counts.rows).toEqual([
+      { scope_hash: `daily:${phoneHash}:${purpose}`, count: 1 },
+      { scope_hash: `hourly:${phoneHash}:${purpose}`, count: 1 },
+    ]);
+  });
+
+  it("retains cooldown history for a later policy increase", async () => {
+    const basePolicy: VerificationPolicy = {
+      version: 1, otpLength: 6, otpTtlSeconds: 300, otpMaxAttempts: 3, proofTtlSeconds: 300,
+      phoneMinIntervalSeconds: 1, phoneHourlyLimit: 100, phoneDailyLimit: 100,
+      ipWindowSeconds: 60, ipWindowLimit: 100, systemDailyBudget: null, circuitOpen: false,
+    };
+    const tenantId = "tenant-dynamic-cooldown" as TenantId;
+    const phoneHash = `cooldown:${randomUUID()}`;
+    const firstAt = new Date("2026-09-17T00:00:00.000Z");
+    const laterAt = new Date("2026-09-17T00:00:02.000Z");
+    const enforce = (policy: VerificationPolicy, now: Date) => store.transaction((tx) => enforcePhoneSendPolicy({
+      policy, rateLimits: store.rateLimits, tenantId, phoneHash, purpose: "verification", now, tx,
+    }));
+
+    await enforce(basePolicy, firstAt);
+    await store.maintenance.applyRetention({
+      now: laterAt,
+      challengeBefore: new Date(0),
+      messagePhoneBefore: new Date(0),
+      receiptBefore: new Date(0),
+      auditBefore: new Date(0),
+      reservationBefore: new Date(0),
+      batchSize: 10_000,
+    });
+
+    await expect(enforce({ ...basePolicy, phoneMinIntervalSeconds: 3_600 }, laterAt))
+      .rejects.toMatchObject({ code: "RATE_LIMITED" } satisfies Partial<SmsKitError>);
   });
 });

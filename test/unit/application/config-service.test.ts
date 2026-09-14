@@ -13,6 +13,47 @@ const readyConfig: ConfiguredProviderConfig = {
 };
 
 describe("ConfigService", () => {
+  it.each([
+    ["non-HTTPS URL", "http://sms.example.test"],
+    ["credentials", "https://user:secret@sms.example.test"],
+    ["empty userinfo", "https://@sms.example.test"],
+    ["empty username and password", "https://:@sms.example.test"],
+    ["normalized dot path", "https://sms.example.test/a/.."],
+    ["percent-encoded dot path", "https://sms.example.test/%2e"],
+    ["query", "https://sms.example.test?secret=value"],
+    ["overlong origin", `https://${Array.from({ length: 1_100 }, () => "a").join(".")}`],
+  ])("rejects %s before a direct save or patch can persist it", async (_label, endpoint) => {
+    let updates = 0;
+    let claims = 0;
+    const service = new ConfigService({
+      store: {
+        adminOperations: {
+          find: async () => undefined,
+          claim: async () => { claims += 1; return { kind: "claimed" }; },
+          complete: async () => undefined,
+        },
+        config: {
+          get: async () => readyConfig,
+          update: async () => { updates += 1; return readyConfig; },
+        },
+        audits: { append: async () => undefined },
+        transaction: async (work: (tx: never) => Promise<unknown>) => work(undefined as never),
+      } as never,
+      provider: {} as never,
+      secretResolver: {} as never,
+      authorizer: { assert: () => undefined },
+      clock: { now: () => new Date("2026-09-14T00:00:00.000Z") },
+      ids: { next: () => "endpoint-validation" },
+      events: { emit: () => undefined },
+    });
+    const update = { ...readyConfig, endpoint, expectedVersion: readyConfig.version };
+
+    await expect(service.save(actor, update)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(service.patch(actor, { ...update, provider: "aliyun", idempotencyKey: `endpoint:${_label}` }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect({ updates, claims }).toEqual({ updates: 0, claims: 0 });
+  });
+
   it("returns configuration to untested after a credential reference changes", async () => {
     let saved: ConfiguredProviderConfig | undefined;
     const service = new ConfigService({

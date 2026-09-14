@@ -329,15 +329,24 @@ describe("public Next admin DTO contracts", () => {
     expect(updateProviderConfigSchema.parse(input)).toMatchObject(input);
   });
 
-  it("accepts a credential-free HTTPS provider endpoint in public input and output DTOs", () => {
-    const endpoint = "https://dysmsapi.aliyuncs.com";
-
+  it.each([
+    "https://dysmsapi.aliyuncs.com",
+    "HTTPS://dysmsapi.aliyuncs.com",
+    "https://sms.example.test:8443",
+    "https://[2001:db8::1]:8443",
+    "https://dysmsapi.aliyuncs.com/",
+  ])("accepts and preserves credential-free HTTPS provider origin %s", (endpoint) => {
     expect(updateProviderConfigSchema.parse(providerUpdateFixture(endpoint)).endpoint).toBe(endpoint);
     expect(providerConfigDtoSchema.parse(configuredProviderFixture(endpoint))).toMatchObject({ endpoint });
   });
 
   it.each([
     ["userinfo", "https://access-key:secret@dysmsapi.aliyuncs.com"],
+    ["empty userinfo", "https://@dysmsapi.aliyuncs.com"],
+    ["empty username and password", "https://:@dysmsapi.aliyuncs.com"],
+    ["path", "https://dysmsapi.aliyuncs.com/proxy"],
+    ["normalized dot path", "https://dysmsapi.aliyuncs.com/a/.."],
+    ["percent-encoded dot path", "https://dysmsapi.aliyuncs.com/%2e"],
     ["query", "https://dysmsapi.aliyuncs.com?access_key=secret"],
     ["fragment", "https://dysmsapi.aliyuncs.com#secret-token"],
   ])("rejects an HTTPS provider endpoint containing %s in public input and output DTOs", (_label, endpoint) => {

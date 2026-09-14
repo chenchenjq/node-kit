@@ -1,4 +1,5 @@
 import { SmsKitError } from "../core/errors.js";
+import { isProviderEndpointOrigin } from "../core/provider-endpoint.js";
 import type { SmsProvider } from "../ports/provider.js";
 import { withProviderTimeout } from "../ports/provider-timeout.js";
 import { projectSafeEventMetadata, type Clock, type EventSink, type IdGenerator, type SafeEventMetadata } from "../ports/runtime.js";
@@ -58,7 +59,7 @@ function assertConfigInput(input: UpdateProviderConfigInput): void {
       input.receiptCallbackTokenRef.trim().length === 0 || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0) {
     throw new SmsKitError("CONFIG_INVALID", "invalid provider configuration");
   }
-  if (input.endpoint !== undefined && input.endpoint.trim().length === 0) {
+  if (input.endpoint !== undefined && !isProviderEndpointOrigin(input.endpoint)) {
     throw new SmsKitError("CONFIG_INVALID", "invalid provider configuration");
   }
 }
@@ -102,7 +103,7 @@ function configFromSnapshot(value: Readonly<Record<string, unknown>>): Configure
   if (!["untested", "ready", "degraded", "disabled"].includes(status) ||
       !["never", "succeeded", "failed"].includes(lastTestStatus)) throw new TypeError("invalid provider config status");
   const endpoint = value.endpoint;
-  if (endpoint !== undefined && typeof endpoint !== "string") throw new TypeError("invalid endpoint");
+  if (endpoint !== undefined && (typeof endpoint !== "string" || !isProviderEndpointOrigin(endpoint))) throw new TypeError("invalid endpoint");
   const testedAtValue = value.lastTestedAt;
   const testedAt = typeof testedAtValue === "string" ? new Date(testedAtValue) : undefined;
   if (testedAtValue !== undefined && (testedAt === undefined || Number.isNaN(testedAt.getTime()))) throw new TypeError("invalid testedAt");
@@ -227,7 +228,8 @@ export class ConfigService<Actor extends AuthorizationActor = AuthorizationActor
   /** Applies the public PATCH contract with durable, tenant-fenced replay semantics. */
   async patch(actor: Actor, input: PatchProviderConfigInput): Promise<ProviderConfig> {
     await this.dependencies.authorizer.assert(actor, "config.write");
-    if (input.idempotencyKey.trim().length === 0 || input.idempotencyKey.length > 512) {
+    if (input.idempotencyKey.trim().length === 0 || input.idempotencyKey.length > 512 ||
+        (input.endpoint !== undefined && !isProviderEndpointOrigin(input.endpoint))) {
       throw new SmsKitError("CONFIG_INVALID", "invalid provider configuration");
     }
     const request = {
