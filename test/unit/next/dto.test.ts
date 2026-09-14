@@ -4,6 +4,7 @@ import {
   apiFailureSchema,
   messageDtoSchema,
   phoneDtoSchema,
+  providerConfigDtoSchema,
   resourceSyncPreviewInputSchema,
   secretRefDtoSchema,
   smsStatsDtoSchema,
@@ -56,6 +57,33 @@ function statsFixture() {
   };
 }
 
+function configuredProviderFixture(endpoint: string) {
+  return {
+    provider: "aliyun" as const,
+    status: "ready" as const,
+    enabled: true,
+    region: "cn-hangzhou",
+    endpoint,
+    accessKeyIdRef: { scheme: "vault", maskedName: "ALIYUN_***_ID", configured: true },
+    accessKeySecretRef: { scheme: "vault", maskedName: "ALIYUN_***_SECRET", configured: true },
+    receiptCallbackTokenRef: { scheme: "vault", maskedName: "CALLBACK_***_TOKEN", configured: true },
+    lastTestStatus: "succeeded" as const,
+    lastTestedAt: "2026-09-13T00:00:00.000Z",
+    version: 1,
+  };
+}
+
+function providerUpdateFixture(endpoint: string) {
+  return {
+    version: 1,
+    idempotencyKey: "config:endpoint",
+    region: "cn-hangzhou",
+    endpoint,
+    accessKeyIdRef: "vault://sms/aliyun/access-key-id",
+    accessKeySecretRef: "vault://sms/aliyun/access-key-secret",
+  };
+}
+
 describe("public Next admin DTO contracts", () => {
   it("rejects unknown config fields", () => {
     const input = {
@@ -103,12 +131,12 @@ describe("public Next admin DTO contracts", () => {
   });
 
   it.each([
-    ["AccessKey ID", "LTAI5tExampleAccessKey"],
-    ["AccessKey Secret", "example-access-key-secret"],
-    ["callback token", "callback-token-example"],
     ["complete env reference", "env://ALIYUN_SECRET"],
-    ["env reference with a callback token", "env://CALLBACK_TOKEN?token=callback-token-example"],
-  ])("rejects injected secret reference scheme content: %s", (_label, scheme) => {
+    ["reference path", "vault/sms/aliyun"],
+    ["userinfo-like credential", "user:secret@vault"],
+    ["query payload", "env?token=callback-token-example"],
+    ["fragment payload", "env#callback-token-example"],
+  ])("rejects non-identifier secret reference scheme content: %s", (_label, scheme) => {
     expect(() => secretRefDtoSchema.parse({
       scheme,
       maskedName: "ALIYUN_***_SECRET",
@@ -158,6 +186,17 @@ describe("public Next admin DTO contracts", () => {
         configured: true,
       })).toEqual({ scheme: "env", maskedName, configured: true });
     }
+  });
+
+  it("represents a host-registered secret scheme as a redacted identifier", () => {
+    const dto = secretRefDtoSchema.parse({
+      scheme: "vault",
+      maskedName: "ALIYUN_***_SECRET",
+      configured: true,
+    });
+
+    expect(dto).toEqual({ scheme: "vault", maskedName: "ALIYUN_***_SECRET", configured: true });
+    expect(JSON.stringify(dto)).not.toContain("vault://");
   });
 
   it("keeps verification policy and provider versions independent", () => {
@@ -228,6 +267,22 @@ describe("public Next admin DTO contracts", () => {
     };
 
     expect(updateProviderConfigSchema.parse(input)).toMatchObject(input);
+  });
+
+  it("accepts a credential-free HTTPS provider endpoint in public input and output DTOs", () => {
+    const endpoint = "https://dysmsapi.aliyuncs.com";
+
+    expect(updateProviderConfigSchema.parse(providerUpdateFixture(endpoint)).endpoint).toBe(endpoint);
+    expect(providerConfigDtoSchema.parse(configuredProviderFixture(endpoint))).toMatchObject({ endpoint });
+  });
+
+  it.each([
+    ["userinfo", "https://access-key:secret@dysmsapi.aliyuncs.com"],
+    ["query", "https://dysmsapi.aliyuncs.com?access_key=secret"],
+    ["fragment", "https://dysmsapi.aliyuncs.com#secret-token"],
+  ])("rejects an HTTPS provider endpoint containing %s in public input and output DTOs", (_label, endpoint) => {
+    expect(() => updateProviderConfigSchema.parse(providerUpdateFixture(endpoint))).toThrow();
+    expect(() => providerConfigDtoSchema.parse(configuredProviderFixture(endpoint))).toThrow();
   });
 
   it("requires a versioned write for a resource sync preview", () => {
