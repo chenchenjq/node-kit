@@ -4,30 +4,59 @@ Private Node.js SMS toolkit with an Alibaba Cloud (Aliyun) provider. The package
 
 ## Better Auth phone-number callbacks
 
-`better-auth` is an optional peer dependency. Keep tenant and trusted-IP resolution at the server boundary. Better Auth 1.7.4's `/phone-number/request-password-reset` route looks up the user and returns before invoking `sendPasswordResetOTP` for an unknown phone, so direct callbacks alone cannot equalize that route. Create both the callbacks and the complete-route guard:
+`better-auth` is an optional peer dependency. Keep tenant and trusted-IP resolution at the server boundary. The host owns Better Auth's user-phone fields and its Better Auth schema migration; applying sms-kit's migrations does not create or backfill those fields. The host's existing-phone query must be tenant-scoped and must only permit login/reset delivery for an account that already exists.
+
+Build the Better Auth instance from the policy snapshot that applies to that instance. Better Auth 1.7.4 reads `otpLength`, `expiresIn`, and `allowedAttempts` when the instance is constructed. If a host allows those values to change at runtime, it must rebuild its auth instance through its ordinary configuration lifecycle. SMS kit's per-send limits, budget, and circuit settings remain dynamic and are evaluated on every request.
 
 ```ts
+import { betterAuth } from "better-auth";
 import { phoneNumber } from "better-auth/plugins";
 import {
-  createBetterAuthPasswordResetPreRouteGuard,
   createBetterAuthSmsAdapter,
 } from "sms-kit/better-auth";
 
 const adapterOptions = {
-  // sendService, transaction, rateLimits, policy, hasher, clock, sleeper, events,
-  // and server-owned resolveTenant, resolveTrustedIp, and isExistingPhone
+  sendService,
+  resolveTenant: (context) => tenantFromTrustedSession(context),
+  resolveTrustedIp: (context) => ipFromTrustedProxy(context),
+  isExistingPhone: (tenantId, phone) => users.existsByPhone(tenantId, phone),
+  scheduler: { schedule: (task) => waitUntil(task()) },
+  transaction: (work) => smsStore.transaction(work),
+  rateLimits: smsStore.rateLimits,
+  policy: smsStore.policy,
+  hasher,
+  clock,
+  sleeper,
+  events,
 };
-const { sendOTP, sendPasswordResetOTP } = createBetterAuthSmsAdapter(adapterOptions);
-const resetGuard = createBetterAuthPasswordResetPreRouteGuard(adapterOptions);
+const callbacks = createBetterAuthSmsAdapter(adapterOptions);
+const policy = await policyService.get(systemActor);
 
-const plugin = phoneNumber({ sendOTP, sendPasswordResetOTP, allowedAttempts: 3 });
+const auth = betterAuth({
+  // database, secret, baseURL, and other host-owned Better Auth options
+  plugins: [phoneNumber({
+    sendOTP: callbacks.sendOTP,
+    sendPasswordResetOTP: callbacks.sendPasswordResetOTP,
+    otpLength: policy.otpLength,
+    expiresIn: policy.otpTtlSeconds,
+    allowedAttempts: policy.otpMaxAttempts,
+  })],
+});
 ```
 
-At the host boundary, parse the reset request body with the same validation as your route and wrap the complete Better Auth handler call. `context` must be a trusted request context consumed by the two resolver functions; a host using request-local trusted context can pass `undefined`.
+`waitUntil` above is a host/platform scheduler injection, not a browser API. It must register the task with the request's real lifetime primitive, observe rejected registration, and keep the provider task server-side. Do not invoke an SMS provider from an untrusted client. Configure approved verification templates before enabling this integration: `auth.login_otp` (`better-auth:login`), `auth.password_reset` (`better-auth:passwordReset`), `auth.password_change` (`auth.password_change`), and `auth.step_up` (`auth.step_up`) must each be an approved verification template with the `code` variable. No live SMS provider is necessary for integration tests; use a recording fake provider as in `test/integration/auth/auth-flows.test.ts`.
+
+Do not add a `signUpOnVerification` property to this object. In Better Auth 1.7.4 it is an object configuration when enabled, so `false` is not a valid way to disable registration.
+
+Better Auth 1.7.4's `/phone-number/request-password-reset` route looks up the user and returns before invoking `sendPasswordResetOTP` for an unknown phone, so callbacks alone cannot equalize that route. Create the complete-route guard and install it before routing to Better Auth. Parse the reset body using the same validation as the route; `context` must come only from trusted request state (a request-local host may pass `undefined`).
 
 ```ts
+import { createBetterAuthPasswordResetPreRouteGuard } from "sms-kit/better-auth";
+
+const resetGuard = createBetterAuthPasswordResetPreRouteGuard(adapterOptions);
+
 if (request.method === "POST" && new URL(request.url).pathname.endsWith("/phone-number/request-password-reset")) {
-  const { phoneNumber } = await request.clone().json();
+  const { phoneNumber } = parsePasswordResetBody(await request.clone().json());
   return resetGuard.run({
     phoneNumber,
     context: undefined,
@@ -37,7 +66,28 @@ if (request.method === "POST" && new URL(request.url).pathname.endsWith("/phone-
 return auth.handler(request);
 ```
 
-The guard performs the tenant, phone, and trusted-IP limits and tenant-scoped lookup before the route, then applies one response envelope around the route's known and unknown branches. While using this guard, do **not** configure Better Auth's `advanced.backgroundTasks.handler` on that Better Auth instance: version 1.7.4 detaches the reset callback through that handler, so the route can finish before the guard observes its scheduling outcome or shares its preflight. Even with that handler omitted, Better Auth catches a rejected callback internally; the adapter records a synchronous scheduling failure in the shared guard state and the guard returns a safe `STORAGE_FAILURE` after the route finishes. A provider failure after scheduling remains asynchronous and is emitted only as a redacted event. The adapter only schedules delivery for an existing account and does not expose account existence through the callback result.
+The guard performs the tenant, phone, and trusted-IP limits and tenant-scoped lookup before the route, then applies one response envelope around known and unknown branches. While using this guard, do **not** configure Better Auth's `advanced.backgroundTasks.handler` on that auth instance: 1.7.4 detaches the reset callback through that handler, allowing the route to finish before the guard can observe scheduling or share its preflight. Better Auth can also catch a rejected callback internally; the adapter records a synchronous scheduling failure in shared guard state and the guard returns a safe `STORAGE_FAILURE` after the route finishes. A provider failure after scheduling remains asynchronous and is emitted only as a redacted event. The adapter only schedules delivery for an existing account and never exposes account existence through its callback result.
+
+## Password changes and generic step-up
+
+Use `ChallengeService` for password change (`action: "password.change"`) and generic step-up (`action: "step.up"`). After a successful verification, consume the returned proof with the same tenant, authenticated subject, action, and one host-operation `consumptionKey`. Never take any of these bindings from a client request.
+
+When the host and sms-kit share PostgreSQL, put proof consumption and the protected write in one transaction. `execute` is used only for the first consumption; `replay` must read the already-written result and must not repeat the mutation:
+
+```ts
+await withPgProofTransaction(pool, proofService, {
+  tenantId: trustedTenantId,
+  proof,
+  subjectId: trustedSession.user.id,
+  action: "password.change",
+  consumptionKey: `password-change:${requestId}`,
+}, {
+  execute: (client) => changePassword(client, trustedSession.user.id),
+  replay: (client) => readPasswordChangeResult(client, requestId),
+});
+```
+
+For a cross-database protected write, do not use `withPgProofTransaction`. Consume with `proofService.consume` and make the downstream operation durably idempotent with exactly the same `consumptionKey`; persist/reconcile the operation outcome so a retry can compensate for a failure between systems. A step-up consumer follows the same pattern with `action: "step.up"`; a password-change proof must never authorize a step-up action, another user, or another tenant.
 
 ## Aliyun live checks
 
