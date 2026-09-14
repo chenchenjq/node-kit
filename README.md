@@ -37,7 +37,7 @@ if (request.method === "POST" && new URL(request.url).pathname.endsWith("/phone-
 return auth.handler(request);
 ```
 
-The guard performs the tenant, phone, and trusted-IP limits and tenant-scoped lookup before the route, then applies one response envelope around the route's known and unknown branches. While using this guard, do **not** configure Better Auth's `advanced.backgroundTasks.handler` on that Better Auth instance: version 1.7.4 detaches the reset callback through that handler, so its scheduling failure cannot be returned through the guarded request and the shared reset preflight cannot be relied on. The adapter only schedules delivery for an existing account and does not expose account existence through the callback result.
+The guard performs the tenant, phone, and trusted-IP limits and tenant-scoped lookup before the route, then applies one response envelope around the route's known and unknown branches. While using this guard, do **not** configure Better Auth's `advanced.backgroundTasks.handler` on that Better Auth instance: version 1.7.4 detaches the reset callback through that handler, so the route can finish before the guard observes its scheduling outcome or shares its preflight. Even with that handler omitted, Better Auth catches a rejected callback internally; the adapter records a synchronous scheduling failure in the shared guard state and the guard returns a safe `STORAGE_FAILURE` after the route finishes. A provider failure after scheduling remains asynchronous and is emitted only as a redacted event. The adapter only schedules delivery for an existing account and does not expose account existence through the callback result.
 
 ## Aliyun live checks
 

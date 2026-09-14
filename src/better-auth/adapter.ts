@@ -16,7 +16,8 @@ import type {
 } from "./types.js";
 
 type Purpose = "login" | "passwordReset";
-type Preflight = Readonly<{ owner: BetterAuthSmsAdapterOptions; tenantId: TenantId; phone: string; exists: boolean }>;
+type ResponseEnvelope = { readonly startedAt: Date; callbackFailed: boolean };
+type Preflight = Readonly<{ owner: BetterAuthSmsAdapterOptions; tenantId: TenantId; phone: string; exists: boolean; envelope?: ResponseEnvelope }>;
 
 const DEFAULT_TEMPLATES = Object.freeze({ login: "auth.login_otp", passwordReset: "auth.password_reset" });
 const DEFAULT_MINIMUM_RESPONSE_MS = 250;
@@ -85,17 +86,23 @@ async function waitForEnvelope(options: BetterAuthSmsAdapterOptions, startedAt: 
 const resetPreflight = new AsyncLocalStorage<Preflight>();
 
 /** Every host failure becomes a fresh value with no host-controlled fields, causes, or message. */
-async function withinResponseEnvelope<T>(options: BetterAuthSmsAdapterOptions, work: () => Promise<T>): Promise<T> {
-  const startedAt = options.clock.now();
+async function withinResponseEnvelope<T>(options: BetterAuthSmsAdapterOptions, work: (envelope: ResponseEnvelope) => Promise<T>): Promise<T> {
+  let envelope: ResponseEnvelope;
+  try {
+    envelope = { startedAt: options.clock.now(), callbackFailed: false };
+  } catch {
+    throw storageFailure();
+  }
   let result: T | undefined;
   let failed = false;
   try {
-    result = await work();
+    result = await work(envelope);
   } catch {
     failed = true;
   }
+  if (envelope.callbackFailed) failed = true;
   try {
-    await waitForEnvelope(options, startedAt);
+    await waitForEnvelope(options, envelope.startedAt);
   } catch {
     failed = true;
   }
@@ -130,43 +137,68 @@ async function preflightKnownPhone(
   return { owner: options, tenantId, phone, exists };
 }
 
+async function scheduleKnownPhone(
+  options: BetterAuthSmsAdapterOptions,
+  purpose: Purpose,
+  input: BetterAuthOtpInput,
+  context: BetterAuthCallbackContext,
+  preflight: Preflight,
+): Promise<void> {
+  if (!preflight.exists) return;
+  const idempotencyHash = await options.hasher.hash(`better-auth:send:${preflight.tenantId}\u0000${preflight.phone}\u0000${input.code}`);
+  const templateKey = purpose === "login" ? (options.templates?.login ?? DEFAULT_TEMPLATES.login) : (options.templates?.passwordReset ?? DEFAULT_TEMPLATES.passwordReset);
+  const task = async (): Promise<void> => {
+    try {
+      await options.sendService.sendOtpNow({
+        tenantId: preflight.tenantId,
+        templateKey,
+        phone: preflight.phone,
+        variables: { code: input.code },
+        purpose: `better-auth:${purpose}`,
+        idempotencyKey: `better-auth:${purpose}:${idempotencyHash}`,
+      });
+    } catch {
+      await emitFailure(options);
+    }
+  };
+
+  try {
+    await options.scheduler.schedule(task, context);
+  } catch {
+    if (preflight.envelope !== undefined) preflight.envelope.callbackFailed = true;
+    await emitFailure(options);
+    throw storageFailure();
+  }
+}
+
 /**
  * Bridges Better Auth's callbacks to SMS Kit without allowing account existence,
  * tenant identity, phones, or OTPs to leave this trusted server boundary.
  */
 export function createBetterAuthSmsAdapter(options: BetterAuthSmsAdapterOptions): BetterAuthSmsCallbacks {
   const dispatchKnownPhone = async (purpose: Purpose, input: BetterAuthOtpInput, context: BetterAuthCallbackContext): Promise<void> => {
-    await withinResponseEnvelope(options, async () => {
-      const guarded = purpose === "passwordReset" ? resetPreflight.getStore() : undefined;
-      const normalizedInput = normalizeMainlandPhone(input.phoneNumber);
-      const preflight = guarded !== undefined && guarded.owner === options && guarded.phone === normalizedInput
-        ? guarded
-        : await preflightKnownPhone(options, purpose, input.phoneNumber, context);
-      if (!preflight.exists) return;
-
-      const idempotencyHash = await options.hasher.hash(`better-auth:send:${preflight.tenantId}\u0000${preflight.phone}\u0000${input.code}`);
-      const templateKey = purpose === "login" ? (options.templates?.login ?? DEFAULT_TEMPLATES.login) : (options.templates?.passwordReset ?? DEFAULT_TEMPLATES.passwordReset);
-      const task = async (): Promise<void> => {
-        try {
-          await options.sendService.sendOtpNow({
-            tenantId: preflight.tenantId,
-            templateKey,
-            phone: preflight.phone,
-            variables: { code: input.code },
-            purpose: `better-auth:${purpose}`,
-            idempotencyKey: `better-auth:${purpose}:${idempotencyHash}`,
-          });
-        } catch {
-          await emitFailure(options);
-        }
-      };
-
+    const guarded = purpose === "passwordReset" ? resetPreflight.getStore() : undefined;
+    if (guarded !== undefined) {
+      let normalizedInput: string;
       try {
-        await options.scheduler.schedule(task, context);
+        normalizedInput = normalizeMainlandPhone(input.phoneNumber);
       } catch {
-        await emitFailure(options);
+        if (guarded.envelope !== undefined) guarded.envelope.callbackFailed = true;
         throw storageFailure();
       }
+      if (guarded.owner === options && guarded.phone === normalizedInput) {
+        try {
+          await scheduleKnownPhone(options, purpose, input, context, guarded);
+        } catch {
+          if (guarded.envelope !== undefined) guarded.envelope.callbackFailed = true;
+          throw storageFailure();
+        }
+        return;
+      }
+    }
+    await withinResponseEnvelope(options, async () => {
+      const preflight = await preflightKnownPhone(options, purpose, input.phoneNumber, context);
+      await scheduleKnownPhone(options, purpose, input, context, preflight);
     });
   };
 
@@ -184,9 +216,9 @@ export function createBetterAuthSmsAdapter(options: BetterAuthSmsAdapterOptions)
 export function createBetterAuthPasswordResetPreRouteGuard(options: BetterAuthSmsAdapterOptions): BetterAuthPasswordResetPreRouteGuard {
   return {
     async run<T>(input: BetterAuthPasswordResetPreRouteGuardInput<T>): Promise<T> {
-      return withinResponseEnvelope(options, async () => {
+      return withinResponseEnvelope(options, async (envelope) => {
         const preflight = await preflightKnownPhone(options, "passwordReset", input.phoneNumber, input.context);
-        return resetPreflight.run(preflight, input.next);
+        return resetPreflight.run({ ...preflight, envelope }, input.next);
       });
     },
   };
