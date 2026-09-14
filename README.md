@@ -2,6 +2,8 @@
 
 Private Node.js SMS toolkit with an Alibaba Cloud (Aliyun) provider. The package's default `npm test --workspace sms-kit` does not contact Aliyun. Live tests use separate scripts and are skipped unless explicitly opted in.
 
+For coding agents and other AI tools, start with [`AI_USAGE.md`](./AI_USAGE.md). It is a compact, normative integration guide derived from the current public exports.
+
 ## Install and public boundary
 
 Install this private workspace package through your organization's normal dependency workflow. A PostgreSQL host also needs `pg`; a Better Auth host adds `better-auth` only when it enables that adapter.
