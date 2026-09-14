@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "engines": { "node": ">=20" },
+  "files": ["dist", "README.md"],
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
     "./core": { "types": "./dist/core/index.d.ts", "import": "./dist/core/index.js" },
@@ -15,7 +16,7 @@
     "./better-auth": { "types": "./dist/better-auth/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/better-auth/index.js" },
     "./next": { "types": "./dist/next/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/next/index.js" },
     "./next/types": { "types": "./dist/next/types/index.d.ts", "import": "./dist/next/types/index.js" },
-    "./testing": { "types": "./dist/testing/index.d.ts", "import": "./dist/testing/index.js" }
+    "./testing": { "types": "./dist/testing/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/testing/index.js" }
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
@@ -41,7 +42,12 @@
   "devDependencies": {
     "@types/node": "20.19.43",
     "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "better-auth": "1.7.4",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "rollup": "4.52.5",
     "testcontainers": "12.1.0",
     "tsx": "4.23.13",
