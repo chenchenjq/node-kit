@@ -1,0 +1,85 @@
+import { z } from "zod";
+
+import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeSchema, versionSchema } from "./common.js";
+
+export const secretRefDtoSchema = z.strictObject({
+  scheme: z.string().trim().min(1),
+  maskedName: z.string().trim().min(1),
+  configured: z.boolean(),
+});
+
+export const providerConfigStatusSchema = z.enum(["unconfigured", "untested", "ready", "degraded", "disabled"]);
+export const providerConfigDtoSchema = z.discriminatedUnion("status", [
+  z.strictObject({
+    provider: z.literal("aliyun"),
+    status: z.literal("unconfigured"),
+    enabled: z.literal(false),
+    lastTestStatus: z.literal("never"),
+    version: versionSchema,
+  }),
+  z.strictObject({
+    provider: z.literal("aliyun"),
+    status: z.enum(["untested", "ready", "degraded", "disabled"]),
+    enabled: z.boolean(),
+    region: z.string().trim().min(1),
+    endpoint: z.string().trim().min(1).optional(),
+    accessKeyIdRef: secretRefDtoSchema,
+    accessKeySecretRef: secretRefDtoSchema,
+    receiptCallbackTokenRef: secretRefDtoSchema,
+    lastTestStatus: z.enum(["never", "succeeded", "failed"]),
+    lastTestedAt: isoDateTimeSchema.optional(),
+    version: versionSchema,
+  }),
+]);
+
+/** Request references are opaque pointers; their resolved values are never DTOs. */
+const secretReferenceInputSchema = z.string().trim().max(1_024)
+  .regex(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+$/, "secret reference must include a scheme");
+export const updateProviderConfigSchema = z.strictObject({
+  version: versionSchema,
+  idempotencyKey: idempotencyKeySchema,
+  provider: z.literal("aliyun").optional(),
+  region: z.string().trim().min(1),
+  endpoint: z.string().trim().min(1).optional(),
+  accessKeyIdRef: secretReferenceInputSchema,
+  accessKeySecretRef: secretReferenceInputSchema,
+  receiptCallbackTokenRef: secretReferenceInputSchema.optional(),
+  enabled: z.boolean().optional(),
+});
+
+export const connectionTestResultDtoSchema = z.strictObject({
+  status: z.enum(["succeeded", "failed"]),
+  testedAt: isoDateTimeSchema,
+  signatureCount: safeCountSchema,
+  templateCount: safeCountSchema,
+  config: providerConfigDtoSchema,
+});
+
+export const testSendInputSchema = z.strictObject({
+  version: versionSchema,
+  idempotencyKey: idempotencyKeySchema,
+  phone: z.string().trim().min(1).max(64),
+  templateKey: z.string().trim().min(1).max(256),
+  variables: z.record(z.string(), z.string()).default({}),
+  purpose: z.string().trim().min(1).max(256),
+});
+
+export const smsOverviewDtoSchema = z.strictObject({
+  status: z.enum(["ready", "degraded", "disabled", "unconfigured"]),
+  providerStatus: providerConfigStatusSchema,
+  pendingJobs: safeCountSchema,
+  acceptanceUnknown: safeCountSchema,
+  deliveryUnknown: safeCountSchema,
+  unmatchedCount: safeCountSchema,
+  systemBudgetRemaining: safeCountSchema.nullable(),
+  circuitOpen: z.boolean(),
+  warnings: z.array(smsErrorCodeSchema),
+});
+
+export type SecretRefDto = z.infer<typeof secretRefDtoSchema>;
+export type ProviderConfigStatus = z.infer<typeof providerConfigStatusSchema>;
+export type ProviderConfigDto = z.infer<typeof providerConfigDtoSchema>;
+export type UpdateProviderConfigInput = z.infer<typeof updateProviderConfigSchema>;
+export type ConnectionTestResultDto = z.infer<typeof connectionTestResultDtoSchema>;
+export type TestSendInput = z.infer<typeof testSendInputSchema>;
+export type SmsOverviewDto = z.infer<typeof smsOverviewDtoSchema>;
