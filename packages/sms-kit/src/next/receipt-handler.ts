@@ -68,7 +68,11 @@ async function readReceiptBody(request: Request, maximum: number): Promise<strin
       if (done) break;
       total += value.byteLength;
       if (total > maximum) {
-        await reader.cancel();
+        try {
+          await reader.cancel();
+        } catch {
+          // The callback is already known to be too large; cancellation is best-effort.
+        }
         throw new ReceiptHttpError(413);
       }
       chunks.push(value);

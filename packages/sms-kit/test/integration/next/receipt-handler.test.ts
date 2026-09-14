@@ -94,6 +94,25 @@ describe("Aliyun receipt Route Handler", () => {
     expect(receiptHandler.ingest).not.toHaveBeenCalled();
   });
 
+  it("preserves the 413 response when cancelling an oversized stream rejects", async () => {
+    const receiptHandler = handler({});
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(65_537)); },
+      cancel() { return Promise.reject(new Error("stream cancellation failed")); },
+    });
+    const callback = new Request(`https://sms.example.test/api/sms/receipt/${token}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      duplex: "half",
+    } as RequestInit);
+
+    const response = await receiptHandler.callback(callback);
+
+    expect(response.status).toBe(413);
+    expect(receiptHandler.ingest).not.toHaveBeenCalled();
+  });
+
   it("returns retryable 503 before parsing or delegating near the 700ms deadline", async () => {
     const receiptHandler = handler({ clockValues: [
       new Date("2026-09-13T00:00:00.000Z"),
