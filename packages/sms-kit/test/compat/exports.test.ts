@@ -19,7 +19,7 @@ it("ships built public subpaths, keeps core optional-peer free, and poisons the 
   await ensureBuiltPackage();
   await withPackedSmsKit(async (packed) => {
     expect(packed.files).toContain("dist/next/index.js");
-    expect(packed.files.every((path) => path === "README.md" || path === "package.json" || path.startsWith("dist/"))).toBe(true);
+    expect(packed.files.every((path) => path === "AI_USAGE.md" || path === "README.md" || path === "package.json" || path.startsWith("dist/"))).toBe(true);
     expect(packed.files).not.toContain("src/index.ts");
     expect(packed.files).not.toContain("test/package-metadata.test.ts");
 
