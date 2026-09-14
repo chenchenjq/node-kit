@@ -90,10 +90,12 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
   await seedResources(store);
   await configureProvider(store);
   await pool.query("create table auth_flow_user (id text primary key, phone_number text not null unique, password_version integer not null)");
+  await pool.query("create table auth_flow_password_change_outcome (consumption_key text primary key, user_id text not null, password_version integer not null)");
   await pool.query("insert into auth_flow_user (id, phone_number, password_version) values ($1, $2, 1)", ["user-1", knownPhone]);
 
   const hasher = new HmacHasher(Buffer.alloc(32, 41));
-  const clock = { now: () => new Date("2026-09-14T00:00:00.000Z") };
+  let now = new Date("2026-09-14T00:00:00.000Z");
+  const clock = { now: () => new Date(now) };
   const fakeProvider = { calls: { send: [] as Array<{ templateKey: string; purpose: string }> } };
   const phoneProtector = {
     protect: async (phone: string) => ({
@@ -148,8 +150,10 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
   const callbacks = createBetterAuthSmsAdapter(adapterOptions);
   const resetGuard = createBetterAuthPasswordResetPreRouteGuard(adapterOptions);
   const context = undefined as BetterAuthCallbackContext;
+  let challengeSequence = 0;
 
   async function issueAndVerify(action: "password.change" | "step.up", idempotencyKey: string): Promise<string> {
+    now = new Date(now.getTime() + 61_000);
     const issued = await challengeService.issue({ tenantId, subjectId: "user-1", action, phone: knownPhone, idempotencyKey });
     return (await challengeService.verify({ tenantId, challengeId: issued.id, code: otpCode })).proof;
   }
@@ -171,7 +175,7 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
       });
       await scheduler.drain();
     },
-    issueAndVerifyPasswordChallenge: () => issueAndVerify("password.change", "user-1:password.change:1"),
+    issueAndVerifyPasswordChallenge: () => issueAndVerify("password.change", `user-1:password.change:${++challengeSequence}`),
     async changePassword(userId, proof, consumptionKey): Promise<number> {
       return withPgProofTransaction(pool, proofService, {
         tenantId, proof, subjectId: userId, action: "password.change", consumptionKey,
@@ -182,12 +186,16 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
             [userId],
           );
           if (updated.rows[0] === undefined) throw new Error("password change user is missing");
+          await client.query(
+            "insert into auth_flow_password_change_outcome (consumption_key, user_id, password_version) values ($1, $2, $3)",
+            [consumptionKey, userId, updated.rows[0].password_version],
+          );
           return updated.rows[0].password_version;
         },
         replay: async (client) => {
           const existing = await client.query<{ password_version: number }>(
-            "select password_version from auth_flow_user where id = $1",
-            [userId],
+            "select password_version from auth_flow_password_change_outcome where consumption_key = $1",
+            [consumptionKey],
           );
           if (existing.rows[0] === undefined) throw new Error("password change result is missing");
           return existing.rows[0].password_version;
@@ -197,7 +205,7 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
     async passwordVersion(userId): Promise<number | undefined> {
       return (await pool.query<{ password_version: number }>("select password_version from auth_flow_user where id = $1", [userId])).rows[0]?.password_version;
     },
-    issueAndVerifyStepUpChallenge: () => issueAndVerify("step.up", "user-1:step.up:1"),
+    issueAndVerifyStepUpChallenge: () => issueAndVerify("step.up", `user-1:step.up:${++challengeSequence}`),
     consumeProof: ({ subjectId, proof, action, consumptionKey }) => proofService.consume({ tenantId, proof, subjectId, action, consumptionKey }),
     clearProviderCalls(): void {
       fakeProvider.calls.send.splice(0);
