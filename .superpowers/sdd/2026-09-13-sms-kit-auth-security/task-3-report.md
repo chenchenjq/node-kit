@@ -19,6 +19,19 @@
 - `npm run test:contract --workspace sms-kit -- better-auth-adapter.test.ts better-auth-types.test.ts` — 3 files, 9 tests passed.
 - `npm run typecheck --workspace sms-kit` — passed.
 - `npm run build --workspace sms-kit` — passed.
+
+## Fix round 2
+
+- Reset-route guards now create one response-envelope state and pass it through the asynchronous request context. A guarded `sendPasswordResetOTP` callback reuses the outer deadline instead of sleeping again, so known and unknown reset requests make one identical envelope delay while rate limits are charged once.
+- The shared state records all synchronous guarded callback failures. Better Auth 1.7.4 catches `runInBackgroundOrAwait` callback rejections even without a background-task handler; after the real route returns, the guard inspects that state and emits a fresh safe `STORAGE_FAILURE`.
+- Initial `clock.now()` acquisition is inside the safe envelope boundary for both callbacks and guards.
+- Added advancing-clock coverage for one reset envelope and a real in-memory Better Auth phone-plugin route regression for swallowed scheduler rejection.
+
+## Fix-round-2 verification
+
+- `npm run test:contract --workspace sms-kit -- better-auth-adapter.test.ts better-auth-optional-peer.test.ts better-auth-types.test.ts` — 4 files, 17 tests passed.
+- `npm run typecheck --workspace sms-kit` — passed.
+- `npm run build --workspace sms-kit` — passed.
 - `node --input-type=module -e 'await import("./packages/sms-kit/dist/core/index.js")'` — passed (`core import ok`) while the Better Auth adapter remains a separate optional-peer entry point.
 
 `better-auth` 1.7.4's declaration dependencies are not compatible with this repository's TypeScript 7 checker when library checking is enabled, so the package build/typecheck configurations now skip third-party declaration checking while retaining checking for SMS Kit source and contract tests.

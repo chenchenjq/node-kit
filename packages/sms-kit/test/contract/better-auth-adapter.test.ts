@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { betterAuth } from "better-auth";
+import { phoneNumber } from "better-auth/plugins";
 
 import { createBetterAuthPasswordResetPreRouteGuard, createBetterAuthSmsAdapter, type BetterAuthSmsAdapterOptions } from "../../src/better-auth/index.js";
 import { SmsKitError } from "../../src/core/errors.js";
@@ -9,7 +11,7 @@ const tenant = "tenant-a" as TenantId;
 const context = undefined;
 const args = { phoneNumber: "+8613800138000", code: "123456" };
 
-async function captureError(call: () => void | Promise<void>): Promise<unknown> {
+async function captureError(call: () => unknown | Promise<unknown>): Promise<unknown> {
   try {
     await call();
     return undefined;
@@ -238,5 +240,77 @@ describe("Better Auth SMS adapter", () => {
 
     expect(harness.callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup"]);
     expect(harness.sendService.calls).toHaveLength(1);
+  });
+
+  it("uses one advancing-clock response envelope when the real reset callback runs", async () => {
+    const harness = createOptions(true);
+    let current = new Date("2026-09-13T00:00:00.000Z").getTime();
+    const delays: number[] = [];
+    const options: BetterAuthSmsAdapterOptions = {
+      ...harness.options,
+      clock: { now: () => new Date(current) },
+      sleeper: { sleep: async (milliseconds) => { delays.push(milliseconds); current += milliseconds; } },
+    };
+    const callbacks = createBetterAuthSmsAdapter(options);
+    const guard = createBetterAuthPasswordResetPreRouteGuard(options);
+
+    await guard.run({
+      phoneNumber: args.phoneNumber,
+      context,
+      next: async () => {
+        await callbacks.sendPasswordResetOTP?.(args, context);
+        return { status: true };
+      },
+    });
+
+    expect(delays).toEqual([250]);
+    expect(current).toBe(new Date("2026-09-13T00:00:00.250Z").getTime());
+    expect(harness.callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup"]);
+  });
+
+  it("surfaces a scheduler failure swallowed by Better Auth's real reset route", async () => {
+    const harness = createOptions(true);
+    harness.scheduler.rejectNext(new Error("scheduler unavailable"));
+    const callbacks = createBetterAuthSmsAdapter(harness.options);
+    const auth = betterAuth({
+      secret: "better-auth-test-secret-that-is-long-enough",
+      baseURL: "http://localhost:3000",
+      emailAndPassword: { enabled: true },
+      rateLimit: { enabled: false },
+      logger: { disabled: true },
+      plugins: [phoneNumber({ ...callbacks, allowedAttempts: 3 })],
+    });
+    const created = await auth.api.signUpEmail({ body: { email: "sms@example.test", password: "test-password", name: "SMS User" } });
+    await ((await auth.$context).adapter as any).update({
+      model: "user",
+      update: { phoneNumber: args.phoneNumber, phoneNumberVerified: true },
+      where: [{ field: "id", value: created.user.id }],
+    });
+    const guard = createBetterAuthPasswordResetPreRouteGuard(harness.options);
+
+    await expect(guard.run({
+      phoneNumber: args.phoneNumber,
+      context,
+      next: () => auth.api.requestPasswordResetPhoneNumber({ body: { phoneNumber: args.phoneNumber } }),
+    })).rejects.toMatchObject({ code: "STORAGE_FAILURE" });
+    expect(harness.callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup"]);
+  });
+
+  it("maps initial clock acquisition failures for callbacks and guards", async () => {
+    const harness = createOptions(true);
+    const options: BetterAuthSmsAdapterOptions = {
+      ...harness.options,
+      clock: { now: () => { throw new Error("clock secret"); } },
+    };
+    const callbacks = createBetterAuthSmsAdapter(options);
+    const guard = createBetterAuthPasswordResetPreRouteGuard(options);
+
+    const callbackError = await captureError(() => callbacks.sendOTP(args, context));
+    const guardError = await captureError(() => guard.run({ phoneNumber: args.phoneNumber, context, next: async () => ({ status: true }) }));
+
+    expect(callbackError).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(guardError).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(JSON.stringify(callbackError)).not.toContain("clock secret");
+    expect(JSON.stringify(guardError)).not.toContain("clock secret");
   });
 });
