@@ -43,10 +43,10 @@ export type BetterAuthTestHost = Readonly<{
   requestLoginOtp(phoneNumber: string): Promise<void>;
   requestPasswordResetOtp(phoneNumber: string): Promise<void>;
   issueAndVerifyPasswordChallenge(): Promise<string>;
-  changePassword(userId: string, proof: string, consumptionKey: string): Promise<void>;
+  changePassword(userId: string, proof: string, consumptionKey: string): Promise<number>;
   passwordVersion(userId: string): Promise<number | undefined>;
   issueAndVerifyStepUpChallenge(): Promise<string>;
-  consumeStepUp(userId: string, proof: string, consumptionKey: string): Promise<{ consumed: true; replay: boolean }>;
+  consumeProof(input: Readonly<{ subjectId: string; proof: string; action: string; consumptionKey: string }>): Promise<{ consumed: true; replay: boolean }>;
   clearProviderCalls(): void;
   stop(): Promise<void>;
 }>;
@@ -172,21 +172,33 @@ export async function createBetterAuthTestHost(): Promise<BetterAuthTestHost> {
       await scheduler.drain();
     },
     issueAndVerifyPasswordChallenge: () => issueAndVerify("password.change", "user-1:password.change:1"),
-    async changePassword(userId, proof, consumptionKey): Promise<void> {
-      await withPgProofTransaction(pool, proofService, {
+    async changePassword(userId, proof, consumptionKey): Promise<number> {
+      return withPgProofTransaction(pool, proofService, {
         tenantId, proof, subjectId: userId, action: "password.change", consumptionKey,
       }, {
         execute: async (client) => {
-          await client.query("update auth_flow_user set password_version = password_version + 1 where id = $1", [userId]);
+          const updated = await client.query<{ password_version: number }>(
+            "update auth_flow_user set password_version = password_version + 1 where id = $1 returning password_version",
+            [userId],
+          );
+          if (updated.rows[0] === undefined) throw new Error("password change user is missing");
+          return updated.rows[0].password_version;
         },
-        replay: async () => undefined,
+        replay: async (client) => {
+          const existing = await client.query<{ password_version: number }>(
+            "select password_version from auth_flow_user where id = $1",
+            [userId],
+          );
+          if (existing.rows[0] === undefined) throw new Error("password change result is missing");
+          return existing.rows[0].password_version;
+        },
       });
     },
     async passwordVersion(userId): Promise<number | undefined> {
       return (await pool.query<{ password_version: number }>("select password_version from auth_flow_user where id = $1", [userId])).rows[0]?.password_version;
     },
     issueAndVerifyStepUpChallenge: () => issueAndVerify("step.up", "user-1:step.up:1"),
-    consumeStepUp: (userId, proof, consumptionKey) => proofService.consume({ tenantId, proof, subjectId: userId, action: "step.up", consumptionKey }),
+    consumeProof: ({ subjectId, proof, action, consumptionKey }) => proofService.consume({ tenantId, proof, subjectId, action, consumptionKey }),
     clearProviderCalls(): void {
       fakeProvider.calls.send.splice(0);
     },
