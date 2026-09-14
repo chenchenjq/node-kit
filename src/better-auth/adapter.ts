@@ -7,6 +7,8 @@ import type { SmsTransaction } from "../ports/store.js";
 import type {
   BetterAuthCallbackContext,
   BetterAuthOtpInput,
+  BetterAuthPasswordResetPreRouteGuard,
+  BetterAuthPasswordResetPreRouteGuardInput,
   BetterAuthSendOtp,
   BetterAuthSendPasswordResetOtp,
   BetterAuthSmsAdapterOptions,
@@ -14,6 +16,7 @@ import type {
 } from "./types.js";
 
 type Purpose = "login" | "passwordReset";
+type Preflight = Readonly<{ owner: BetterAuthSmsAdapterOptions; tenantId: TenantId; phone: string; exists: boolean }>;
 
 const DEFAULT_TEMPLATES = Object.freeze({ login: "auth.login_otp", passwordReset: "auth.password_reset" });
 const DEFAULT_MINIMUM_RESPONSE_MS = 250;
@@ -79,13 +82,52 @@ async function waitForEnvelope(options: BetterAuthSmsAdapterOptions, startedAt: 
   await options.sleeper.sleep(Math.max(0, minimum - elapsed));
 }
 
-function isSafePublicError(error: unknown): error is SmsKitError {
-  return error instanceof SmsKitError && (
-    error.code === "CONFIG_INVALID" ||
-    error.code === "PERMISSION_DENIED" ||
-    error.code === "RATE_LIMITED" ||
-    error.code === "CIRCUIT_OPEN"
-  );
+const resetPreflight = new AsyncLocalStorage<Preflight>();
+
+/** Every host failure becomes a fresh value with no host-controlled fields, causes, or message. */
+async function withinResponseEnvelope<T>(options: BetterAuthSmsAdapterOptions, work: () => Promise<T>): Promise<T> {
+  const startedAt = options.clock.now();
+  let result: T | undefined;
+  let failed = false;
+  try {
+    result = await work();
+  } catch {
+    failed = true;
+  }
+  try {
+    await waitForEnvelope(options, startedAt);
+  } catch {
+    failed = true;
+  }
+  if (failed) throw storageFailure();
+  return result as T;
+}
+
+async function preflightKnownPhone(
+  options: BetterAuthSmsAdapterOptions,
+  purpose: Purpose,
+  inputPhone: string,
+  context: BetterAuthCallbackContext,
+): Promise<Preflight> {
+  const [tenantId, trustedIp] = await Promise.all([options.resolveTenant(context), options.resolveTrustedIp(context)]);
+  requireTrustedTenant(tenantId);
+  const phone = normalizeMainlandPhone(inputPhone);
+  const phoneHash = await options.hasher.hash(`better-auth:phone:${purpose}:${phone}`);
+  const exists = await options.transaction(async (tx) => {
+    const policy = await options.policy.get(tx);
+    await enforcePhoneSendPolicy({
+      policy,
+      rateLimits: options.rateLimits,
+      tenantId,
+      phoneHash,
+      purpose: `better-auth:${purpose}`,
+      now: options.clock.now(),
+      tx,
+    });
+    await applyIpAndTenantLimits({ options, policy, tenantId, purpose, trustedIp, now: options.clock.now(), tx });
+    return options.isExistingPhone(tenantId, phone);
+  });
+  return { owner: options, tenantId, phone, exists };
 }
 
 /**
@@ -94,38 +136,22 @@ function isSafePublicError(error: unknown): error is SmsKitError {
  */
 export function createBetterAuthSmsAdapter(options: BetterAuthSmsAdapterOptions): BetterAuthSmsCallbacks {
   const dispatchKnownPhone = async (purpose: Purpose, input: BetterAuthOtpInput, context: BetterAuthCallbackContext): Promise<void> => {
-    const startedAt = options.clock.now();
-    let outwardError: unknown;
-    try {
-      const [tenantId, trustedIp] = await Promise.all([options.resolveTenant(context), options.resolveTrustedIp(context)]);
-      requireTrustedTenant(tenantId);
-      const phone = normalizeMainlandPhone(input.phoneNumber);
-      const phoneHash = await options.hasher.hash(`better-auth:phone:${purpose}:${phone}`);
-      const exists = await options.transaction(async (tx) => {
-        const policy = await options.policy.get(tx);
-        await enforcePhoneSendPolicy({
-          policy,
-          rateLimits: options.rateLimits,
-          tenantId,
-          phoneHash,
-          purpose: `better-auth:${purpose}`,
-          now: options.clock.now(),
-          tx,
-        });
-        await applyIpAndTenantLimits({ options, policy, tenantId, purpose, trustedIp, now: options.clock.now(), tx });
-        return options.isExistingPhone(tenantId, phone);
-      });
+    await withinResponseEnvelope(options, async () => {
+      const guarded = purpose === "passwordReset" ? resetPreflight.getStore() : undefined;
+      const normalizedInput = normalizeMainlandPhone(input.phoneNumber);
+      const preflight = guarded !== undefined && guarded.owner === options && guarded.phone === normalizedInput
+        ? guarded
+        : await preflightKnownPhone(options, purpose, input.phoneNumber, context);
+      if (!preflight.exists) return;
 
-      if (!exists) return;
-
-      const idempotencyHash = await options.hasher.hash(`better-auth:send:${tenantId}\u0000${phone}\u0000${input.code}`);
+      const idempotencyHash = await options.hasher.hash(`better-auth:send:${preflight.tenantId}\u0000${preflight.phone}\u0000${input.code}`);
       const templateKey = purpose === "login" ? (options.templates?.login ?? DEFAULT_TEMPLATES.login) : (options.templates?.passwordReset ?? DEFAULT_TEMPLATES.passwordReset);
       const task = async (): Promise<void> => {
         try {
           await options.sendService.sendOtpNow({
-            tenantId,
+            tenantId: preflight.tenantId,
             templateKey,
-            phone,
+            phone: preflight.phone,
             variables: { code: input.code },
             purpose: `better-auth:${purpose}`,
             idempotencyKey: `better-auth:${purpose}:${idempotencyHash}`,
@@ -141,16 +167,7 @@ export function createBetterAuthSmsAdapter(options: BetterAuthSmsAdapterOptions)
         await emitFailure(options);
         throw storageFailure();
       }
-    } catch (error) {
-      outwardError = isSafePublicError(error) ? error : storageFailure();
-    } finally {
-      try {
-        await waitForEnvelope(options, startedAt);
-      } catch {
-        outwardError = storageFailure();
-      }
-    }
-    if (outwardError !== undefined) throw outwardError;
+    });
   };
 
   return {
@@ -158,3 +175,20 @@ export function createBetterAuthSmsAdapter(options: BetterAuthSmsAdapterOptions)
     sendPasswordResetOTP: ((input, context) => dispatchKnownPhone("passwordReset", input, context)) satisfies BetterAuthSendPasswordResetOtp,
   } satisfies BetterAuthSmsCallbacks;
 }
+
+/**
+ * Applies the trusted reset-request preflight around the complete Better Auth
+ * route. Better Auth 1.7.4 skips `sendPasswordResetOTP` for unknown users, so
+ * wrapping only that callback cannot provide a constant response envelope.
+ */
+export function createBetterAuthPasswordResetPreRouteGuard(options: BetterAuthSmsAdapterOptions): BetterAuthPasswordResetPreRouteGuard {
+  return {
+    async run<T>(input: BetterAuthPasswordResetPreRouteGuardInput<T>): Promise<T> {
+      return withinResponseEnvelope(options, async () => {
+        const preflight = await preflightKnownPhone(options, "passwordReset", input.phoneNumber, input.context);
+        return resetPreflight.run(preflight, input.next);
+      });
+    },
+  };
+}
+import { AsyncLocalStorage } from "node:async_hooks";

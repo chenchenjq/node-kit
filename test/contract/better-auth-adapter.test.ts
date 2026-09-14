@@ -1,12 +1,22 @@
 import { describe, expect, it } from "vitest";
 
-import { createBetterAuthSmsAdapter, type BetterAuthSmsAdapterOptions } from "../../src/better-auth/index.js";
+import { createBetterAuthPasswordResetPreRouteGuard, createBetterAuthSmsAdapter, type BetterAuthSmsAdapterOptions } from "../../src/better-auth/index.js";
+import { SmsKitError } from "../../src/core/errors.js";
 import type { TenantId } from "../../src/core/types.js";
 import type { SmsTransaction } from "../../src/ports/store.js";
 
 const tenant = "tenant-a" as TenantId;
 const context = undefined;
 const args = { phoneNumber: "+8613800138000", code: "123456" };
+
+async function captureError(call: () => void | Promise<void>): Promise<unknown> {
+  try {
+    await call();
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+}
 
 const policy = {
   version: 1,
@@ -40,7 +50,7 @@ class QueueScheduler {
   async drain(): Promise<void> { for (const task of this.tasks.splice(0)) await task(); }
 }
 
-function createOptions(existing = true) {
+function createOptions(existing = true, sleeperError?: Error, lookupError?: Error) {
   const callOrder: string[] = [];
   const sendService = {
     calls: [] as Array<Record<string, unknown>>,
@@ -56,6 +66,7 @@ function createOptions(existing = true) {
     sendService,
     isExistingPhone: async () => {
       callOrder.push("account-lookup");
+      if (lookupError !== undefined) throw lookupError;
       return existing;
     },
     resolveTenant: async () => tenant,
@@ -74,7 +85,10 @@ function createOptions(existing = true) {
     policy: { get: async () => policy, update: async () => policy, holdBudget: async () => { throw new Error("not used"); }, releaseBudget: async () => false },
     hasher: { hash: async (value: string) => value.replace(/[^a-z]/g, "") },
     clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
-    sleeper: { sleep: async (milliseconds) => { delays.push(milliseconds); } },
+    sleeper: { sleep: async (milliseconds) => {
+      delays.push(milliseconds);
+      if (sleeperError !== undefined) throw sleeperError;
+    } },
     events: { emit: async (event) => { events.push(event as Record<string, unknown>); } },
   };
   return { options, sendService, scheduler, events, callOrder, delays };
@@ -147,5 +161,82 @@ describe("Better Auth SMS adapter", () => {
     expect(events.at(-1)).toMatchObject({ code: "STORAGE_FAILURE" });
     expect(JSON.stringify(events)).not.toContain(args.phoneNumber);
     expect(JSON.stringify(events)).not.toContain(args.code);
+  });
+
+  it("normalizes host failures into a fresh safe error after the same envelope", async () => {
+    const secret = "+8613800138000/tenant-a";
+    const hostError = new SmsKitError("CONFIG_INVALID", secret, false, { phoneNumber: [secret] }, secret);
+    const known = createOptions(true, undefined, hostError);
+    const unknown = createOptions(false, undefined, hostError);
+
+    const knownError = await captureError(() => createBetterAuthSmsAdapter(known.options).sendOTP(args, context));
+    const unknownError = await captureError(() => createBetterAuthSmsAdapter(unknown.options).sendOTP(args, context));
+
+    expect(knownError).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(unknownError).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(knownError).not.toBe(hostError);
+    expect(unknownError).not.toBe(hostError);
+    expect(JSON.stringify(knownError)).not.toContain(secret);
+    expect(JSON.stringify(unknownError)).not.toContain(secret);
+    expect(known.delays).toEqual([250]);
+    expect(unknown.delays).toEqual([250]);
+  });
+
+  it("normalizes sleeper failure identically after known and unknown branches", async () => {
+    const known = createOptions(true, new Error("known sleeper failure"));
+    const unknown = createOptions(false, new Error("unknown sleeper failure"));
+
+    const knownError = await captureError(() => createBetterAuthSmsAdapter(known.options).sendOTP(args, context));
+    const unknownError = await captureError(() => createBetterAuthSmsAdapter(unknown.options).sendOTP(args, context));
+
+    expect(knownError).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(unknownError).toMatchObject({ code: "STORAGE_FAILURE", message: "SMS delivery is temporarily unavailable" });
+    expect(JSON.stringify(knownError)).not.toContain("known sleeper failure");
+    expect(JSON.stringify(unknownError)).not.toContain("unknown sleeper failure");
+  });
+
+  it("envelopes the actual reset route when its unknown branch skips the Better Auth callback", async () => {
+    const known = createOptions(true);
+    const unknown = createOptions(false);
+    const knownGuard = createBetterAuthPasswordResetPreRouteGuard(known.options);
+    const unknownGuard = createBetterAuthPasswordResetPreRouteGuard(unknown.options);
+    let knownCallbackCalls = 0;
+    let unknownCallbackCalls = 0;
+
+    // This fixture models Better Auth 1.7.4's reset route: it looks up first and only invokes
+    // sendPasswordResetOTP for a user it found, while returning { status: true } for both.
+    const resetRoute = async (exists: boolean, callback: () => Promise<void>) => {
+      if (exists) await callback();
+      return { status: true };
+    };
+
+    await knownGuard.run({ phoneNumber: args.phoneNumber, context, next: () => resetRoute(true, async () => { knownCallbackCalls += 1; }) });
+    await unknownGuard.run({ phoneNumber: args.phoneNumber, context, next: () => resetRoute(false, async () => { unknownCallbackCalls += 1; }) });
+
+    expect(knownCallbackCalls).toBe(1);
+    expect(unknownCallbackCalls).toBe(0);
+    expect(known.delays).toEqual([250]);
+    expect(unknown.delays).toEqual([250]);
+    expect(known.callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup"]);
+    expect(unknown.callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup"]);
+  });
+
+  it("reuses the guarded reset preflight when Better Auth reaches the existing-account callback", async () => {
+    const harness = createOptions(true);
+    const callbacks = createBetterAuthSmsAdapter(harness.options);
+    const guard = createBetterAuthPasswordResetPreRouteGuard(harness.options);
+
+    await guard.run({
+      phoneNumber: args.phoneNumber,
+      context,
+      next: async () => {
+        await callbacks.sendPasswordResetOTP?.(args, context);
+        return { status: true };
+      },
+    });
+    await harness.scheduler.drain();
+
+    expect(harness.callOrder).toEqual(["phone-limit", "ip-limit", "tenant-limit", "account-lookup"]);
+    expect(harness.sendService.calls).toHaveLength(1);
   });
 });

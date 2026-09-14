@@ -16,6 +16,17 @@ export type BetterAuthOtpInput = Parameters<BetterAuthSendOtp>[0];
 export type BetterAuthCallbackContext = Parameters<BetterAuthSendOtp>[1];
 export type BetterAuthSmsCallbacks = Pick<PhoneNumberOptions, "sendOTP" | "sendPasswordResetOTP">;
 
+/** Wrap the complete Better Auth password-reset route, not only its callback. */
+export type BetterAuthPasswordResetPreRouteGuardInput<T> = Readonly<{
+  phoneNumber: string;
+  context: BetterAuthCallbackContext;
+  next: () => Promise<T>;
+}>;
+
+export type BetterAuthPasswordResetPreRouteGuard = Readonly<{
+  run<T>(input: BetterAuthPasswordResetPreRouteGuardInput<T>): Promise<T>;
+}>;
+
 export type BetterAuthSmsAdapterOptions = Readonly<{
   sendService: Pick<SendService, "sendOtpNow">;
   /** This host-owned lookup must predicate every query by the trusted tenant. */
