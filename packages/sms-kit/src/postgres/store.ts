@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { SmsKitError } from "../core/errors.js";
 import type { SmsTransaction } from "../ports/store.js";
 import { PgAttemptRepository } from "./repositories/attempt-repository.js";
+import { PgAdminOperationRepository } from "./repositories/admin-operation-repository.js";
 import { PgAuditRepository } from "./repositories/audit-repository.js";
 import { PgChallengeRepository } from "./repositories/challenge-repository.js";
 import { PgConfigRepository } from "./repositories/config-repository.js";
@@ -19,6 +20,7 @@ import { asSmsTransaction } from "./transaction.js";
 
 /** The repository subset backed by the first PostgreSQL persistence release. */
 export class PgSmsStore {
+  readonly adminOperations: PgAdminOperationRepository;
   readonly config: PgConfigRepository;
   readonly resources: PgResourceRepository;
   readonly messages: PgMessageRepository;
@@ -34,6 +36,7 @@ export class PgSmsStore {
   readonly health: PgHealthRepository;
 
   constructor(private readonly pool: Pool) {
+    this.adminOperations = new PgAdminOperationRepository(pool);
     this.config = new PgConfigRepository(pool);
     this.resources = new PgResourceRepository(pool);
     this.messages = new PgMessageRepository(pool);

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { SmsKitError } from "../../../src/core/errors.js";
+import type { TenantId } from "../../../src/core/types.js";
 import { createResourceSyncCandidate } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
@@ -54,6 +55,42 @@ describe("PostgreSQL configuration and resources", () => {
     });
     if (result.status === "unconfigured") throw new Error("configuration was not initialized");
     expect(result.lastTestSummary).toEqual({ redactedFields: ["secret"], counts: [{ name: "resource", value: 2 }] });
+  });
+
+  it("claims and replays admin operations only inside the trusted tenant namespace", async () => {
+    const tenantA = "tenant-admin-a" as TenantId;
+    const tenantB = "tenant-admin-b" as TenantId;
+    const operation = "signature.update";
+    const idempotencyKey = "signature:disable:1";
+    const resultSnapshot = { kind: "signature", id: "signature-1", version: 2 };
+
+    await store.transaction(async (tx) => {
+      await expect(store.adminOperations.claim({
+        tenantId: tenantA, operation, idempotencyKey, requestChecksum: "request-a",
+      }, tx)).resolves.toEqual({ kind: "claimed" });
+      await store.adminOperations.complete({
+        tenantId: tenantA, operation, idempotencyKey, requestChecksum: "request-a", resultSnapshot,
+      }, tx);
+    });
+
+    await store.transaction(async (tx) => {
+      await expect(store.adminOperations.claim({
+        tenantId: tenantA, operation, idempotencyKey, requestChecksum: "request-a",
+      }, tx)).resolves.toEqual({ kind: "replay", resultSnapshot });
+    });
+    await expect(store.transaction((tx) => store.adminOperations.claim({
+      tenantId: tenantA, operation, idempotencyKey, requestChecksum: "different-request",
+    }, tx))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" } satisfies Partial<SmsKitError>);
+
+    await store.transaction(async (tx) => {
+      await expect(store.adminOperations.claim({
+        tenantId: tenantB, operation, idempotencyKey, requestChecksum: "request-b",
+      }, tx)).resolves.toEqual({ kind: "claimed" });
+      await store.adminOperations.complete({
+        tenantId: tenantB, operation, idempotencyKey, requestChecksum: "request-b",
+        resultSnapshot: { ...resultSnapshot, version: 3 },
+      }, tx);
+    });
   });
 
   it("rejects an expired resource preview and does not persist arbitrary snapshot data", async () => {

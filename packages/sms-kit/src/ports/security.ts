@@ -44,6 +44,16 @@ export interface OtpHasher {
   verify(value: string, hash: string): Promise<boolean>;
 }
 
+/**
+ * Produces a stable opaque fingerprint for equal inputs using a secret key
+ * (for example HMAC-SHA-256). Implementations must be deterministic and must
+ * not return input material, salted password hashes, or plaintext-derived
+ * tokens that are reversible/guessable for phone-number-sized inputs.
+ */
+export interface DeterministicRequestFingerprinter {
+  fingerprint(value: string): Promise<string> | string;
+}
+
 export type AuthorizationActor = Readonly<{
   id: string;
   tenantId: TenantId;

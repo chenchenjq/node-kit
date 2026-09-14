@@ -10,6 +10,43 @@ export interface SmsTransaction {
   readonly __smsKitTransaction: unique symbol;
 }
 
+export type AdminOperationName =
+  | "config.patch"
+  | "config.test_connection"
+  | "resource.sync.preview"
+  | "resource.sync.commit"
+  | "signature.update"
+  | "template.import"
+  | "template.update"
+  | "sms.test.send";
+
+export type AdminOperationClaim =
+  | Readonly<{ kind: "claimed" }>
+  | Readonly<{ kind: "replay"; resultSnapshot: Readonly<Record<string, unknown>> }>;
+
+/** Durable idempotency records are always claimed and completed inside one store transaction. */
+export interface AdminOperationRepository {
+  find(input: Readonly<{
+    tenantId: TenantId;
+    operation: AdminOperationName;
+    idempotencyKey: string;
+    requestChecksum: string;
+  }>, tx?: SmsTransaction): Promise<Readonly<Record<string, unknown>> | undefined>;
+  claim(input: Readonly<{
+    tenantId: TenantId;
+    operation: AdminOperationName;
+    idempotencyKey: string;
+    requestChecksum: string;
+  }>, tx: SmsTransaction): Promise<AdminOperationClaim>;
+  complete(input: Readonly<{
+    tenantId: TenantId;
+    operation: AdminOperationName;
+    idempotencyKey: string;
+    requestChecksum: string;
+    resultSnapshot: Readonly<Record<string, unknown>>;
+  }>, tx: SmsTransaction): Promise<void>;
+}
+
 export type ProviderConfigStatus = "unconfigured" | "untested" | "ready" | "degraded" | "disabled";
 
 export type UnconfiguredProviderConfig = Readonly<{
@@ -85,6 +122,27 @@ export type Template = Readonly<{
   variables: readonly ResourceVariable[];
   enabled: boolean;
   version: number;
+}>;
+export type UpdateSignatureResourceInput = Readonly<{
+  id: string;
+  enabled: boolean;
+  expectedVersion: number;
+}>;
+export type ImportTemplateResourceInput = Readonly<{
+  candidateId: string;
+  checksum: string;
+  templateKey: string;
+  purpose: string;
+  signatureExternalKey: string;
+  expectedSignatureVersion: number;
+  now: Date;
+}>;
+export type UpdateTemplateResourceInput = Readonly<{
+  id: TemplateId;
+  templateKey?: string;
+  purpose?: string;
+  enabled?: boolean;
+  expectedVersion: number;
 }>;
 type ResourceSyncCandidateBase = Readonly<{
   id: string;
@@ -236,6 +294,12 @@ export interface ResourceRepository {
   }>;
   /** With a transaction, hold a shared row lock until dispatch eligibility has been committed. */
   findTemplateByKey(input: Readonly<{ templateKey: string }>, tx?: SmsTransaction): Promise<Template | undefined>;
+  /** Resource writes are always composed by an application-owned transaction. */
+  updateSignature(input: UpdateSignatureResourceInput, tx: SmsTransaction): Promise<Signature>;
+  /** Resource writes are always composed by an application-owned transaction. */
+  importTemplate(input: ImportTemplateResourceInput, tx: SmsTransaction): Promise<Template>;
+  /** Resource writes are always composed by an application-owned transaction. */
+  updateTemplate(input: UpdateTemplateResourceInput, tx: SmsTransaction): Promise<Template>;
   createSyncPreview(input: Readonly<{
     id: string;
     actorId: string;
@@ -647,6 +711,7 @@ export interface HealthRepository {
 
 export interface SmsStore {
   transaction<T>(work: (tx: SmsTransaction) => Promise<T>): Promise<T>;
+  adminOperations: AdminOperationRepository;
   config: ConfigRepository;
   resources: ResourceRepository;
   messages: MessageRepository;

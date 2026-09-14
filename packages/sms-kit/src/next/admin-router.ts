@@ -25,6 +25,7 @@ import {
   smsStatsDtoSchema,
   templateDtoSchema,
   templatePageDtoSchema,
+  testConnectionInputSchema,
   testSendInputSchema,
   updateProviderConfigSchema,
   updateSignatureInputSchema,
@@ -125,6 +126,7 @@ type Route = SmsAdminRoute & Readonly<{
 
 const emptyJsonObjectSchema = z.strictObject({});
 const idParamsSchema = z.strictObject({ id: z.string().trim().min(1).max(256) });
+const resourceIdParamsSchema = z.strictObject({ id: z.uuid() });
 const queryInteger = (maximum: number) => z.string().regex(/^[1-9][0-9]*$/).transform(Number)
   .pipe(z.number().int().safe().positive().max(maximum));
 const paginationQuerySchema = z.strictObject({
@@ -151,15 +153,15 @@ const routes: readonly Route[] = [
   { method: "GET", path: "/overview", authorization: { kind: "any", actions: ["config.read", "message.read", "stats.read"] }, responseSchema: smsOverviewDtoSchema },
   { method: "GET", path: "/config", authorization: permission("config.read"), responseSchema: providerConfigDtoSchema },
   { method: "PATCH", path: "/config", authorization: permission("config.write"), bodySchema: updateProviderConfigSchema, responseSchema: providerConfigDtoSchema },
-  { method: "POST", path: "/config/test-connection", authorization: permission("config.write"), bodySchema: emptyJsonObjectSchema, allowsEmptyBody: true, responseSchema: connectionTestResultDtoSchema },
+  { method: "POST", path: "/config/test-connection", authorization: permission("config.write"), bodySchema: testConnectionInputSchema, responseSchema: connectionTestResultDtoSchema },
   { method: "POST", path: "/config/test-send", authorization: permission("sms.test"), bodySchema: testSendInputSchema, responseSchema: messageDtoSchema },
   { method: "POST", path: "/resources/sync-preview", authorization: permission("resource.sync"), bodySchema: resourceSyncPreviewInputSchema, responseSchema: resourceSyncPreviewDtoSchema },
   { method: "POST", path: "/resources/sync-commit", authorization: permission("resource.sync"), bodySchema: resourceSyncCommitInputSchema, responseSchema: resourceSyncCommitResultDtoSchema },
   { method: "GET", path: "/signatures", authorization: permission("config.read"), querySchema: paginationQuerySchema, responseSchema: signaturePageDtoSchema },
-  { method: "PATCH", path: "/signatures/:id", authorization: permission("signature.manage"), bodySchema: updateSignatureInputSchema, paramsSchema: idParamsSchema, responseSchema: signatureDtoSchema },
+  { method: "PATCH", path: "/signatures/:id", authorization: permission("signature.manage"), bodySchema: updateSignatureInputSchema, paramsSchema: resourceIdParamsSchema, responseSchema: signatureDtoSchema },
   { method: "GET", path: "/templates", authorization: permission("config.read"), querySchema: paginationQuerySchema, responseSchema: templatePageDtoSchema },
   { method: "POST", path: "/templates/import", authorization: permission("template.manage"), bodySchema: importTemplateInputSchema, responseSchema: templateDtoSchema },
-  { method: "PATCH", path: "/templates/:id", authorization: permission("template.manage"), bodySchema: updateTemplateInputSchema, paramsSchema: idParamsSchema, responseSchema: templateDtoSchema },
+  { method: "PATCH", path: "/templates/:id", authorization: permission("template.manage"), bodySchema: updateTemplateInputSchema, paramsSchema: resourceIdParamsSchema, responseSchema: templateDtoSchema },
   { method: "GET", path: "/verification", authorization: permission("config.read"), responseSchema: verificationSettingsDtoSchema },
   { method: "PATCH", path: "/verification", authorization: permission("config.write"), bodySchema: updateVerificationSettingsInputSchema, responseSchema: verificationSettingsDtoSchema },
   { method: "GET", path: "/receipt-health", authorization: permission("message.read"), responseSchema: receiptHealthDtoSchema },

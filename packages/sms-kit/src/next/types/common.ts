@@ -28,6 +28,8 @@ export type SmsErrorCode = z.infer<typeof smsErrorCodeSchema>;
 
 export const requestIdSchema = z.string().trim().min(1);
 export const identifierSchema = z.string().trim().min(1).max(256);
+/** IDs backed by PostgreSQL uuid columns are checked before they reach a query. */
+export const uuidSchema = z.uuid();
 export const idempotencyKeySchema = z.string().trim().min(1).max(512);
 export const versionSchema = z.number().int().safe().nonnegative();
 export const positiveVersionSchema = z.number().int().safe().positive();

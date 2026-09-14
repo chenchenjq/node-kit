@@ -11,9 +11,11 @@ import {
   type ResourceSyncCandidate,
   type ResourceSyncPreview,
   type SmsStore,
+  type SmsTransaction,
   type TemplateResourceSelection,
 } from "../ports/store.js";
 import { canonicalChecksum } from "./checksum.js";
+import { executeAdminOperation, findAdminOperationReplay } from "./admin-operation.js";
 
 export type ResourceSyncTemplateSelection = TemplateResourceSelection & Readonly<{
   externalKey: string;
@@ -23,11 +25,17 @@ export type ResourceSyncPreviewInput = Readonly<{
   /** Templates are opt-in because their stable local name and purpose are admin choices. */
   templates?: readonly ResourceSyncTemplateSelection[];
   pageSize?: number;
+  /** Supplying both write fields activates durable admin replay and a config fence. */
+  expectedVersion?: number;
+  idempotencyKey?: string;
 }>;
 
 export type ResourceSyncCommitInput = Readonly<{
   syncId: string;
   candidates: readonly Readonly<{ id: string; checksum: string }>[];
+  /** Supplying both write fields activates durable admin replay and a config fence. */
+  expectedVersion?: number;
+  idempotencyKey?: string;
 }>;
 
 export type ResourceSyncServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
@@ -42,6 +50,7 @@ export type ResourceSyncServiceDependencies<Actor extends AuthorizationActor = A
 const PREVIEW_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_PAGE_SIZE = 50;
 const SYSTEM_TENANT_ID = "__system__" as TenantId;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function providerConfig(config: Awaited<ReturnType<SmsStore["config"]["get"]>>): ConfiguredProviderConfig {
   if (config.status === "unconfigured" || config.status !== "ready" || !config.enabled) {
@@ -66,6 +75,10 @@ function validPageSize(value: number | undefined): number {
     throw new SmsKitError("CONFIG_INVALID", "invalid resource page size");
   }
   return value;
+}
+
+function uuid(value: unknown): value is string {
+  return typeof value === "string" && UUID.test(value);
 }
 
 async function collectAllProviderPages<T extends { externalKey: string }>(
@@ -137,6 +150,92 @@ function candidateChecksum(candidate: unknown): string {
   return canonicalChecksum(candidate);
 }
 
+type AdminMetadata = Readonly<{ expectedVersion: number; idempotencyKey: string }>;
+
+function adminMetadata(input: Readonly<{ expectedVersion?: number; idempotencyKey?: string }>): AdminMetadata | undefined {
+  const hasVersion = input.expectedVersion !== undefined;
+  const hasKey = input.idempotencyKey !== undefined;
+  if (hasVersion !== hasKey) throw new SmsKitError("CONFIG_INVALID", "resource sync version and idempotency key must be supplied together");
+  if (!hasVersion) return undefined;
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion! < 0 ||
+      typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length === 0 || input.idempotencyKey.length > 512) {
+    throw new SmsKitError("CONFIG_INVALID", "invalid resource sync write metadata");
+  }
+  return { expectedVersion: input.expectedVersion!, idempotencyKey: input.idempotencyKey };
+}
+
+function requireConfigVersion(config: Awaited<ReturnType<SmsStore["config"]["get"]>>, expectedVersion: number): void {
+  if (config.version !== expectedVersion) {
+    throw new SmsKitError("CONCURRENT_MODIFICATION", "provider configuration changed concurrently");
+  }
+}
+
+function snapshotRecord(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("invalid resource sync snapshot");
+  return value as Readonly<Record<string, unknown>>;
+}
+
+function snapshotText(value: Readonly<Record<string, unknown>>, key: string): string {
+  const result = value[key];
+  if (typeof result !== "string" || result.length === 0) throw new TypeError(`invalid resource sync ${key}`);
+  return result;
+}
+
+function syncSnapshot(value: ResourceSyncPreview): Readonly<Record<string, unknown>> {
+  return {
+    kind: "resource-sync-preview",
+    id: value.id,
+    status: value.status,
+    expiresAt: value.expiresAt.toISOString(),
+    candidates: value.candidates.map((candidate) => candidate.resourceType === "signature" ? {
+      id: candidate.id,
+      externalKey: candidate.externalKey,
+      changeType: candidate.changeType,
+      checksum: candidate.checksum,
+      resourceType: "signature",
+      snapshot: {
+        kind: "signature",
+        externalName: candidate.snapshot.externalName,
+        externalStatus: candidate.snapshot.externalStatus,
+        externalType: candidate.snapshot.externalType,
+      },
+    } : {
+      id: candidate.id,
+      externalKey: candidate.externalKey,
+      changeType: candidate.changeType,
+      checksum: candidate.checksum,
+      resourceType: "template",
+      signatureExternalKey: candidate.signatureExternalKey,
+      templateKey: candidate.templateKey,
+      purpose: candidate.purpose,
+      snapshot: {
+        kind: "template",
+        externalCode: candidate.snapshot.externalCode,
+        externalName: candidate.snapshot.externalName,
+        externalStatus: candidate.snapshot.externalStatus,
+        templateType: candidate.snapshot.templateType,
+        variableNames: [...candidate.snapshot.variableNames],
+      },
+    }),
+  };
+}
+
+function syncFromSnapshot(value: Readonly<Record<string, unknown>>): ResourceSyncPreview {
+  if (value.kind !== "resource-sync-preview" || !Array.isArray(value.candidates)) throw new TypeError("invalid resource sync snapshot");
+  const status = snapshotText(value, "status");
+  if (!(["running", "succeeded", "partial", "failed"] as const).includes(status as ResourceSyncPreview["status"])) {
+    throw new TypeError("invalid resource sync status");
+  }
+  const expiresAt = new Date(snapshotText(value, "expiresAt"));
+  if (Number.isNaN(expiresAt.getTime())) throw new TypeError("invalid resource sync expiry");
+  return {
+    id: snapshotText(value, "id"),
+    status: status as ResourceSyncPreview["status"],
+    expiresAt,
+    candidates: value.candidates.map((candidate) => createResourceSyncCandidate(snapshotRecord(candidate))),
+  };
+}
+
 /** Discovers complete provider snapshots, then commits only persisted, checksummed selections. */
 export class ResourceSyncService<Actor extends AuthorizationActor = AuthorizationActor> {
   constructor(private readonly dependencies: ResourceSyncServiceDependencies<Actor>) {}
@@ -144,7 +243,35 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
   async preview(actor: Actor, input: ResourceSyncPreviewInput = {}): Promise<ResourceSyncPreview> {
     await this.dependencies.authorizer.assert(actor, "resource.sync");
     const pageSize = validPageSize(input.pageSize);
-    const config = providerConfig(await this.dependencies.store.config.get());
+    const metadata = adminMetadata(input);
+    const request = metadata === undefined ? undefined : {
+      expectedVersion: metadata.expectedVersion,
+      pageSize,
+      templates: (input.templates ?? []).map((selection) => ({
+        externalKey: selection.externalKey,
+        signatureExternalKey: selection.signatureExternalKey,
+        templateKey: selection.templateKey,
+        purpose: selection.purpose,
+      })),
+    };
+    if (metadata !== undefined) {
+      const replay = await findAdminOperationReplay({
+        store: this.dependencies.store,
+        tenantId: actor.tenantId,
+        operation: "resource.sync.preview",
+        idempotencyKey: metadata.idempotencyKey,
+        request,
+        decode: syncFromSnapshot,
+      });
+      if (replay !== undefined) return replay;
+    }
+    // Fence against the raw record before checking readiness.  A concurrent
+    // config PATCH may make the record unconfigured or disabled; that must be
+    // reported as the caller's stale optimistic version, not as a misleading
+    // readiness error.
+    const currentConfig = await this.dependencies.store.config.get();
+    if (metadata !== undefined) requireConfigVersion(currentConfig, metadata.expectedVersion);
+    const config = providerConfig(currentConfig);
     const auth = providerAuth(config);
     // All four reads complete before persistence. A rejected provider page therefore
     // cannot leave a partial snapshot capable of changing existing resources.
@@ -166,17 +293,25 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     const templateByExternalKey = new Map(templates.map((template) => [template.externalKey, template]));
     const selections = input.templates ?? [];
     const selectionsByExternalKey = new Map<string, ResourceSyncTemplateSelection>();
+    const selectedTemplateKeys = new Set<string>();
     for (const selection of selections) {
       assertSelection(selection);
       const remoteTemplate = templateByExternalKey.get(selection.externalKey);
       const priorByKey = localTemplatesByKey.get(selection.templateKey);
       const priorByCode = remoteTemplate === undefined ? undefined : localTemplatesByCode.get(remoteTemplate.externalCode);
+      const priorSignature = priorByCode === undefined ? undefined : localSignaturesById.get(priorByCode.signatureId);
+      const explicitlyReplacesRetiredParent = priorSignature !== undefined &&
+        priorSignature.externalKey !== selection.signatureExternalKey &&
+        !discoveredSignatureKeys.has(priorSignature.externalKey);
       if (remoteTemplate === undefined || selectionsByExternalKey.has(selection.externalKey) || !selectableSignatureKeys.has(selection.signatureExternalKey) ||
+          selectedTemplateKeys.has(selection.templateKey) ||
           (priorByKey !== undefined && priorByKey.externalCode !== remoteTemplate.externalCode) ||
-          (priorByCode !== undefined && priorByCode.templateKey !== selection.templateKey)) {
+          (priorByCode !== undefined && (priorByCode.templateKey !== selection.templateKey ||
+            priorSignature === undefined || (priorSignature.externalKey !== selection.signatureExternalKey && !explicitlyReplacesRetiredParent)))) {
         throw new SmsKitError("CONFIG_INVALID", "invalid template selection");
       }
       selectionsByExternalKey.set(selection.externalKey, selection);
+      selectedTemplateKeys.add(selection.templateKey);
     }
     // Imported resources remain observable even when administrators select no new imports.
     for (const remote of templates) {
@@ -241,7 +376,12 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       resources.push(createResourceSyncCandidate({ ...base, checksum: candidateChecksum(base) }));
     }
     const now = this.dependencies.clock.now();
-    const preview = await this.dependencies.store.transaction(async (tx) => {
+    const persist = async (tx: SmsTransaction) => {
+      if (metadata !== undefined) {
+        const lockedConfig = await this.dependencies.store.config.get(tx);
+        requireConfigVersion(lockedConfig, metadata.expectedVersion);
+        providerConfig(lockedConfig);
+      }
       const created = await this.dependencies.store.resources.createSyncPreview({
         id: this.dependencies.ids.next(), actorId: actor.id, expiresAt: new Date(now.getTime() + PREVIEW_TTL_MS), resources,
       }, tx);
@@ -251,26 +391,80 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
         result: "succeeded", metadata: { counts: [{ name: "resource", value: resources.length }] }, occurredAt: this.dependencies.clock.now(),
       }, tx);
       return created;
-    });
-    await this.dependencies.events.emit({ name: "resource.sync.previewed", level: "info", metadata: { counts: [{ name: "resource", value: resources.length }] } });
-    return preview;
+    };
+    const execution = metadata === undefined
+      ? { value: await this.dependencies.store.transaction(persist), replay: false }
+      : await executeAdminOperation({
+        store: this.dependencies.store,
+        tenantId: actor.tenantId,
+        operation: "resource.sync.preview",
+        idempotencyKey: metadata.idempotencyKey,
+        request,
+        encode: syncSnapshot,
+        decode: syncFromSnapshot,
+        work: persist,
+      });
+    if (!execution.replay) {
+      await this.dependencies.events.emit({ name: "resource.sync.previewed", level: "info", metadata: { counts: [{ name: "resource", value: resources.length }] } });
+    }
+    return execution.value;
   }
 
   async commit(actor: Actor, input: ResourceSyncCommitInput): Promise<ResourceSyncPreview> {
     await this.dependencies.authorizer.assert(actor, "resource.sync");
-    if (input.syncId.length === 0 || input.candidates.some((candidate) => candidate.id.length === 0 || candidate.checksum.length === 0)) {
+    if (!uuid(input.syncId) || input.candidates.some((candidate) => !uuid(candidate.id) || typeof candidate.checksum !== "string" || candidate.checksum.length === 0)) {
       throw new SmsKitError("CONFIG_INVALID", "invalid resource sync commit");
     }
-    const committed = await this.dependencies.store.transaction(async (tx) => {
-      const result = await this.dependencies.store.resources.commitSync({ ...input, now: this.dependencies.clock.now() }, tx);
+    const metadata = adminMetadata(input);
+    const request = metadata === undefined ? undefined : {
+      expectedVersion: metadata.expectedVersion,
+      syncId: input.syncId,
+      candidates: input.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })),
+    };
+    if (metadata !== undefined) {
+      const replay = await findAdminOperationReplay({
+        store: this.dependencies.store,
+        tenantId: actor.tenantId,
+        operation: "resource.sync.commit",
+        idempotencyKey: metadata.idempotencyKey,
+        request,
+        decode: syncFromSnapshot,
+      });
+      if (replay !== undefined) return replay;
+    }
+    const persist = async (tx: SmsTransaction) => {
+      if (metadata !== undefined) {
+        const lockedConfig = await this.dependencies.store.config.get(tx);
+        requireConfigVersion(lockedConfig, metadata.expectedVersion);
+        providerConfig(lockedConfig);
+      }
+      const result = await this.dependencies.store.resources.commitSync({
+        syncId: input.syncId,
+        candidates: input.candidates,
+        now: this.dependencies.clock.now(),
+      }, tx);
       await this.dependencies.store.audits.append({
         id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
         action: "resource.sync.commit", targetType: "resource_sync", targetId: input.syncId,
         result: "succeeded", metadata: { counts: [{ name: "resource", value: result.candidates.length }] }, occurredAt: this.dependencies.clock.now(),
       }, tx);
       return result;
-    });
-    await this.dependencies.events.emit({ name: "resource.sync.committed", level: "info", metadata: { counts: [{ name: "resource", value: committed.candidates.length }] } });
-    return committed;
+    };
+    const execution = metadata === undefined
+      ? { value: await this.dependencies.store.transaction(persist), replay: false }
+      : await executeAdminOperation({
+        store: this.dependencies.store,
+        tenantId: actor.tenantId,
+        operation: "resource.sync.commit",
+        idempotencyKey: metadata.idempotencyKey,
+        request,
+        encode: syncSnapshot,
+        decode: syncFromSnapshot,
+        work: persist,
+      });
+    if (!execution.replay) {
+      await this.dependencies.events.emit({ name: "resource.sync.committed", level: "info", metadata: { counts: [{ name: "resource", value: execution.value.candidates.length }] } });
+    }
+    return execution.value;
   }
 }

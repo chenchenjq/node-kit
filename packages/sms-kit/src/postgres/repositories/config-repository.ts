@@ -46,7 +46,9 @@ export class PgConfigRepository implements ConfigRepository {
 
   async get(tx?: SmsTransaction): Promise<ProviderConfig> {
     const { rows } = await executor(this.pool, tx).query<ConfigRow>(
-      "select provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref, status, enabled, last_test_status, last_test_summary, last_tested_at, version from sms_kit.provider_config where id = 1",
+      `select provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
+              status, enabled, last_test_status, last_test_summary, last_tested_at, version
+         from sms_kit.provider_config where id = 1${tx === undefined ? "" : " for update"}`,
     );
     return rows[0] === undefined
       ? { provider: "aliyun", status: "unconfigured", enabled: false, lastTestStatus: "never", version: 0 }
@@ -71,7 +73,13 @@ export class PgConfigRepository implements ConfigRepository {
         `update sms_kit.provider_config set
           region = $1, endpoint = $2, access_key_id_ref = $3, access_key_secret_ref = $4,
           receipt_callback_token_ref = $5, enabled = case when $8 then false else $6 end,
-          status = case when $8 then 'untested' when $6 then 'untested' else 'disabled' end,
+          status = case
+            when $8 then 'untested'
+            when not $6 then 'disabled'
+            when status = 'disabled' and last_test_status = 'succeeded' then 'ready'
+            when status = 'disabled' then 'untested'
+            else status
+          end,
           version = version + 1, updated_at = now()
         where id = 1 and version = $7
         returning provider, region, endpoint, access_key_id_ref, access_key_secret_ref, receipt_callback_token_ref,
