@@ -5,7 +5,10 @@ import { idempotencyKeySchema, isoDateTimeSchema, safeCountSchema, smsErrorCodeS
 export const secretRefDtoSchema = z.strictObject({
   scheme: z.string().trim().min(1),
   maskedName: z.string().trim().min(3).max(256)
-    .regex(/^[!-~]*\*{3,}[!-~]*$/, "secret reference name must be masked"),
+    .regex(
+      /^(?:\*{3}|[A-Z][A-Z0-9]{0,7}_\*{3}_[A-Z][A-Z0-9]{0,7})$/,
+      "secret reference name must be *** or SHORT_***_LABEL using uppercase alphanumeric labels",
+    ),
   configured: z.boolean(),
 });
 

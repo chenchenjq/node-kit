@@ -102,12 +102,48 @@ describe("public Next admin DTO contracts", () => {
     })).toThrow();
   });
 
-  it("accepts ordinary redacted secret reference names", () => {
-    expect(secretRefDtoSchema.parse({
+  it.each([
+    ["AccessKey ID after the marker", "***LTAI5tExampleAccessKey"],
+    ["AccessKey ID before the marker", "LTAI5tExampleAccessKey***"],
+    ["AccessKey ID after a delimiter", "***_LTAI5tExampleAccessKey"],
+    ["AccessKey Secret after the marker", "***example-access-key-secret"],
+    ["AccessKey Secret before the marker", "example-access-key-secret***"],
+    ["AccessKey Secret before a delimiter", "example-access-key-secret_***"],
+    ["callback token after the marker", "***MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"],
+    ["callback token before the marker", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY***"],
+    ["callback token after a delimiter", "***_MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"],
+  ])("rejects a complete %s in maskedName", (_label, maskedName) => {
+    expect(() => secretRefDtoSchema.parse({
       scheme: "env",
-      maskedName: "ALIYUN_***_SECRET",
+      maskedName,
       configured: true,
-    })).toEqual({ scheme: "env", maskedName: "ALIYUN_***_SECRET", configured: true });
+    })).toThrow();
+  });
+
+  it.each([
+    "ALIYUN_***",
+    "***_SECRET",
+    "ALIYUN***SECRET",
+    "ALIYUN_****_SECRET",
+    "aliyun_***_secret",
+    "ALIYUN_***_SECRET_EXTRA",
+    "TOO_LONG_***_SECRET",
+  ])("rejects non-canonical masked secret name %s", (maskedName) => {
+    expect(() => secretRefDtoSchema.parse({
+      scheme: "env",
+      maskedName,
+      configured: true,
+    })).toThrow();
+  });
+
+  it("accepts ordinary redacted secret reference names", () => {
+    for (const maskedName of ["***", "ALIYUN_***_SECRET", "CALLBACK_***_TOKEN", "A1_***_Z9"]) {
+      expect(secretRefDtoSchema.parse({
+        scheme: "env",
+        maskedName,
+        configured: true,
+      })).toEqual({ scheme: "env", maskedName, configured: true });
+    }
   });
 
   it("keeps verification policy and provider versions independent", () => {
