@@ -38,8 +38,10 @@ describe("simulated authentication flows", () => {
   it("requires a consumed proof in the password-change transaction", async () => {
     const proof = await host.issueAndVerifyPasswordChallenge();
 
-    await host.changePassword("user-1", proof, "pwd:42");
+    const first = await host.changePassword("user-1", proof, "pwd:42");
+    const replay = await host.changePassword("user-1", proof, "pwd:42");
 
+    expect([first, replay]).toEqual([2, 2]);
     expect(await host.passwordVersion("user-1")).toBe(2);
     await expect(host.changePassword("user-1", proof, "pwd:43")).rejects.toMatchObject({ code: "PROOF_INVALID" });
   });
@@ -47,7 +49,8 @@ describe("simulated authentication flows", () => {
   it("binds generic step-up verification to its user and action", async () => {
     const proof = await host.issueAndVerifyStepUpChallenge();
 
-    await expect(host.consumeStepUp("user-1", proof, "step-up:42")).resolves.toMatchObject({ consumed: true, replay: false });
-    await expect(host.consumeStepUp("user-2", proof, "step-up:43")).rejects.toMatchObject({ code: "PROOF_INVALID" });
+    await expect(host.consumeProof({ subjectId: "user-2", proof, action: "step.up", consumptionKey: "step-up:wrong-subject" })).rejects.toMatchObject({ code: "PROOF_INVALID" });
+    await expect(host.consumeProof({ subjectId: "user-1", proof, action: "password.change", consumptionKey: "step-up:wrong-action" })).rejects.toMatchObject({ code: "PROOF_INVALID" });
+    await expect(host.consumeProof({ subjectId: "user-1", proof, action: "step.up", consumptionKey: "step-up:42" })).resolves.toMatchObject({ consumed: true, replay: false });
   });
 });
