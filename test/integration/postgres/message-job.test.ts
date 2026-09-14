@@ -13,6 +13,12 @@ import { startPostgres } from "./helpers.js";
 const tenantA = "tenant-a" as TenantId;
 const tenantB = "tenant-b" as TenantId;
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
 describe("PostgreSQL messages, attempts, receipts and jobs", () => {
   let store: PgSmsStore;
   let stop: (() => Promise<void>) | undefined;
@@ -129,6 +135,7 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
         tenantId: tenantA, messageId: created.message.id, dispatchMode: "queued", leaseToken: job.leaseToken,
         dispatchMarkedAt: new Date("2026-09-13T00:00:11.000Z"),
       });
+      void started.catch(() => undefined);
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
       await lockingClient.query("commit");
       await recovered;
@@ -329,5 +336,36 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
     });
     const storedReceipt = await pool.query<{ redacted_payload: unknown }>("select redacted_payload from sms_kit.delivery_receipt where provider_biz_id = 'biz-payload'");
     expect(storedReceipt.rows[0]?.redacted_payload).toEqual({ redactedFields: ["otp"], reportCount: 3 });
+  });
+
+  it("rolls back after an abort while completed work is paused before the commit boundary", async () => {
+    const controller = new AbortController();
+    const eventId = randomUUID();
+    const workCompleted = deferred<void>();
+    const releaseWork = deferred<void>();
+    const transaction = store.transaction(async (tx) => {
+      await store.audits.append({
+        id: eventId,
+        tenantId: tenantA,
+        actorId: "receipt-deadline",
+        action: "receipt.abort-test",
+        targetType: "delivery_receipt",
+        result: "failed",
+        occurredAt: new Date("2026-09-13T00:05:00.000Z"),
+      }, tx);
+      workCompleted.resolve(undefined);
+      await releaseWork.promise;
+    }, { signal: controller.signal });
+    void transaction.catch(() => undefined);
+
+    await workCompleted.promise;
+    controller.abort(new Error("deadline"));
+    releaseWork.resolve(undefined);
+
+    await expect(transaction).rejects.toMatchObject({ code: "STORAGE_FAILURE", retryable: true });
+    await expect(pool.query<{ count: string }>(
+      "select count(*)::text as count from sms_kit.audit_event where id = $1",
+      [eventId],
+    )).resolves.toMatchObject({ rows: [{ count: "0" }] });
   });
 });

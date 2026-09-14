@@ -39,7 +39,18 @@ describe.sequential("complete SMS administration flow", () => {
     const signatureCandidate = preview.candidates.find((candidate) => candidate.resourceType === "signature");
     const templateCandidate = preview.candidates.find((candidate) => candidate.resourceType === "template");
     expect(signatureCandidate).toBeDefined();
-    expect(templateCandidate).toBeDefined();
+    expect(templateCandidate).toMatchObject({
+      externalKey: "aliyun:template:SMS_FIXTURE_NOTIFICATION",
+      changeType: "new",
+      snapshot: {
+        kind: "template",
+        externalName: "Fixture notification",
+        externalStatus: "AUDIT_STATE_PASS",
+        templateType: "notification",
+        variableNames: ["orderNo", "otp", "proof"],
+      },
+    });
+    expect(templateCandidate).not.toHaveProperty("templateKey");
     if (signatureCandidate === undefined || templateCandidate === undefined) throw new Error("fixture sync candidates are incomplete");
 
     const committed = await tenantA.syncCommit(enabledConfig.version, preview.id, [signatureCandidate]);

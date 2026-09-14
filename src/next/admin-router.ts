@@ -103,9 +103,24 @@ export type SmsAdminServices<Actor extends AuthorizationActor = AuthorizationAct
   dispatch?: (input: SmsAdminDispatchInput<Actor>) => Promise<SmsAdminDispatchResult>;
 }>;
 
+/**
+ * Browser-cookie hosts must prove an unsafe request came from their own UI.
+ * Bearer-token and service hosts can classify their requests as non-cookie so
+ * they are not forced to synthesize browser Origin headers.
+ */
+export type SmsAdminCsrfProtection<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+  /** Additional public origins when request.url reflects an internal proxy origin. */
+  allowedOrigins?: readonly string[];
+  /** Defaults to any Cookie presence; mixed hosts must classify the authenticated actor safely. */
+  isCookieAuthenticated?(request: Request, actor: Actor): boolean | Promise<boolean>;
+  /** Optional host-owned double-submit/session token check; it must not read the body. */
+  verifyToken?(request: Request, actor: Actor): boolean | Promise<boolean>;
+}>;
+
 export type SmsAdminHandlerOptions<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
   basePath?: string;
   maxBodyBytes?: number;
+  csrfProtection?: SmsAdminCsrfProtection<Actor>;
   resolveActor(request: Request): Promise<Actor | null>;
   resolveTrustedIp(request: Request): string | undefined;
   authorizer: SmsAdminAuthorizer<Actor>;
@@ -290,6 +305,58 @@ function responseData(schema: z.ZodType, data: unknown): unknown {
   return parsed.data;
 }
 
+function canonicalOrigin(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    if (parsed.origin === "null" || parsed.username.length > 0 || parsed.password.length > 0 ||
+        parsed.pathname !== "/" || parsed.search.length > 0 || parsed.hash.length > 0) return undefined;
+    return parsed.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function configuredOrigins(protection: SmsAdminCsrfProtection | undefined): ReadonlySet<string> {
+  const result = new Set<string>();
+  for (const origin of protection?.allowedOrigins ?? []) {
+    const normalized = canonicalOrigin(origin);
+    if (normalized === undefined) throw new TypeError("allowedOrigins must contain serialized origins without paths or credentials");
+    const parsed = new URL(normalized);
+    const developmentLoopback = parsed.protocol === "http:" &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]");
+    if (parsed.protocol !== "https:" && !developmentLoopback) {
+      throw new TypeError("allowedOrigins must use HTTPS, except for an explicit loopback development origin");
+    }
+    result.add(normalized);
+  }
+  return result;
+}
+
+function assertJsonWrite(request: Request): void {
+  const contentType = request.headers.get("content-type");
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    throw new HttpError(415, "content type must be application/json");
+  }
+}
+
+async function assertCsrfBoundary<Actor extends AuthorizationActor>(
+  request: Request,
+  actor: Actor,
+  protection: SmsAdminCsrfProtection<Actor> | undefined,
+  allowedOrigins: ReadonlySet<string>,
+): Promise<void> {
+  const cookieAuthenticated = await protection?.isCookieAuthenticated?.(request, actor) ?? request.headers.has("cookie");
+  if (!cookieAuthenticated) return;
+
+  const originHeader = request.headers.get("origin");
+  const origin = originHeader === null ? undefined : canonicalOrigin(originHeader);
+  const requestOrigin = new URL(request.url).origin;
+  if (origin !== undefined && (origin === requestOrigin || allowedOrigins.has(origin))) return;
+  if (await protection?.verifyToken?.(request, actor) === true) return;
+  throw new HttpError(403, "request origin could not be verified", "PERMISSION_DENIED");
+}
+
 /**
  * The Task 2 router owns only trusted request context, exact route recognition,
  * and validation. Task-specific service dispatch is deliberately added by later
@@ -298,6 +365,7 @@ function responseData(schema: z.ZodType, data: unknown): unknown {
 export function createAdminRouter<Actor extends AuthorizationActor = AuthorizationActor>(options: SmsAdminHandlerOptions<Actor>) {
   const basePath = normalizedPath(options.basePath ?? "/api/admin/sms");
   const maxBodyBytes = options.maxBodyBytes ?? 64 * 1024;
+  const allowedOrigins = configuredOrigins(options.csrfProtection);
 
   return async (request: Request): Promise<Response> => {
     const requestId = options.ids.next();
@@ -307,9 +375,19 @@ export function createAdminRouter<Actor extends AuthorizationActor = Authorizati
       if (matched === undefined) throw new HttpError(404, "route not found");
       const { route } = matched;
 
+      if (route.bodySchema !== undefined) {
+        // application/json is deliberately non-simple under CORS. Rejecting
+        // form/text bodies closes the ambient-cookie simple-request path even
+        // before the host performs authentication.
+        assertJsonWrite(request);
+      }
+
       const actor = await options.resolveActor(request);
       if (actor === null || !validActor(actor)) {
         throw new HttpError(401, "authentication required", "PERMISSION_DENIED");
+      }
+      if (route.bodySchema !== undefined) {
+        await assertCsrfBoundary(request, actor, options.csrfProtection, allowedOrigins);
       }
       await assertInitialAuthorization(route.authorization, options.authorizer, actor);
       // These values are intentionally sourced only from host callbacks. This

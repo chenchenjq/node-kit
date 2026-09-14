@@ -10,6 +10,15 @@ export interface SmsTransaction {
   readonly __smsKitTransaction: unique symbol;
 }
 
+export type SmsTransactionOptions = Readonly<{
+  /**
+   * Cooperative cancellation fence. Adapters must roll back when abort is
+   * observed before commit dispatch; after that irreversible boundary they
+   * must await the database outcome before reusing the connection.
+   */
+  signal?: AbortSignal;
+}>;
+
 export type AdminOperationName =
   | "config.patch"
   | "config.test_connection"
@@ -47,6 +56,21 @@ export interface AdminOperationRepository {
     requestChecksum: string;
     resultSnapshot: Readonly<Record<string, unknown>>;
   }>, tx: SmsTransaction): Promise<void>;
+  /**
+   * Associates an existing system reconciliation job with the durable manual
+   * operation that authorized it. This does not rewrite the job's origin.
+   */
+  authorizeJob(input: Readonly<{
+    tenantId: TenantId;
+    operation: "receipt.reconcile";
+    idempotencyKey: string;
+    jobId: string;
+    requiredPermission: "receipt.reconcile";
+  }>, tx: SmsTransaction): Promise<void>;
+  findJobAuthorization(input: Readonly<{
+    tenantId: TenantId;
+    jobId: string;
+  }>, tx?: SmsTransaction): Promise<Readonly<{ requiredPermission: "receipt.reconcile" }> | undefined>;
 }
 
 export type ProviderConfigStatus = "unconfigured" | "untested" | "ready" | "degraded" | "disabled";
@@ -184,7 +208,16 @@ export type ResourceSyncCandidate =
   | (ResourceSyncCandidateBase & Readonly<{
       resourceType: "template";
       snapshot: TemplateResourceSnapshot;
-    }> & TemplateResourceSelection & { readonly [resourceSyncCandidateBrand]: true });
+    }> & Readonly<Partial<TemplateResourceSelection>> & { readonly [resourceSyncCandidateBrand]: true });
+
+export function hasTemplateResourceSelection(
+  candidate: ResourceSyncCandidate,
+): candidate is Extract<ResourceSyncCandidate, { resourceType: "template" }> & TemplateResourceSelection {
+  return candidate.resourceType === "template" &&
+    typeof candidate.signatureExternalKey === "string" &&
+    typeof candidate.templateKey === "string" &&
+    typeof candidate.purpose === "string";
+}
 
 function invalidResourceSyncCandidate(): never {
   throw new SmsKitError("CONFIG_INVALID", "invalid resource sync preview");
@@ -267,6 +300,11 @@ export function createResourceSyncCandidate(input: unknown): ResourceSyncCandida
     templateType: requireEnum(sourceSnapshot, "templateType", ["verification", "notification"] as const),
     variableNames: requireStringArray(sourceSnapshot, "variableNames"),
   });
+  const hasSelection = ["signatureExternalKey", "templateKey", "purpose"]
+    .some((key) => Reflect.get(source, key) !== undefined);
+  if (!hasSelection) {
+    return Object.freeze({ ...base, resourceType, snapshot }) as ResourceSyncCandidate;
+  }
   return Object.freeze({
     ...base,
     resourceType,
@@ -476,6 +514,8 @@ export interface AttemptRepository {
   }>, tx: SmsTransaction): Promise<readonly Attempt[]>;
   /** Counts only attempts belonging to a message in the trusted tenant. */
   countForMessage(input: Readonly<{ tenantId: TenantId; messageId: MessageId }>, tx?: SmsTransaction): Promise<number | string>;
+  /** Returns a tenant-scoped, chronological operational timeline. */
+  listForMessage(input: Readonly<{ tenantId: TenantId; messageId: MessageId }>, tx?: SmsTransaction): Promise<readonly Attempt[]>;
 }
 
 export type DeliveryReceipt = Readonly<{
@@ -493,6 +533,8 @@ export type DeliveryReceipt = Readonly<{
   occurredAt: Date;
   receivedAt: Date;
   source: "callback" | "query";
+  /** Finite diagnostic projection; raw callback payloads never cross this port. */
+  redactedPayload?: SafeReceiptPayload;
 }>;
 export interface ReceiptRepository {
   record(input: Readonly<{
@@ -509,6 +551,8 @@ export interface ReceiptRepository {
     source: "callback" | "query";
     redactedPayload?: SafeReceiptPayload;
   }>, tx?: SmsTransaction): Promise<{ receipt: DeliveryReceipt; created: boolean }>;
+  /** Returns only matched receipts owned by the trusted tenant/message pair. */
+  listForMessage(input: Readonly<{ tenantId: TenantId; messageId: MessageId }>, tx?: SmsTransaction): Promise<readonly DeliveryReceipt[]>;
 }
 
 /** Admin authority inherited by a job; absence means a system/ordinary-message origin with no direct admin read permission. */
@@ -746,7 +790,7 @@ export interface HealthRepository {
 }
 
 export interface SmsStore {
-  transaction<T>(work: (tx: SmsTransaction) => Promise<T>): Promise<T>;
+  transaction<T>(work: (tx: SmsTransaction) => Promise<T>, options?: SmsTransactionOptions): Promise<T>;
   adminOperations: AdminOperationRepository;
   config: ConfigRepository;
   resources: ResourceRepository;

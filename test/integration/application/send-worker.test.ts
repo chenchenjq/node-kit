@@ -11,6 +11,7 @@ import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import type { SmsStore } from "../../../src/ports/store.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const tenantId = "worker-tenant" as TenantId;
 
@@ -58,7 +59,7 @@ describe("SendWorker", () => {
     const signature = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "worker-sign", changeType: "new", checksum: "worker-signature", resourceType: "signature", snapshot: { kind: "signature", externalName: "Worker", externalStatus: "approved", externalType: "text" } });
     const template = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "worker-template", changeType: "new", checksum: "worker-template", resourceType: "template", signatureExternalKey: "worker-sign", templateKey: "order.worker", purpose: "notification", snapshot: { kind: "template", externalCode: "SMS_WORKER", externalName: "Worker", externalStatus: "approved", templateType: "notification", variableNames: ["orderNo"] } });
     const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
-    await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    await commitResourceFixturePreview(store, preview);
     const config = await store.config.update({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "id", accessKeySecretRef: "secret", receiptCallbackTokenRef: "token", enabled: true, expectedVersion: 0 });
     await store.config.recordConnectionTest({ status: "succeeded", summary: {}, testedAt: new Date(), expectedVersion: config.version });
     await store.policy.get();

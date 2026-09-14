@@ -242,6 +242,15 @@ export class ReconcileAdminService<Actor extends AuthorizationActor = Authorizat
         }, tx);
         const result = reconciliationJob(job);
         await this.authorizeReturnedJob(actor, result);
+        if (result.originAction === undefined) {
+          await this.dependencies.store.adminOperations.authorizeJob({
+            tenantId: actor.tenantId,
+            operation: "receipt.reconcile",
+            idempotencyKey: input.idempotencyKey,
+            jobId: result.id,
+            requiredPermission: "receipt.reconcile",
+          }, tx);
+        }
         await this.dependencies.store.audits.append({
           id: this.dependencies.ids.next(),
           tenantId: actor.tenantId,

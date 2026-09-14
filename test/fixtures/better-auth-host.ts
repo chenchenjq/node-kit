@@ -15,6 +15,7 @@ import { withPgProofTransaction } from "../../src/postgres/proof-transaction.js"
 import { PgSmsStore } from "../../src/postgres/store.js";
 import { HmacHasher } from "../../src/security/hmac-hasher.js";
 import { startPostgres } from "../integration/postgres/helpers.js";
+import { commitResourceFixturePreview } from "../integration/postgres/resource-fixtures.js";
 
 const tenantId = "tenant-auth-flow" as TenantId;
 const otpCode = "654321";
@@ -70,7 +71,7 @@ async function seedResources(store: PgSmsStore): Promise<void> {
   const preview = await store.resources.createSyncPreview({
     id: randomUUID(), actorId: "auth-flow-fixture", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, ...templates],
   });
-  await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+  await commitResourceFixturePreview(store, preview);
 }
 
 async function configureProvider(store: PgSmsStore): Promise<void> {

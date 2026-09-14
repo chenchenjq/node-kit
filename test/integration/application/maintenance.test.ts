@@ -7,6 +7,7 @@ import type { TenantId } from "../../../src/core/types.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const tenantId = "maintenance-tenant" as TenantId;
 const yesterday = new Date("2026-09-13T10:00:00.000Z");
@@ -23,7 +24,7 @@ describe("MaintenanceService", () => {
     const signature = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "maintenance-sign", changeType: "new", checksum: "maintenance-sign", resourceType: "signature", snapshot: { kind: "signature", externalName: "Maintenance", externalStatus: "approved", externalType: "text" } });
     const template = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "maintenance-template", changeType: "new", checksum: "maintenance-template", resourceType: "template", signatureExternalKey: "maintenance-sign", templateKey: "maintenance.delivery", purpose: "notification", snapshot: { kind: "template", externalCode: "SMS_MAINTENANCE", externalName: "Maintenance", externalStatus: "approved", templateType: "notification", variableNames: [] } });
     const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
-    await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    await commitResourceFixturePreview(store, preview);
     templateId = (await store.resources.findTemplateByKey({ templateKey: "maintenance.delivery" }))!.id;
   }, 120_000);
   afterAll(async () => stop?.());

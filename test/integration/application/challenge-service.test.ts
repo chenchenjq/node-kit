@@ -9,6 +9,7 @@ import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { HmacHasher } from "../../../src/security/hmac-hasher.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const tenantA = "tenant-a" as TenantId;
 const tenantB = "tenant-b" as TenantId;
@@ -37,7 +38,7 @@ describe("ChallengeService", () => {
     const signature = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "sign-challenge", changeType: "new", checksum: "challenge-signature", resourceType: "signature", snapshot: { kind: "signature", externalName: "Challenge", externalStatus: "approved", externalType: "text" } });
     const template = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "template-challenge", changeType: "new", checksum: "challenge-template", resourceType: "template", signatureExternalKey: "sign-challenge", templateKey: "auth.password_change", purpose: "auth.password_change", snapshot: { kind: "template", externalCode: "SMS_CHALLENGE", externalName: "Challenge", externalStatus: "approved", templateType: "verification", variableNames: ["code"] } });
     const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
-    await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    await commitResourceFixturePreview(store, preview);
     const config = await store.config.update({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", enabled: true, expectedVersion: 0 });
     await store.config.recordConnectionTest({ status: "succeeded", summary: {}, testedAt: new Date("2026-09-13T00:00:00.000Z"), expectedVersion: config.version });
 

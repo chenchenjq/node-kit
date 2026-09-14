@@ -4,10 +4,11 @@ import type { Pool } from "pg";
 import { ResourceSyncService } from "../../../src/application/resource-sync-service.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 import { SmsKitError } from "../../../src/core/errors.js";
-import { createResourceSyncCandidate } from "../../../src/ports/store.js";
+import { createResourceSyncCandidate, hasTemplateResourceSelection } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const actor = { id: "operator", tenantId: "tenant-a" } as AuthorizationActor;
 
@@ -297,7 +298,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
         snapshot: { kind: "template", externalCode: "SMS_REMOVED", externalName: "Removed", externalStatus: "approved", templateType: "notification", variableNames: [] },
       })],
     });
-    await store.resources.commitSync({ syncId: templatePreview.id, candidates: templatePreview.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+    await commitResourceFixturePreview(store, templatePreview);
     const sync = new ResourceSyncService({
       store,
       provider: { listSignatures: async () => ({ items: [] }), listTemplates: async () => ({ items: [] }) } as never,
@@ -327,7 +328,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
       snapshot: { kind: "template", externalCode: "SMS_STILL_LISTED", externalName: "Still listed", externalStatus: "approved", templateType: "notification", variableNames: [] },
     });
     const seed = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template] });
-    await store.resources.commitSync({ syncId: seed.id, candidates: seed.candidates.map((candidate) => ({ id: candidate.id, checksum: candidate.checksum })) });
+    await commitResourceFixturePreview(store, seed);
     const sync = new ResourceSyncService({
       store,
       provider: {
@@ -404,25 +405,46 @@ describe("ResourceSyncService with PostgreSQL", () => {
     expect(await store.resources.findTemplateByKey({ templateKey })).toBeUndefined();
   });
 
-  it("previews and commits templates with new and existing usable signatures in the current snapshot", async () => {
+  it("discovers a new template without a mapping, then refreshes it only after explicit import", async () => {
     const signature = { externalKey: "aliyun:sign:selection-usable", externalName: "Usable", externalStatus: "AUDIT_STATE_PASS", externalType: "通用类型" };
-    const template = { externalKey: "aliyun:template:SMS_USABLE", externalCode: "SMS_USABLE", externalName: "Usable", externalStatus: "approved", templateType: "notification", variableNames: [] };
+    let externalName = "Usable";
+    const template = () => ({ externalKey: "aliyun:template:SMS_USABLE", externalCode: "SMS_USABLE", externalName, externalStatus: "approved", templateType: "notification", variableNames: [] });
     const sync = new ResourceSyncService({
       store,
-      provider: { listSignatures: async () => ({ items: [signature] }), listTemplates: async () => ({ items: [template] }) } as never,
+      provider: { listSignatures: async () => ({ items: [signature] }), listTemplates: async () => ({ items: [template()] }) } as never,
       authorizer: { assert: () => undefined }, clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
       ids: { next: () => crypto.randomUUID() }, events: { emit: () => undefined },
     });
 
-    for (const changeType of ["new", "unchanged"]) {
-      const preview = await sync.preview(actor, { templates: [{ externalKey: template.externalKey, signatureExternalKey: signature.externalKey, templateKey: "notice.usable", purpose: "notification" }] });
-      expect(preview.candidates).toEqual(expect.arrayContaining([
-        expect.objectContaining({ resourceType: "template", externalKey: template.externalKey, changeType }),
-      ]));
-      const committed = await sync.commit(actor, { syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
-      expect(committed.status).toBe("succeeded");
-      expect(await store.resources.findTemplateByKey({ templateKey: "notice.usable" })).toMatchObject({ enabled: true, externalStatus: "approved" });
+    const preview = await sync.preview(actor);
+    const signatureCandidate = preview.candidates.find((candidate) => candidate.resourceType === "signature" && candidate.externalKey === signature.externalKey);
+    const templateCandidate = preview.candidates.find((candidate) => candidate.resourceType === "template" && candidate.externalKey === template().externalKey);
+    if (signatureCandidate === undefined || templateCandidate === undefined || templateCandidate.resourceType !== "template") {
+      throw new Error("new resource candidates are missing");
     }
+    expect(hasTemplateResourceSelection(templateCandidate)).toBe(false);
+    await sync.commit(actor, { syncId: preview.id, candidates: [{ id: signatureCandidate.id, checksum: signatureCandidate.checksum }] });
+    const importedSignature = (await store.resources.listSignatures({ page: 1, pageSize: 100 })).items.find((item) => item.externalKey === signature.externalKey)!;
+    await store.transaction((tx) => store.resources.importTemplate({
+      candidateId: templateCandidate.id,
+      checksum: templateCandidate.checksum,
+      templateKey: "notice.usable",
+      purpose: "notification",
+      signatureExternalKey: signature.externalKey,
+      expectedSignatureVersion: importedSignature.version,
+      now: new Date("2026-09-13T00:00:00.000Z"),
+    }, tx));
+
+    externalName = "Usable refreshed";
+    const refresh = await sync.preview(actor);
+    const changed = refresh.candidates.find((candidate) => candidate.resourceType === "template" && candidate.externalKey === template().externalKey);
+    expect(changed).toMatchObject({ changeType: "changed", templateKey: "notice.usable", purpose: "notification" });
+    await expect(sync.commit(actor, {
+      syncId: refresh.id,
+      candidates: refresh.candidates.map(({ id, checksum }) => ({ id, checksum })),
+    })).resolves.toMatchObject({ status: "succeeded" });
+    await expect(store.resources.findTemplateByKey({ templateKey: "notice.usable" }))
+      .resolves.toMatchObject({ enabled: true, externalName });
   });
 
   it("keeps a preview runnable after a subset commit until every candidate is committed", async () => {
@@ -461,17 +483,23 @@ describe("ResourceSyncService with PostgreSQL", () => {
       [preview.id],
     )).resolves.toMatchObject({ rows: [{ status: "running", committed: 1 }] });
 
-    const second = await store.resources.commitSync({
-      syncId: preview.id,
-      candidates: [{ id: template.id, checksum: template.checksum }],
-    });
+    const persistedSignature = await store.resources.findSignatureById({ id: signature.id });
+    if (persistedSignature === undefined || !hasTemplateResourceSelection(template)) throw new Error("subset fixture is invalid");
+    await store.transaction((tx) => store.resources.importTemplate({
+      candidateId: template.id,
+      checksum: template.checksum,
+      templateKey: template.templateKey,
+      purpose: template.purpose,
+      signatureExternalKey: template.signatureExternalKey,
+      expectedSignatureVersion: persistedSignature.version,
+      now: new Date("2026-09-14T00:00:00.000Z"),
+    }, tx));
 
-    expect(second.status).toBe("succeeded");
     await expect(pool.query("select status from sms_kit.resource_sync where id = $1", [preview.id]))
       .resolves.toMatchObject({ rows: [{ status: "succeeded" }] });
   });
 
-  it("serializes conflicting stable-key choices for the same newly discovered template", async () => {
+  it("serializes conflicting explicit imports for the same newly discovered template", async () => {
     const suffix = crypto.randomUUID();
     const signature = createResourceSyncCandidate({
       id: crypto.randomUUID(), externalKey: `aliyun:sign:selection-race-${suffix}`, changeType: "new", checksum: `selection-signature-${suffix}`,
@@ -482,10 +510,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
     const seed = await store.resources.createSyncPreview({
       id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature],
     });
-    await store.resources.commitSync({
-      syncId: seed.id,
-      candidates: seed.candidates.map(({ id, checksum }) => ({ id, checksum })),
-    });
+    await commitResourceFixturePreview(store, seed);
     const externalCode = `SMS_SELECTION_RACE_${suffix}`;
     const candidate = (templateKey: string, checksum: string) => createResourceSyncCandidate({
       id: crypto.randomUUID(), externalKey: `aliyun:template:${externalCode}`, changeType: "new", checksum,
@@ -506,10 +531,20 @@ describe("ResourceSyncService with PostgreSQL", () => {
       }),
     ]);
 
-    const outcomes = await Promise.allSettled([
-      store.resources.commitSync({ syncId: firstPreview.id, candidates: firstPreview.candidates.map(({ id, checksum }) => ({ id, checksum })) }),
-      store.resources.commitSync({ syncId: secondPreview.id, candidates: secondPreview.candidates.map(({ id, checksum }) => ({ id, checksum })) }),
-    ]);
+    const importedSignature = await store.resources.findSignatureById({ id: signature.id });
+    if (importedSignature === undefined || !hasTemplateResourceSelection(firstCandidate) || !hasTemplateResourceSelection(secondCandidate)) {
+      throw new Error("explicit import race fixture is invalid");
+    }
+    const importCandidate = (value: typeof firstCandidate) => store.transaction((tx) => store.resources.importTemplate({
+      candidateId: value.id,
+      checksum: value.checksum,
+      templateKey: value.templateKey,
+      purpose: value.purpose,
+      signatureExternalKey: value.signatureExternalKey,
+      expectedSignatureVersion: importedSignature.version,
+      now: new Date("2026-09-14T00:00:00.000Z"),
+    }, tx));
+    const outcomes = await Promise.allSettled([importCandidate(firstCandidate), importCandidate(secondCandidate)]);
 
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([
@@ -549,10 +584,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
       id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"),
       resources: [firstSignature, secondSignature, template],
     });
-    await store.resources.commitSync({
-      syncId: seed.id,
-      candidates: seed.candidates.map(({ id, checksum }) => ({ id, checksum })),
-    });
+    await commitResourceFixturePreview(store, seed);
     const original = await store.resources.findTemplateByKey({ templateKey });
     if (original === undefined) throw new Error("parent template missing");
 
@@ -705,7 +737,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
     ] });
   });
 
-  it("moves a template only for an explicitly selected replacement of its retired parent", async () => {
+  it("does not let resource sync rebind a template when its parent signature is replaced", async () => {
     const suffix = crypto.randomUUID();
     const oldSignatureExternalKey = `aliyun:sign:rebind-old-${suffix}`;
     const newSignatureExternalKey = `aliyun:sign:rebind-new-${suffix}`;
@@ -729,10 +761,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
     const seeded = await store.resources.createSyncPreview({
       id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [oldSignature, template],
     });
-    await store.resources.commitSync({
-      syncId: seeded.id,
-      candidates: seeded.candidates.map(({ id, checksum }) => ({ id, checksum })),
-    });
+    await commitResourceFixturePreview(store, seeded);
     const original = await store.resources.findTemplateByKey({ templateKey });
     if (original === undefined) throw new Error("seed template is missing");
 
@@ -750,11 +779,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
       authorizer: { assert: () => undefined }, clock: { now: () => new Date("2026-09-14T00:00:00.000Z") },
       ids: { next: () => crypto.randomUUID() }, events: { emit: () => undefined },
     });
-    const preview = await sync.preview(actor, {
-      templates: [{
-        externalKey: template.externalKey, signatureExternalKey: newSignatureExternalKey, templateKey, purpose: "notification",
-      }],
-    });
+    const preview = await sync.preview(actor);
 
     const retiredParent = preview.candidates.find((candidate) =>
       candidate.resourceType === "signature" && candidate.externalKey === oldSignatureExternalKey && candidate.changeType === "unavailable",
@@ -762,20 +787,12 @@ describe("ResourceSyncService with PostgreSQL", () => {
     if (retiredParent === undefined) throw new Error("retired parent candidate is missing");
     await expect(sync.commit(actor, {
       syncId: preview.id,
-      candidates: [{ id: retiredParent.id, checksum: retiredParent.checksum }],
-    })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" });
-    await expect(store.resources.findTemplateByKey({ templateKey })).resolves.toMatchObject({
-      signatureId: original.signatureId, enabled: true, externalStatus: "approved",
-    });
-
-    await expect(sync.commit(actor, {
-      syncId: preview.id,
       candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })),
     })).resolves.toMatchObject({ status: "succeeded" });
-    const rebound = await store.resources.findTemplateByKey({ templateKey });
+    const unchangedParent = await store.resources.findTemplateByKey({ templateKey });
     const replacement = (await store.resources.listSignatures({ page: 1, pageSize: 100 })).items
       .find((signature) => signature.externalKey === newSignatureExternalKey);
-    expect(rebound).toMatchObject({ signatureId: replacement?.id, enabled: true, externalStatus: "approved", templateKey });
+    expect(unchangedParent).toMatchObject({ signatureId: original.signatureId, enabled: false, externalStatus: "unavailable", templateKey });
     expect(replacement).toMatchObject({ enabled: true, externalStatus: "approved" });
   });
 
@@ -800,7 +817,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
     const seed = await store.resources.createSyncPreview({
       id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template],
     });
-    await store.resources.commitSync({ syncId: seed.id, candidates: seed.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    await commitResourceFixturePreview(store, seed);
     const changed = createResourceSyncCandidate({
       id: crypto.randomUUID(), externalKey, changeType: "unavailable", checksum: `lock-change-${suffix}`,
       resourceType: "signature", snapshot: {

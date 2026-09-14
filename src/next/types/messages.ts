@@ -22,6 +22,40 @@ export const messageDtoSchema = z.strictObject({
   finalErrorCode: smsErrorCodeSchema.optional(),
 });
 
+const providerRequestIdSchema = z.string().trim().min(1).max(512);
+const redactedFieldSchema = z.enum(["phone", "otp", "proof", "secret", "template-params"]);
+const safeMetricNameSchema = z.enum([
+  "attempt", "job", "message", "receipt", "resource", "rate-limit", "signature", "template",
+]);
+const eventDiagnosticsDtoSchema = z.strictObject({
+  redactedFields: z.array(redactedFieldSchema).max(16).optional(),
+  counts: z.array(z.strictObject({
+    name: safeMetricNameSchema,
+    value: z.number().int().safe().nonnegative(),
+  })).max(32).optional(),
+});
+const receiptDiagnosticsDtoSchema = z.strictObject({
+  redactedFields: z.array(redactedFieldSchema).max(16),
+  reportCount: safeCountSchema.optional(),
+});
+const attemptTimelineItemDtoSchema = z.strictObject({
+  attemptNo: z.number().int().safe().positive(),
+  status: z.enum(["started", "accepted", "rejected", "unknown"]),
+  dispatchMode: z.enum(["direct", "queued"]),
+  dispatchMarkedAt: isoDateTimeSchema,
+  occurredAt: isoDateTimeSchema,
+  providerRequestId: providerRequestIdSchema.optional(),
+  errorCode: smsErrorCodeSchema.optional(),
+  latencyMs: z.number().int().safe().nonnegative().optional(),
+});
+const receiptTimelineItemDtoSchema = z.strictObject({
+  source: z.enum(["callback", "query"]),
+  deliveryStatus: z.enum(["delivered", "failed"]),
+  occurredAt: isoDateTimeSchema,
+  receivedAt: isoDateTimeSchema,
+  diagnostics: receiptDiagnosticsDtoSchema,
+});
+
 export const messageDetailDtoSchema = z.strictObject({
   ...messageDtoSchema.shape,
   /** The message-local optimistic version used by manual reconciliation. */
@@ -29,6 +63,10 @@ export const messageDetailDtoSchema = z.strictObject({
   acceptedAt: isoDateTimeSchema.optional(),
   deliveredAt: isoDateTimeSchema.optional(),
   finalizedAt: isoDateTimeSchema.optional(),
+  providerRequestId: providerRequestIdSchema.optional(),
+  attempts: z.array(attemptTimelineItemDtoSchema).max(1_000),
+  receipts: z.array(receiptTimelineItemDtoSchema).max(1_000),
+  diagnostics: eventDiagnosticsDtoSchema,
 });
 
 export const messagePageDtoSchema = pageSchema(messageDtoSchema);

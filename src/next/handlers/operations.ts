@@ -8,6 +8,7 @@ import type { AuthorizationActor, PhoneLookupHasher } from "../../ports/security
 import type { DailyStats, Job, Message, SmsStore } from "../../ports/store.js";
 import { HttpError } from "../http.js";
 import {
+  betterAuthVerificationDtoSchema,
   jobDtoSchema,
   messageDetailDtoSchema,
   messagePageDtoSchema,
@@ -15,6 +16,7 @@ import {
   smsErrorCodeSchema,
   smsStatsDtoSchema,
   verificationSettingsDtoSchema,
+  type BetterAuthVerificationDto,
   type ReconcileInput,
   type UpdateVerificationSettingsInput,
 } from "../types/index.js";
@@ -24,7 +26,12 @@ const DAY_MS = 24 * 60 * 60 * 1_000;
 const MAX_STATS_RANGE_DAYS = 366;
 const RATE_SCALE = 1_000_000_000_000n;
 
-type OperationsStore = Pick<SmsStore, "messages" | "attempts" | "stats" | "jobs">;
+type OperationsStore = Pick<SmsStore, "messages" | "attempts" | "receipts" | "stats" | "jobs" | "adminOperations">;
+
+export type BetterAuthVerificationSettingsSource<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+  /** Must return the host's actual adapter construction snapshot, never inferred template names. */
+  get(actor: Actor): BetterAuthVerificationDto | Promise<BetterAuthVerificationDto>;
+}>;
 
 /** Services consumed by Task 4 routes; all stateful behavior stays in sms-kit. */
 export type SmsOperationsRouteServices<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
@@ -34,6 +41,8 @@ export type SmsOperationsRouteServices<Actor extends AuthorizationActor = Author
   store?: OperationsStore;
   /** Read-only keyed phone lookup dependency; it never creates ciphertext. */
   phoneProtector?: Pick<PhoneLookupHasher, "lookupHash">;
+  /** Read-only host-owned Better Auth integration state. */
+  betterAuth?: BetterAuthVerificationSettingsSource<Actor>;
   clock?: Clock;
 }>;
 
@@ -79,13 +88,53 @@ async function messageProjection(store: OperationsStore, message: Message) {
 }
 
 async function messageDetailProjection(store: OperationsStore, message: Message) {
-  const base = await messageProjection(store, message);
+  const [base, attempts, receipts] = await Promise.all([
+    messageProjection(store, message),
+    store.attempts.listForMessage({ tenantId: message.tenantId, messageId: message.id }),
+    store.receipts.listForMessage({ tenantId: message.tenantId, messageId: message.id }),
+  ]);
   return messageDetailDtoSchema.parse({
     ...base,
     version: message.version,
     ...(message.acceptedAt === undefined ? {} : { acceptedAt: iso(message.acceptedAt) }),
     ...(message.deliveredAt === undefined ? {} : { deliveredAt: iso(message.deliveredAt) }),
     ...(message.finalizedAt === undefined ? {} : { finalizedAt: iso(message.finalizedAt) }),
+    ...(message.providerRequestId === undefined ? {} : { providerRequestId: message.providerRequestId }),
+    attempts: attempts.map((attempt) => ({
+      attemptNo: attempt.attemptNo,
+      status: attempt.status,
+      dispatchMode: attempt.dispatchMode,
+      dispatchMarkedAt: iso(attempt.dispatchMarkedAt),
+      occurredAt: iso(attempt.occurredAt),
+      ...(attempt.providerRequestId === undefined ? {} : { providerRequestId: attempt.providerRequestId }),
+      ...(safeErrorCode(attempt.errorCode) === undefined ? {} : { errorCode: safeErrorCode(attempt.errorCode) }),
+      ...(attempt.latencyMs === undefined ? {} : { latencyMs: attempt.latencyMs }),
+    })),
+    receipts: receipts.map((receipt) => ({
+      source: receipt.source,
+      deliveryStatus: receipt.deliveryStatus,
+      occurredAt: iso(receipt.occurredAt),
+      receivedAt: iso(receipt.receivedAt),
+      diagnostics: receipt.redactedPayload ?? { redactedFields: [] },
+    })),
+    diagnostics: message.metadata,
+  });
+}
+
+async function betterAuthSettings<Actor extends AuthorizationActor>(
+  services: SmsOperationsRouteServices<Actor>,
+  actor: Actor,
+): Promise<BetterAuthVerificationDto> {
+  if (services.betterAuth === undefined) {
+    return { adapterStatus: "not_configured", loginTemplateKey: null, passwordResetTemplateKey: null };
+  }
+  return betterAuthVerificationDtoSchema.parse(await services.betterAuth.get(actor));
+}
+
+function verificationSettings(policy: object, betterAuth: BetterAuthVerificationDto) {
+  return verificationSettingsDtoSchema.parse({
+    ...policy,
+    betterAuth,
   });
 }
 
@@ -224,7 +273,11 @@ export async function operationJobAuthorization(
   if (job?.originAction === "sms.test" || job?.originAction === "receipt.reconcile") {
     return { requiredPermission: job.originAction };
   }
-  return undefined;
+  if (job === undefined) return undefined;
+  return requireService(services.store).adminOperations.findJobAuthorization({
+    tenantId: input.tenantId,
+    jobId: input.jobId,
+  });
 }
 
 /** Implements strict, tenant-scoped operational routes after router validation. */
@@ -238,9 +291,15 @@ export async function operationsRoute<Actor extends AuthorizationActor>(
 ): Promise<unknown | undefined> {
   if (path === "/verification") {
     const policy = requireService(services.policy);
-    if (body === undefined) return verificationSettingsDtoSchema.parse(await policy.get(actor));
+    if (body === undefined) {
+      const [current, betterAuth] = await Promise.all([policy.get(actor), betterAuthSettings(services, actor)]);
+      return verificationSettings(current, betterAuth);
+    }
     const input = body as UpdateVerificationSettingsInput;
-    return verificationSettingsDtoSchema.parse(await policy.patch(actor, {
+    // Validate the host-owned read model before the durable policy mutation so
+    // an invalid adapter snapshot cannot turn a successful write into a 500.
+    const betterAuth = await betterAuthSettings(services, actor);
+    const updated = await policy.patch(actor, {
       expectedVersion: input.version,
       idempotencyKey: input.idempotencyKey,
       otpLength: input.otpLength,
@@ -255,7 +314,8 @@ export async function operationsRoute<Actor extends AuthorizationActor>(
       systemDailyBudget: input.systemDailyBudget,
       circuitOpen: input.circuitOpen,
       ...(input.circuitReason === undefined ? {} : { circuitReason: input.circuitReason }),
-    }));
+    });
+    return verificationSettings(updated, betterAuth);
   }
 
   if (path === "/receipt-health") {
@@ -342,7 +402,9 @@ export async function operationsRoute<Actor extends AuthorizationActor>(
 
   if (path === "/jobs/:id") {
     const job = await requireService(services.store).jobs.get({ tenantId: actor.tenantId, id: params.id! });
-    if (job === undefined || job.originAction === undefined) throw new HttpError(404, "job not found");
+    if (job === undefined || await operationJobAuthorization(services, { tenantId: actor.tenantId, jobId: params.id! }) === undefined) {
+      throw new HttpError(404, "job not found");
+    }
     return jobDto(job);
   }
 

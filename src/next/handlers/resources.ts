@@ -2,7 +2,7 @@ import type { ResourceSyncService } from "../../application/resource-sync-servic
 import type { ResourceAdminService } from "../../application/resource-admin-service.js";
 import { SmsKitError } from "../../core/errors.js";
 import type { AuthorizationActor } from "../../ports/security.js";
-import type { Signature, Template } from "../../ports/store.js";
+import type { ResourceSyncCandidate, Signature, Template } from "../../ports/store.js";
 import {
   resourceSyncCommitResultDtoSchema,
   resourceSyncPreviewDtoSchema,
@@ -33,8 +33,31 @@ function requireService<T>(value: T | undefined): T {
   return value;
 }
 
-function candidate(candidate: { id: string; resourceType: "signature" | "template"; externalKey: string; changeType: "new" | "changed" | "unavailable" | "unchanged"; checksum: string }, expiresAt: Date) {
-  return { id: candidate.id, resourceType: candidate.resourceType, externalKey: candidate.externalKey, changeType: candidate.changeType, checksum: candidate.checksum, expiresAt: expiresAt.toISOString() };
+function candidate(candidate: ResourceSyncCandidate, expiresAt: Date) {
+  const base = {
+    id: candidate.id, resourceType: candidate.resourceType, externalKey: candidate.externalKey,
+    changeType: candidate.changeType, checksum: candidate.checksum, expiresAt: expiresAt.toISOString(),
+  };
+  return candidate.resourceType === "signature" ? {
+    ...base,
+    resourceType: "signature" as const,
+    snapshot: {
+      kind: "signature" as const,
+      externalName: candidate.snapshot.externalName,
+      externalStatus: candidate.snapshot.externalStatus,
+      externalType: candidate.snapshot.externalType,
+    },
+  } : {
+    ...base,
+    resourceType: "template" as const,
+    snapshot: {
+      kind: "template" as const,
+      externalName: candidate.snapshot.externalName,
+      externalStatus: candidate.snapshot.externalStatus,
+      templateType: candidate.snapshot.templateType,
+      variableNames: candidate.snapshot.variableNames,
+    },
+  };
 }
 
 export function signatureDto(value: Signature) {
@@ -57,7 +80,6 @@ export async function resourceRoute<Actor extends AuthorizationActor>(
     const input = body as ResourceSyncPreviewInput;
     const preview = await requireService(services.resourceSync).preview(actor, {
       ...(input.pageSize === undefined ? {} : { pageSize: input.pageSize }),
-      ...(input.templates === undefined ? {} : { templates: input.templates }),
       expectedVersion: input.version,
       idempotencyKey: input.idempotencyKey,
     });

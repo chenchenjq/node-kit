@@ -7,6 +7,7 @@ import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import type { TenantId } from "../../../src/core/types.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const tenantA = "tenant-a" as TenantId;
 const tenantB = "tenant-b" as TenantId;
@@ -25,7 +26,7 @@ describe("queued notification enqueue", () => {
     const template = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "template-queued", changeType: "new", checksum: "queued-template", resourceType: "template", signatureExternalKey: "sign-queued", templateKey: "order.shipped", purpose: "notification", snapshot: { kind: "template", externalCode: "SMS_QUEUED", externalName: "Queued", externalStatus: "approved", templateType: "notification", variableNames: ["orderNo"] } });
     const otpTemplate = createResourceSyncCandidate({ id: crypto.randomUUID(), externalKey: "template-otp", changeType: "new", checksum: "otp-template", resourceType: "template", signatureExternalKey: "sign-queued", templateKey: "otp.login", purpose: "verification", snapshot: { kind: "template", externalCode: "SMS_OTP", externalName: "OTP", externalStatus: "approved", templateType: "verification", variableNames: ["code"] } });
     const preview = await store.resources.createSyncPreview({ id: crypto.randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template, otpTemplate] });
-    await store.resources.commitSync({ syncId: preview.id, candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })) });
+    await commitResourceFixturePreview(store, preview);
     const config = await store.config.update({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", enabled: true, expectedVersion: 0 });
     await store.config.recordConnectionTest({ status: "succeeded", summary: {}, testedAt: new Date("2026-09-13T00:00:00.000Z"), expectedVersion: config.version });
     await store.policy.get();

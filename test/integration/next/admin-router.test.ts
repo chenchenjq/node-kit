@@ -86,10 +86,14 @@ describe("sms admin router", () => {
       ids: { next: () => "req-1", messageId: () => "message-1" as never },
     });
 
-    const malformed = await handler(new Request("https://app.test/api/admin/sms/config", { method: "PATCH", body: "{bad" }));
+    const malformed = await handler(new Request("https://app.test/api/admin/sms/config", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: "{bad",
+    }));
     const oversized = await handler(new Request("https://app.test/api/admin/sms/config", {
       method: "PATCH",
-      headers: { "content-length": "21" },
+      headers: { "content-length": "21", "content-type": "application/json" },
       body: "x".repeat(21),
     }));
 
@@ -198,12 +202,124 @@ describe("sms admin router", () => {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tenantId: "tenant-b" }),
     }));
     const oversized = await handler(new Request("https://app.test/api/admin/sms/config/test-connection", {
-      method: "POST", headers: { "content-length": "101" }, body: "x".repeat(101),
+      method: "POST",
+      headers: { "content-length": "101", "content-type": "application/json" },
+      body: "x".repeat(101),
     }));
 
     expect(tenant.status).toBe(400);
     expect(oversized.status).toBe(413);
     expect(dispatches).toBe(0);
+  });
+
+  it("requires JSON and a host-compatible CSRF boundary for cookie-authenticated writes", async () => {
+    let actorResolutions = 0;
+    let dispatches = 0;
+    const handler = createSmsAdminHandler({
+      resolveActor: async () => {
+        actorResolutions += 1;
+        return actor;
+      },
+      resolveTrustedIp: () => "203.0.113.9",
+      authorizer,
+      csrfProtection: {
+        allowedOrigins: ["http://localhost:3000"],
+        // A mixed host classifies only a token it has actually authenticated;
+        // a caller cannot bypass CSRF with an arbitrary Authorization header.
+        isCookieAuthenticated: (request) => request.headers.has("cookie") &&
+          request.headers.get("authorization") !== "Bearer service-token",
+        verifyToken: (request) => request.headers.get("x-csrf-token") === "host-verified-token",
+      },
+      services: {
+        dispatch: async () => {
+          dispatches += 1;
+          return {
+            data: {
+              status: "succeeded",
+              testedAt: "2026-09-14T00:00:00.000Z",
+              signatureCount: 0,
+              templateCount: 0,
+              config: unconfiguredProvider,
+            },
+          };
+        },
+      },
+      ids: { next: () => "req-1", messageId: () => "message-1" as never },
+    });
+    const request = (headers: Record<string, string>) => handler(new Request(
+      "https://internal.service/api/admin/sms/config/test-connection",
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ version: 1, idempotencyKey: "csrf:test-connection" }),
+      },
+    ));
+
+    const simple = await request({ "content-type": "text/plain" });
+    const crossOriginCookie = await request({
+      "content-type": "application/json",
+      cookie: "session=browser-session",
+      origin: "https://attacker.example",
+    });
+    const trustedProxyOrigin = await request({
+      "content-type": "application/json; charset=utf-8",
+      cookie: "session=browser-session",
+      origin: "http://localhost:3000",
+    });
+    const hostTokenFallback = await request({
+      "content-type": "application/json",
+      cookie: "session=browser-session",
+      "x-csrf-token": "host-verified-token",
+    });
+    const bearerService = await request({
+      "content-type": "application/json",
+      authorization: "Bearer service-token",
+      // Infrastructure cookies must not accidentally turn an explicitly
+      // bearer-authenticated service call into a browser-cookie request.
+      cookie: "load-balancer=affinity",
+    });
+    const bogusBearerCookie = await request({
+      "content-type": "application/json",
+      authorization: "Bearer attacker-controlled",
+      cookie: "session=browser-session",
+    });
+
+    expect(simple.status).toBe(415);
+    expect(crossOriginCookie.status).toBe(403);
+    expect(bogusBearerCookie.status).toBe(403);
+    expect([trustedProxyOrigin.status, hostTokenFallback.status, bearerService.status]).toEqual([200, 200, 200]);
+    expect(actorResolutions).toBe(5);
+    expect(dispatches).toBe(3);
+  });
+
+  it("fails closed when a Cookie request has an unclassified Authorization header", async () => {
+    const handler = createSmsAdminHandler({
+      resolveActor: async () => actor,
+      resolveTrustedIp: () => undefined,
+      authorizer,
+      services: {
+        dispatch: async () => ({ data: {
+          status: "succeeded",
+          testedAt: "2026-09-14T00:00:00.000Z",
+          signatureCount: 0,
+          templateCount: 0,
+          config: unconfiguredProvider,
+        } }),
+      },
+      ids: { next: () => "req-default-csrf", messageId: () => "message-1" as never },
+    });
+
+    const response = await handler(new Request("https://app.test/api/admin/sms/config/test-connection", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer unverified",
+        cookie: "session=browser-session",
+      },
+      body: JSON.stringify({ version: 1, idempotencyKey: "csrf:default-fail-closed" }),
+    }));
+
+    expect(response.status).toBe(403);
   });
 
   it("authorizes overview when the actor has any one read permission", async () => {

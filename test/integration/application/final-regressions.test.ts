@@ -16,6 +16,7 @@ import { createResourceSyncCandidate } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const tenantId = "final-review" as TenantId;
 const otherTenantId = "final-review-other" as TenantId;
@@ -51,7 +52,7 @@ describe("final service and PostgreSQL regressions", () => {
     const resources = [createResourceSyncCandidate({ id: ids.next(), externalKey: "sign", checksum: "s", resourceType: "signature", changeType: "new", snapshot: { kind: "signature", externalName: "Test", externalStatus: "approved", externalType: "通用类型" } }),
       ...(["notification", "verification"] as const).map((type) => createResourceSyncCandidate({ id: ids.next(), externalKey: `aliyun:template:SMS_${type}`, checksum: type, changeType: "new", resourceType: "template", templateKey: `test.${type}`, purpose: type, signatureExternalKey: "sign", snapshot: { kind: "template", externalCode: `SMS_${type}`, externalName: "Test", externalStatus: "approved", templateType: type, variableNames: ["code"] } }))];
     const preview = await store.resources.createSyncPreview({ id: ids.next(), actorId: actor.id, expiresAt: new Date("2030-01-01"), resources });
-    await store.resources.commitSync({ syncId: preview.id, candidates: resources.map(({ id, checksum }) => ({ id, checksum })) });
+    await commitResourceFixturePreview(store, preview, now);
     const config = await store.config.update({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "id", accessKeySecretRef: "secret", receiptCallbackTokenRef: "callback", enabled: true, expectedVersion: 0 });
     await store.config.recordConnectionTest({ expectedVersion: config.version, status: "succeeded", summary: {}, testedAt: now });
     await store.policy.get();

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   apiFailureSchema,
+  messageDetailDtoSchema,
   messageDtoSchema,
   phoneDtoSchema,
   providerConfigDtoSchema,
@@ -9,6 +10,7 @@ import {
   secretRefDtoSchema,
   smsStatsDtoSchema,
   updateProviderConfigSchema,
+  updateVerificationSettingsInputSchema,
   verificationSettingsDtoSchema,
 } from "../../../src/next/types/index.js";
 
@@ -39,6 +41,11 @@ function verificationFixture(overrides: Record<string, unknown> = {}) {
     ipWindowLimit: 20,
     systemDailyBudget: 500,
     circuitOpen: false,
+    betterAuth: {
+      adapterStatus: "enabled",
+      loginTemplateKey: "auth.login_otp",
+      passwordResetTemplateKey: "auth.password_reset",
+    },
     ...overrides,
   };
 }
@@ -208,7 +215,60 @@ describe("public Next admin DTO contracts", () => {
 
     expect(dto.version).toBe(4);
     expect(dto.systemDailyBudget).toBeNull();
+    expect(dto.betterAuth).toEqual({
+      adapterStatus: "enabled",
+      loginTemplateKey: "auth.login_otp",
+      passwordResetTemplateKey: "auth.password_reset",
+    });
     expect(dto).not.toHaveProperty("providerConfigVersion");
+  });
+
+  it("models truthful Better Auth host state but keeps mappings read-only", () => {
+    expect(verificationSettingsDtoSchema.parse(verificationFixture({
+      betterAuth: { adapterStatus: "not_configured", loginTemplateKey: null, passwordResetTemplateKey: null },
+    })).betterAuth.adapterStatus).toBe("not_configured");
+    expect(() => verificationSettingsDtoSchema.parse(verificationFixture({
+      betterAuth: { adapterStatus: "enabled", loginTemplateKey: null, passwordResetTemplateKey: null },
+    }))).toThrow();
+
+    const { betterAuth: _readOnlyMapping, ...policy } = verificationFixture();
+    expect(() => updateVerificationSettingsInputSchema.parse({
+      ...policy,
+      idempotencyKey: "verification:mapping-must-be-host-owned",
+      betterAuth: { adapterStatus: "disabled", loginTemplateKey: null, passwordResetTemplateKey: null },
+    })).toThrow();
+  });
+
+  it("keeps message-detail diagnostics useful but rejects transport tokens and raw payload fields", () => {
+    const detail = messageDetailDtoSchema.parse({
+      ...messageDtoFixture(),
+      version: 1,
+      providerRequestId: "request-1",
+      attempts: [{
+        attemptNo: 1,
+        status: "accepted",
+        dispatchMode: "queued",
+        dispatchMarkedAt: "2026-09-13T00:00:00.000Z",
+        occurredAt: "2026-09-13T00:00:00.100Z",
+        providerRequestId: "attempt-request-1",
+        latencyMs: 100,
+      }],
+      receipts: [{
+        source: "callback",
+        deliveryStatus: "delivered",
+        occurredAt: "2026-09-13T00:00:01.000Z",
+        receivedAt: "2026-09-13T00:00:01.100Z",
+        diagnostics: { redactedFields: ["phone", "template-params"], reportCount: 1 },
+      }],
+      diagnostics: { redactedFields: ["phone"], counts: [{ name: "attempt", value: 1 }] },
+    });
+
+    expect(detail).toMatchObject({ providerRequestId: "request-1", attempts: [{ attemptNo: 1 }], receipts: [{ source: "callback" }] });
+    expect(() => messageDetailDtoSchema.parse({ ...detail, dispatchToken: "internal-token" })).toThrow();
+    expect(() => messageDetailDtoSchema.parse({
+      ...detail,
+      receipts: [{ ...detail.receipts[0], rawPayload: { phone: "+8613800138000" } }],
+    })).toThrow();
   });
 
   it("uses explicit acceptance and delivery statistic fields", () => {

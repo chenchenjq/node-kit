@@ -12,6 +12,7 @@ import type { AuthorizationActor } from "../../../src/ports/security.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
 import { startPostgres } from "../postgres/helpers.js";
+import { commitResourceFixturePreview } from "../postgres/resource-fixtures.js";
 
 const actorA = { id: "test-send-admin-a", tenantId: "tenant-test-send-a" as TenantId } as AuthorizationActor;
 const actorSameTenant = { id: "test-send-admin-a2", tenantId: actorA.tenantId } as AuthorizationActor;
@@ -67,11 +68,7 @@ describe("SendService administrative test send with PostgreSQL", () => {
     const preview = await store.resources.createSyncPreview({
       id: randomUUID(), actorId: "seed", expiresAt: new Date("2030-01-01T00:00:00.000Z"), resources: [signature, template],
     });
-    await store.resources.commitSync({
-      syncId: preview.id,
-      candidates: preview.candidates.map(({ id, checksum }) => ({ id, checksum })),
-      now,
-    });
+    await commitResourceFixturePreview(store, preview, now);
   });
 
   function service(allowed = true, authorized = true): SendService {
