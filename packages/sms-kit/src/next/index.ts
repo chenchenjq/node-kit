@@ -1,3 +1,4 @@
 import "./server-only.js";
 
-export {};
+export { createAdminRouter as createSmsAdminHandler } from "./admin-router.js";
+export type { SmsAdminHandlerOptions, SmsAdminRequestContext, SmsAdminServices } from "./admin-router.js";
