@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import { ResourceAdminService } from "../../../src/application/resource-admin-service.js";
 import { SendService } from "../../../src/application/send-service.js";
@@ -9,15 +9,99 @@ import { SmsKitError } from "../../../src/core/errors.js";
 import { normalizeMainlandPhone } from "../../../src/core/phone.js";
 import type { MessageId, TenantId } from "../../../src/core/types.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
-import { createResourceSyncCandidate, type SmsStore } from "../../../src/ports/store.js";
+import { createResourceSyncCandidate, type SmsStore, type SmsTransaction } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
+import { asSmsTransaction, type PgSmsTransaction } from "../../../src/postgres/transaction.js";
 import { startPostgres } from "../postgres/helpers.js";
 
 const systemTenant = "__system__" as TenantId;
 const actorA = { id: "resource-admin-a", tenantId: "tenant-resource-a" as TenantId } as AuthorizationActor;
 const actorB = { id: "resource-admin-b", tenantId: "tenant-resource-b" as TenantId } as AuthorizationActor;
 const now = new Date("2026-09-14T00:00:00.000Z");
+
+type Deferred<T> = Readonly<{
+  promise: Promise<T>;
+  resolve(value: T | PromiseLike<T>): void;
+}>;
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
+type QueryBarrier = Readonly<{
+  matches(sql: string): boolean;
+  entered: Deferred<void>;
+  release: Deferred<void>;
+}>;
+
+function sqlText(value: unknown): string {
+  if (typeof value === "string") return value.replace(/\s+/g, " ").trim().toLowerCase();
+  if (typeof value === "object" && value !== null && "text" in value && typeof value.text === "string") {
+    return value.text.replace(/\s+/g, " ").trim().toLowerCase();
+  }
+  return "";
+}
+
+function instrumentTransactions(
+  store: PgSmsStore,
+  tag: string,
+  barrier?: QueryBarrier,
+): Readonly<{ store: SmsStore; pid: Promise<number>; pgCodes: string[] }> {
+  const pid = deferred<number>();
+  const pgCodes: string[] = [];
+  const instrumented = new Proxy(store, {
+    get(target, property) {
+      if (property !== "transaction") return Reflect.get(target, property, target);
+      return async <T>(work: (tx: SmsTransaction) => Promise<T>): Promise<T> => target.transaction(async (tx) => {
+        const client = (tx as PgSmsTransaction).client;
+        const backend = await client.query<{ pid: number }>("select pg_backend_pid()::integer as pid");
+        pid.resolve(backend.rows[0]!.pid);
+        await client.query("select set_config('application_name', $1, true)", [tag]);
+        const query = client.query.bind(client) as (...args: unknown[]) => Promise<unknown>;
+        const hookedClient = new Proxy(client, {
+          get(clientTarget, clientProperty) {
+            if (clientProperty !== "query") {
+              const value = Reflect.get(clientTarget, clientProperty, clientTarget) as unknown;
+              return typeof value === "function" ? value.bind(clientTarget) : value;
+            }
+            return async (...args: unknown[]): Promise<unknown> => {
+              try {
+                const result = await query(...args);
+                if (barrier?.matches(sqlText(args[0]))) {
+                  barrier.entered.resolve(undefined);
+                  await barrier.release.promise;
+                }
+                return result;
+              } catch (error) {
+                if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
+                  pgCodes.push(error.code);
+                }
+                throw error;
+              }
+            };
+          },
+        }) as PoolClient;
+        return work(asSmsTransaction(hookedClient));
+      });
+    },
+  });
+  return { store: instrumented as unknown as SmsStore, pid: pid.promise, pgCodes };
+}
+
+async function waitUntilBlockedBy(pool: Pool, blockedPid: number, blockingPid: number, description: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const { rows } = await pool.query<{ blocked: boolean }>(
+      "select $2::integer = any(pg_blocking_pids($1::integer)) as blocked",
+      [blockedPid, blockingPid],
+    );
+    if (rows[0]?.blocked === true) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
 
 describe("ResourceAdminService with PostgreSQL", () => {
   let pool: Pool;
@@ -220,6 +304,163 @@ describe("ResourceAdminService with PostgreSQL", () => {
     })).rejects.toMatchObject({ code: "CONCURRENT_MODIFICATION" } satisfies Partial<SmsKitError>);
     await expect(store.resources.findTemplateByKey({ templateKey: "notice.admin" })).resolves.toMatchObject({ version: template.version });
   });
+
+  it("serializes an independent template import with its parent signature before sync and send locking", async () => {
+    const signature = (await store.resources.listSignatures({ page: 1, pageSize: 10 })).items[0]!;
+    const suffix = randomUUID().replaceAll("-", "");
+    const templateKey = `notice.import-lock-${suffix}`;
+    const templateCandidate = createResourceSyncCandidate({
+      id: randomUUID(),
+      externalKey: `aliyun:template:SMS_IMPORT_LOCK_${suffix}`,
+      changeType: "new",
+      checksum: `import-lock-template-${suffix}`,
+      resourceType: "template",
+      signatureExternalKey: signature.externalKey,
+      templateKey,
+      purpose: "notification",
+      snapshot: {
+        kind: "template",
+        externalCode: `SMS_IMPORT_LOCK_${suffix}`,
+        externalName: `Import lock ${suffix}`,
+        externalStatus: "approved",
+        templateType: "notification",
+        variableNames: [],
+      },
+    });
+    if (templateCandidate.resourceType !== "template") throw new Error("template candidate was not created");
+    await store.resources.createSyncPreview({
+      id: randomUUID(),
+      actorId: actorA.id,
+      expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+      resources: [templateCandidate],
+    });
+    const retiredSignature = createResourceSyncCandidate({
+      id: randomUUID(),
+      externalKey: signature.externalKey,
+      changeType: "unavailable",
+      checksum: `import-lock-signature-${suffix}`,
+      resourceType: "signature",
+      snapshot: {
+        kind: "signature",
+        externalName: signature.externalName,
+        externalStatus: "unavailable",
+        externalType: signature.externalType,
+      },
+    });
+    const retiringPreview = await store.resources.createSyncPreview({
+      id: randomUUID(),
+      actorId: actorA.id,
+      expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+      resources: [retiredSignature],
+    });
+
+    const importBarrier: QueryBarrier = {
+      matches: (sql) => sql.includes("insert into sms_kit.template (") && !sql.includes("on conflict"),
+      entered: deferred<void>(),
+      release: deferred<void>(),
+    };
+    const syncBarrier: QueryBarrier = {
+      matches: (sql) => sql.includes("select id from sms_kit.signature") &&
+        sql.includes("order by external_key, id for update"),
+      entered: deferred<void>(),
+      release: deferred<void>(),
+    };
+    const importProbe = instrumentTransactions(store, `import-${suffix}`, importBarrier);
+    const syncProbe = instrumentTransactions(store, `sync-${suffix}`, syncBarrier);
+    const sendProbe = instrumentTransactions(store, `send-${suffix}`);
+    const importService = new ResourceAdminService({
+      store: importProbe.store,
+      authorizer: { assert: () => undefined },
+      clock: { now: () => now },
+      ids: { next: () => randomUUID() },
+      events: { emit: () => undefined },
+    });
+    const sendService = new SendService({
+      store: sendProbe.store,
+      provider: {} as never,
+      phoneProtector: {
+        protect: async () => ({ ciphertext: "phone", keyId: "key-1", lookupHash: "hash", last4: "0000", masked: "***0000" }),
+        unprotect: async () => normalizeMainlandPhone("13800138000"),
+      },
+      payloadProtector: {
+        seal: async () => ({ ciphertext: "params", keyId: "key-1" }),
+        open: async () => ({}),
+      },
+      clock: { now: () => now },
+      ids: { next: () => randomUUID(), messageId: () => randomUUID() as MessageId },
+      events: { emit: () => undefined },
+      providerTimeoutMs: 1_000,
+    });
+
+    let importing: Promise<unknown> | undefined;
+    let syncing: Promise<unknown> | undefined;
+    let sending: Promise<unknown> | undefined;
+    try {
+      importing = importService.importTemplate(actorA, {
+        version: signature.version,
+        idempotencyKey: `template:import-lock:${suffix}`,
+        candidateId: templateCandidate.id,
+        checksum: templateCandidate.checksum,
+        templateKey,
+        purpose: templateCandidate.purpose,
+        signatureExternalKey: signature.externalKey,
+      });
+      void importing.catch(() => undefined);
+      await importBarrier.entered.promise;
+      const importPid = await importProbe.pid;
+
+      syncing = syncProbe.store.transaction((tx) => syncProbe.store.resources.commitSync({
+        syncId: retiringPreview.id,
+        candidates: retiringPreview.candidates.map(({ id, checksum }) => ({ id, checksum })),
+        now,
+      }, tx));
+      void syncing.catch(() => undefined);
+      const syncPid = await syncProbe.pid;
+      await waitUntilBlockedBy(pool, syncPid, importPid, "resource sync to block behind template import");
+
+      importBarrier.release.resolve(undefined);
+      const imported = await importing;
+      await syncBarrier.entered.promise;
+
+      sending = sendService.enqueueNotification({
+        tenantId: actorB.tenantId,
+        templateKey,
+        phone: "13800138000",
+        variables: {},
+        purpose: "notification",
+        idempotencyKey: `send-import-lock-${suffix}`,
+      });
+      void sending.catch(() => undefined);
+      const sendPid = await sendProbe.pid;
+      await waitUntilBlockedBy(pool, sendPid, syncPid, "send to block behind resource sync");
+
+      syncBarrier.release.resolve(undefined);
+      const [syncOutcome, sendOutcome] = await Promise.allSettled([syncing, sending]);
+
+      expect(imported).toMatchObject({ templateKey, enabled: true });
+      expect(syncOutcome).toEqual(expect.objectContaining({
+        status: "fulfilled",
+        value: expect.objectContaining({ status: "succeeded" }),
+      }));
+      expect(sendOutcome).toEqual(expect.objectContaining({
+        status: "rejected",
+        reason: expect.objectContaining({ code: "TEMPLATE_UNAVAILABLE" }),
+      }));
+      expect([...importProbe.pgCodes, ...syncProbe.pgCodes, ...sendProbe.pgCodes]).not.toContain("40P01");
+      await expect(store.resources.findTemplateByKey({ templateKey })).resolves.toMatchObject({
+        enabled: false,
+        externalStatus: "unavailable",
+      });
+      await expect(pool.query<{ total: number }>(
+        "select count(*)::integer as total from sms_kit.send_message where template_id = $1",
+        [(imported as { id: string }).id],
+      )).resolves.toMatchObject({ rows: [{ total: 0 }] });
+    } finally {
+      importBarrier.release.resolve(undefined);
+      syncBarrier.release.resolve(undefined);
+      await Promise.allSettled([importing, syncing, sending].filter((value): value is Promise<unknown> => value !== undefined));
+    }
+  }, 20_000);
 
   it("holds the template lock through message creation so a racing rename observes the send", async () => {
     let enteredCreate!: () => void;

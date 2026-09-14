@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
+import { HealthService } from "../../../src/application/health-service.js";
 import { createSmsAdminHandler } from "../../../src/next/index.js";
 import { SmsKitError } from "../../../src/core/errors.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
@@ -54,7 +55,7 @@ describe("sms configuration routes", () => {
 
   it("projects overview and configuration through safe DTOs without returning secret references", async () => {
     const handler = handlerFor(admin, {
-      health: { getSnapshot: async ({ tenantId }: { tenantId: string }) => ({ tenantId, status: "ready", pendingJobs: 2, acceptanceUnknown: 0, finalUnknown: 1, unmatchedReceipts: 3, systemBudgetRemaining: 9, circuitOpen: false, warnings: [] }) },
+      health: { getSnapshot: async ({ tenantId }: { tenantId: string }) => ({ tenantId, status: "ready", providerStatus: "ready", pendingJobs: 2, acceptanceUnknown: 0, finalUnknown: 1, unmatchedReceipts: 3, systemBudgetRemaining: 9, circuitOpen: false, warnings: [] }) },
       config: { get: async () => rawConfig },
     });
 
@@ -68,6 +69,37 @@ describe("sms configuration routes", () => {
     expect(configBody.data.accessKeyIdRef).toEqual({ scheme: "env", maskedName: "ALIYUN_***_ID", configured: true });
     expect(JSON.stringify(configBody)).not.toContain("ACCESS_KEY");
     expect(JSON.stringify(configBody)).not.toContain("CALLBACK_TOKEN");
+  });
+
+  it.each([
+    { configStatus: "ready" as const, enabled: true, circuitOpen: true, status: "degraded", providerStatus: "ready" },
+    { configStatus: "untested" as const, enabled: false, circuitOpen: false, status: "disabled", providerStatus: "untested" },
+    { configStatus: "disabled" as const, enabled: false, circuitOpen: false, status: "disabled", providerStatus: "disabled" },
+  ])("reports provider configuration $providerStatus independently from $status health", async ({
+    configStatus, enabled, circuitOpen, status, providerStatus,
+  }) => {
+    const health = new HealthService({
+      store: {
+        config: { get: async () => ({ ...rawConfig, status: configStatus, enabled }) },
+        policy: { get: async () => ({ systemDailyBudget: null, circuitOpen }) },
+        health: { snapshot: async () => ({
+          pendingJobs: 0,
+          waitingMessages: 0,
+          usableTemplates: 1,
+          acceptanceUnknown: 0,
+          finalUnknown: 0,
+          unmatchedReceipts: 0,
+          heldBudgetCount: 0,
+        }) },
+      } as never,
+      clock: { now: () => new Date("2026-09-14T00:00:00.000Z") },
+    });
+    const handler = handlerFor(admin, { health });
+
+    const response = await handler(new Request("https://app.test/api/admin/sms/overview"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ data: { status, providerStatus, circuitOpen } });
   });
 
   it("safely projects a legal single-label secret reference", async () => {
