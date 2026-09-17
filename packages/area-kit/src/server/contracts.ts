@@ -24,6 +24,7 @@ export interface AreaKit<C> {
   getPath(ctx: C, input: VersionSelector & {code: string}): Promise<PathResult>;
   search(ctx: C, input: SearchInput): Promise<Page<SearchHit>>;
   getTree(ctx: C, input?: TreeInput): Promise<TreeResult>;
+  /** Policy and version acceptance are trusted server options, never client-supplied input fields. */
   validateSelection(ctx: C, input: ValidationInput, options?: ValidationOptions): Promise<SelectionResult>;
   updatePresentation(ctx: C, input: PresentationInput): Promise<RegionSummary>;
   getDatasetReport(ctx: C, selector: VersionSelector): Promise<DatasetAdminReport>;
