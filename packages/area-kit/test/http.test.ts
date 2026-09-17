@@ -2,7 +2,15 @@ import { expect, it, vi } from "vitest";
 
 import { handleAreaRequest, readAreaJsonBody, type AreaHost } from "../examples/next/lib/http.js";
 
-function host(): AreaHost<{trusted: true}> & {kit: Record<string, ReturnType<typeof vi.fn>>} {
+type TestHost = Omit<AreaHost<{trusted: true}>, "kit" | "authenticate" | "protectRequest" | "previewPolicy" | "submissionPolicy"> & {
+  kit: Record<string, ReturnType<typeof vi.fn>>;
+  authenticate: ReturnType<typeof vi.fn>;
+  protectRequest: ReturnType<typeof vi.fn>;
+  previewPolicy: ReturnType<typeof vi.fn>;
+  submissionPolicy: ReturnType<typeof vi.fn>;
+};
+
+function host(): TestHost {
   const kit = {
     getDataset: vi.fn(async () => ({datasetId: "d"})), listDatasets: vi.fn(), listProvinces: vi.fn(), listChildren: vi.fn(),
     listRegions: vi.fn(async () => ({items: []})), getRegion: vi.fn(), getRegions: vi.fn(), getPath: vi.fn(), search: vi.fn(), getTree: vi.fn(),
@@ -15,7 +23,7 @@ function host(): AreaHost<{trusted: true}> & {kit: Record<string, ReturnType<typ
 }
 
 async function response(request: Request, path: readonly string[], areaHost = host()): Promise<{body: unknown; response: Response; host: typeof areaHost}> {
-  const result = await handleAreaRequest(request, path, areaHost);
+  const result = await handleAreaRequest(request, path, areaHost as unknown as AreaHost<{trusted: true}>);
   return {body: await result.json(), response: result, host: areaHost};
 }
 
@@ -30,6 +38,21 @@ it("authenticates and protects reads before forwarding strict parsed filters", a
   expect(areaHost.authenticate).toHaveBeenCalledBefore(areaHost.protectRequest as ReturnType<typeof vi.fn>);
 });
 
+it("forwards every supported child filter and decodes an explicit root parent", async () => {
+  const areaHost = host();
+  areaHost.kit.listChildren!.mockResolvedValue({items: []});
+  areaHost.kit.listRegions!.mockResolvedValue({items: []});
+  areaHost.kit.search!.mockResolvedValue({items: []});
+
+  await response(new Request("https://api.example.test/children?parentCode=01&ancestorCode=00&level=2&selectableOnly=true"), ["children"], areaHost);
+  await response(new Request("https://api.example.test/regions?parentCode="), ["regions"], areaHost);
+  await response(new Request("https://api.example.test/search?keyword=north&parentCode="), ["search"], areaHost);
+
+  expect(areaHost.kit.listChildren).toHaveBeenCalledWith({trusted: true}, {parentCode: "01", ancestorCode: "00", level: 2, selectableOnly: true});
+  expect(areaHost.kit.listRegions).toHaveBeenCalledWith({trusted: true}, {parentCode: null});
+  expect(areaHost.kit.search).toHaveBeenCalledWith({trusted: true}, {keyword: "north", parentCode: null});
+});
+
 it("rejects unknown or ambiguous query fields before any kit operation", async () => {
   const areaHost = host();
   const result = await response(new Request("https://api.example.test/regions?limit=1&limit=2&role=admin"), ["regions"], areaHost);
@@ -41,7 +64,7 @@ it("rejects unknown or ambiguous query fields before any kit operation", async (
 
 it("uses repeated parameters for a batch and never comma-splits codes", async () => {
   const areaHost = host();
-  areaHost.kit.getRegions.mockResolvedValue({items: []});
+  areaHost.kit.getRegions!.mockResolvedValue({items: []});
   await response(new Request("https://api.example.test/batch?codes=01&codes=0101"), ["batch"], areaHost);
   expect(areaHost.kit.getRegions).toHaveBeenCalledWith({trusted: true}, {codes: ["01", "0101"]});
   const comma = host();
@@ -58,6 +81,18 @@ it("rejects policy injection and supplies only trusted preview policy with speci
 
   await response(new Request("https://api.example.test/validate", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({pathCodes: ["01"], targetLevel: 2})}), ["validate"], areaHost);
   expect(areaHost.kit.validateSelection).toHaveBeenCalledWith({trusted: true}, {pathCodes: ["01"], targetLevel: 2}, {policy: {allowEarlyTermination: false}, versionPolicy: "specified-ready"});
+});
+
+it("rejects mutation query injection before calling either mutation", async () => {
+  const validateHost = host();
+  const validate = await response(new Request("https://api.example.test/validate?role=admin", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({pathCodes: ["01"]})}), ["validate"], validateHost);
+  expect(validate.response.status).toBe(400);
+  expect(validateHost.kit.validateSelection).not.toHaveBeenCalled();
+
+  const patchHost = host();
+  const patch = await response(new Request("https://api.example.test/admin/presentation?policy=relaxed", {method: "PATCH", headers: {"origin": "https://app.example.test", "content-type": "application/json"}, body: JSON.stringify({code: "01", revision: 1, patch: {enabled: false}})}), ["admin", "presentation"], patchHost);
+  expect(patch.response.status).toBe(400);
+  expect(patchHost.kit.updatePresentation).not.toHaveBeenCalled();
 });
 
 it("requires same origin and request protection for a strict presentation patch", async () => {
@@ -81,7 +116,7 @@ it("enforces the streaming JSON size limit and sanitizes malformed JSON", async 
 
 it("returns only sanitized AreaKit errors and rejects undeclared routes", async () => {
   const areaHost = host();
-  areaHost.kit.listRegions.mockRejectedValue(new Error("postgres://secret"));
+  areaHost.kit.listRegions!.mockRejectedValue(new Error("postgres://secret"));
   const failed = await response(new Request("https://api.example.test/regions"), ["regions"], areaHost);
   expect(failed.response.status).toBe(500);
   expect(failed.body).toEqual({error: {code: "QUERY_FAILED", message: "区域查询失败"}});

@@ -1,6 +1,5 @@
-import { AreaKitError, sanitizeError } from "../../../src/errors.js";
-import type { Level, PresentationInput, SelectionPolicy, ValidationInput, VersionPolicy } from "../../../src/types.js";
-import type { AreaKit } from "../../../src/server/contracts.js";
+import { AreaKitError, sanitizeError, type AreaKit } from "area-kit/server";
+import type { Level, PresentationInput, SelectionPolicy, ValidationInput, VersionPolicy } from "area-kit";
 
 export interface AreaHost<C> {
   kit: AreaKit<C>;
@@ -36,6 +35,14 @@ function queryValue(params: URLSearchParams, name: string): string | undefined {
 function stringQuery(params: URLSearchParams, name: string, required = false): string | undefined {
   const value = queryValue(params, name);
   if (value === undefined) { if (required) invalid(); return undefined; }
+  code(value);
+  return value;
+}
+/** Empty parentCode is reserved for null; codes themselves must be nonempty. */
+function nullableCodeQuery(params: URLSearchParams, name: string): string | null | undefined {
+  const value = queryValue(params, name);
+  if (value === undefined) return undefined;
+  if (!value.length) return null;
   code(value);
   return value;
 }
@@ -146,12 +153,19 @@ export async function handleAreaRequest<C>(request: Request, path: readonly stri
     await host.protectRequest(request, ctx);
     const params = new URL(request.url).searchParams;
     if (route === "dataset") { validateQuery(params, ["datasetId", "versionCode"]); return json(await host.kit.getDataset(ctx, selector(params))); }
-    if (route === "datasets") { validateQuery(params, ["limit", "cursor", "includeUnavailable"]); return json(await host.kit.listDatasets(ctx, {...page(params), ...(booleanQuery(params, "includeUnavailable") === undefined ? {} : {includeUnavailable: booleanQuery(params, "includeUnavailable")})})); }
+    if (route === "datasets") {
+      validateQuery(params, ["limit", "cursor", "includeUnavailable"]); const includeUnavailable = booleanQuery(params, "includeUnavailable");
+      return json(await host.kit.listDatasets(ctx, {...page(params), ...(includeUnavailable === undefined ? {} : {includeUnavailable})}));
+    }
     if (route === "provinces") { validateQuery(params, ["datasetId", "versionCode", "limit", "cursor"]); return json(await host.kit.listProvinces(ctx, {...selector(params), ...page(params)})); }
-    if (route === "children") { validateQuery(params, ["datasetId", "versionCode", "limit", "cursor", "parentCode"]); return json(await host.kit.listChildren(ctx, {...selector(params), ...page(params), parentCode: stringQuery(params, "parentCode", true)!})); }
+    if (route === "children") {
+      validateQuery(params, ["datasetId", "versionCode", "limit", "cursor", "parentCode", "ancestorCode", "level", "selectableOnly"]);
+      const ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly");
+      return json(await host.kit.listChildren(ctx, {...selector(params), ...page(params), parentCode: stringQuery(params, "parentCode", true)!, ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
+    }
     if (route === "regions") {
       validateQuery(params, ["datasetId", "versionCode", "limit", "cursor", "parentCode", "ancestorCode", "level", "selectableOnly"]);
-      const parentCode = stringQuery(params, "parentCode"), ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly");
+      const parentCode = nullableCodeQuery(params, "parentCode"), ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly");
       return json(await host.kit.listRegions(ctx, {...selector(params), ...page(params), ...(parentCode === undefined ? {} : {parentCode}), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
     }
     if (route === "region") { validateQuery(params, ["datasetId", "versionCode", "code"]); return json(await host.kit.getRegion(ctx, {...selector(params), code: stringQuery(params, "code", true)!})); }
@@ -163,13 +177,13 @@ export async function handleAreaRequest<C>(request: Request, path: readonly stri
     if (route === "path") { validateQuery(params, ["datasetId", "versionCode", "code"]); return json(await host.kit.getPath(ctx, {...selector(params), code: stringQuery(params, "code", true)!})); }
     if (route === "search") {
       validateQuery(params, ["datasetId", "versionCode", "limit", "cursor", "parentCode", "ancestorCode", "level", "selectableOnly", "keyword"]);
-      const parentCode = stringQuery(params, "parentCode"), ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly"), keyword = stringQuery(params, "keyword", true)!;
+      const parentCode = nullableCodeQuery(params, "parentCode"), ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly"), keyword = stringQuery(params, "keyword", true)!;
       if (keyword.length > 100) invalid();
       return json(await host.kit.search(ctx, {...selector(params), ...page(params), keyword, ...(parentCode === undefined ? {} : {parentCode}), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
     }
     if (route === "tree") { validateQuery(params, ["datasetId", "versionCode", "ancestorCode", "depth", "maxNodes"]); const ancestorCode = stringQuery(params, "ancestorCode"), depth = intQuery(params, "depth", 1, 3), maxNodes = intQuery(params, "maxNodes", 1, 5000); return json(await host.kit.getTree(ctx, {...selector(params), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(depth === undefined ? {} : {depth}), ...(maxNodes === undefined ? {} : {maxNodes})})); }
-    if (route === "validate") { contentType(request); const input = validationInput(await readAreaJsonBody(request)); const targetLevel = input.targetLevel ?? 3; return json(await host.kit.validateSelection(ctx, input, {policy: host.previewPolicy(ctx, targetLevel), versionPolicy: "specified-ready"})); }
-    if (route === "admin/presentation") { contentType(request); return json(await host.kit.updatePresentation(ctx, presentationInput(await readAreaJsonBody(request)))); }
+    if (route === "validate") { validateQuery(params, []); contentType(request); const input = validationInput(await readAreaJsonBody(request)); const targetLevel = input.targetLevel ?? 3; return json(await host.kit.validateSelection(ctx, input, {policy: host.previewPolicy(ctx, targetLevel), versionPolicy: "specified-ready"})); }
+    if (route === "admin/presentation") { validateQuery(params, []); contentType(request); return json(await host.kit.updatePresentation(ctx, presentationInput(await readAreaJsonBody(request)))); }
     validateQuery(params, ["datasetId", "versionCode"]); return json(await host.kit.getDatasetReport(ctx, selector(params)));
   } catch (cause) { return error(cause); }
 }

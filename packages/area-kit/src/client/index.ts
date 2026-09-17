@@ -7,12 +7,13 @@ import { AreaClientError, decodeClientError, decodeSuccess } from "./transport.j
 export type { AreaAdminClient, AreaClient } from "./contracts.js";
 export { AreaClientError } from "./transport.js";
 
-type QueryValue = string | number | boolean | readonly string[] | undefined;
+type QueryValue = string | number | boolean | null | readonly string[] | undefined;
 
 function query(input: object): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(input) as [string, QueryValue][]) {
     if (value === undefined) continue;
+    if (value === null) { params.append(key, ""); continue; }
     if (Array.isArray(value)) for (const item of value) params.append(key, item);
     else params.set(key, String(value));
   }
@@ -33,7 +34,8 @@ export function createAreaClient(options: {baseURL: string; fetch?: typeof fetch
     try {
       const response = await fetcher(`${baseURL}/${path}`, init);
       let value: unknown;
-      try { value = await response.json(); } catch { throw new AreaClientError("QUERY_FAILED"); }
+      try { value = await response.json(); }
+      catch (error) { if (isAbort(error)) throw error; throw new AreaClientError("QUERY_FAILED"); }
       if (!response.ok) throw decodeClientError(value);
       return decodeSuccess<T>(value);
     } catch (error) {
@@ -42,10 +44,12 @@ export function createAreaClient(options: {baseURL: string; fetch?: typeof fetch
     }
   }
   function get<T>(path: string, input: object, signal?: AbortSignal): Promise<T> {
-    return request<T>(`${path}${query(input)}`, {method: "GET", headers: {accept: "application/json"}, cache: "no-store", signal});
+    return request<T>(`${path}${query(input)}`, {method: "GET", headers: {accept: "application/json"}, cache: "no-store",
+      ...(signal === undefined ? {} : {signal})});
   }
   function send<T>(path: string, method: "POST" | "PATCH", input: unknown, signal?: AbortSignal): Promise<T> {
-    return request<T>(path, {method, headers: {accept: "application/json", "content-type": "application/json"}, body: JSON.stringify(input), signal});
+    return request<T>(path, {method, headers: {accept: "application/json", "content-type": "application/json"}, body: JSON.stringify(input),
+      ...(signal === undefined ? {} : {signal})});
   }
   return {
     getDataset: (input: VersionSelector = {}, signal?: AbortSignal) => get<DatasetSummary>("dataset", input, signal),

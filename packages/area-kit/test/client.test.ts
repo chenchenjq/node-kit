@@ -62,3 +62,23 @@ it("only exposes sanitized allowlisted errors and keeps abort failures intact", 
   const abortClient = createAreaClient({baseURL: "https://example.test", fetch: async () => { throw aborted; }});
   await expect(abortClient.getDataset()).rejects.toBe(aborted);
 });
+
+it("preserves an AbortError raised while decoding a response body", async () => {
+  const aborted = new DOMException("aborted", "AbortError");
+  const client = createAreaClient({baseURL: "https://example.test", fetch: async () => ({ok: true, json: async () => { throw aborted; }} as unknown as Response)});
+
+  await expect(client.getDataset()).rejects.toBe(aborted);
+});
+
+it("encodes a root parent as an explicit empty query value", async () => {
+  const fetcher = vi.fn<typeof fetch>(async () => Response.json({data: {items: []}}));
+  const client = createAreaClient({baseURL: "https://example.test/api/area-kit", fetch: fetcher});
+
+  await client.listRegions({parentCode: null});
+  await client.search({keyword: "north", parentCode: null});
+
+  expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([
+    "https://example.test/api/area-kit/regions?parentCode=",
+    "https://example.test/api/area-kit/search?keyword=north&parentCode=",
+  ]);
+});
