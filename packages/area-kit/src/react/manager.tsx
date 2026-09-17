@@ -68,8 +68,8 @@ export function AreaManager({client,className}:AreaManagerProps):React.JSX.Eleme
         page=result;
       } else {
         const input={datasetId:context.dataset.datasetId,...(cursor===null ? {} : {cursor}),...(scopedLevel===undefined ? {} : {level:scopedLevel}),
-          ...(context.parentCode!==null && (scopedLevel===undefined || scopedLevel>context.parentLevel!) ? {parentCode:context.parentCode}
-            : context.parentCode===null && (scopedLevel===undefined || scopedLevel===1) ? {parentCode:null} : {})};
+          ...(context.parentCode!==null ? scopedLevel===undefined ? {parentCode:context.parentCode} : {ancestorCode:context.parentCode}
+            : scopedLevel===undefined || scopedLevel===1 ? {parentCode:null} : {})};
         page=await client.listRegions(input,controller.signal);
       }
       if (!current(expected)) return;
@@ -127,15 +127,15 @@ export function AreaManager({client,className}:AreaManagerProps):React.JSX.Eleme
   async function save():Promise<void> {
     if (dataset===null || selected===null || saving) return;
     const nextSort=Number(sort); if (!Number.isInteger(nextSort)) { setSaveError("排序必须是整数"); return; }
-    const selectedDataset=dataset, selectedNode=selected, expected=generation.current, controller=request(expected); if (controller===null) return;
+    const selectedDataset=dataset, selectedNode=selected, expected=generation.current, selection=selectionRequest.current, controller=request(expected); if (controller===null) return;
     setSaving(true); setSaveError(null);
     try {
       const saved=await client.updatePresentation({datasetId:selectedDataset.datasetId,code:selectedNode.code,revision:selectedNode.revision,
         patch:{displayName:displayName.trim() || null,sort:nextSort,enabled}},controller.signal);
-      if (!current(expected)) return;
+      if (!current(expected) || selectionRequest.current!==selection) return;
       setSelected(saved);
       const result=await client.getPath({datasetId:selectedDataset.datasetId,code:saved.code},controller.signal);
-      if (!current(expected)) return;
+      if (!current(expected) || selectionRequest.current!==selection) return;
       setDetailPath(result.nodes); await loadNodes(makeQuery(selectedDataset),currentCursor,false,expected);
     } catch(error) {
       if (!current(expected) || isAbort(error)) return;

@@ -110,6 +110,16 @@ it("omits root parentCode when a non-root level filter searches the dataset",asy
   expect(listRegions.mock.calls.at(-1)?.[0]).not.toHaveProperty("parentCode");
 });
 
+it("uses ancestorCode for a descendant level filter below the navigation parent",async()=>{
+  const listRegions=vi.fn(client().listRegions);
+  const user=userEvent.setup();
+  render(<AreaManager client={client({listRegions})}/>);
+  await user.click(await screen.findByRole("button",{name:/甲省/}));
+  await user.selectOptions(screen.getByLabelText("层级过滤"),"3");
+  await waitFor(()=>expect(listRegions.mock.calls.at(-1)?.[0]).toMatchObject({ancestorCode:root.code,level:3}));
+  expect(listRegions.mock.calls.at(-1)?.[0]).not.toHaveProperty("parentCode");
+});
+
 it("ignores stale node and report responses after a dataset switch",async()=>{
   const historical=syntheticDataset({datasetId:"00000000-0000-4000-8000-000000000002",versionCode:"old:v1",isActive:false});
   const staleNodes=deferred<Page<RegionSummary>>();
@@ -185,4 +195,22 @@ it("keeps the newest node path when a prior selection resolves last",async()=>{
   rootPath.resolve({datasetId:dataset.datasetId,versionCode:dataset.versionCode,nodes:[root],pathCodes:[root.code],pathNames:[root.label]});
   expect(await screen.findByRole("heading",{name:/0101/})).not.toBeNull();
   expect(within(screen.getByLabelText("区域详情")).getByText("甲省 / 甲市")).not.toBeNull();
+});
+
+it("does not let a delayed save replace a newer selected leaf",async()=>{
+  const other=syntheticRegion({code:"0102",label:"乙市",level:2,parentCode:"01"});
+  const pendingSave=deferred<RegionSummary>();
+  const getPath=vi.fn(async input=>{
+    const nodes=input.code===other.code ? [root,other] : [root,child];
+    return {datasetId:dataset.datasetId,versionCode:dataset.versionCode,nodes,pathCodes:nodes.map(node=>node.code),pathNames:nodes.map(node=>node.label)};
+  });
+  const user=userEvent.setup();
+  render(<AreaManager client={client({listRegions:async()=>page([child,other]),getPath,updatePresentation:async()=>pendingSave.promise})}/>);
+  await user.click(await screen.findByRole("button",{name:/甲市/}));
+  await user.click(screen.getByRole("button",{name:"保存展示设置"}));
+  await user.click(screen.getByRole("button",{name:/乙市/}));
+  expect(await screen.findByRole("heading",{name:/0102/})).not.toBeNull();
+  pendingSave.resolve(child);
+  await waitFor(()=>expect(screen.getByRole("heading",{name:/0102/})).not.toBeNull());
+  expect(getPath).not.toHaveBeenLastCalledWith(expect.objectContaining({code:child.code}),expect.any(AbortSignal));
 });
