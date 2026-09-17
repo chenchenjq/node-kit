@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "workspace": "/tmp/area-kit-final-Luaul7",
+  "runtimeArtifactSha256": "5392a2cfabb025ef410d5063beaa5756be0a588b6c7254f3b8357d2bd673a12f",
+  "consumers": {
+    "node": "/tmp/area-kit-final-Luaul7/node",
+    "core": "/tmp/area-kit-final-Luaul7/core",
+    "next": "/tmp/area-kit-final-Luaul7/next"
+  },
+  "sha256": "2013198e001fc04ab959308bf8b3f385263996fcb9fddf5404c09d2bab9d5249",
+  "tarball": "/home/node-kit/.worktrees/area-kit/packages/area-kit/artifacts/2013198e001fc04ab959308bf8b3f385263996fcb9fddf5404c09d2bab9d5249.tgz",
+  "identicalNonDocumentFiles": 102,
+  "documentation": "Compiled 7 documentation examples from installed area-kit.",
+  "freshCaches": true,
+  "elapsedMs": 72084
+}

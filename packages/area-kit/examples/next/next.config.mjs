@@ -1,2 +1,5 @@
-/** The example consumes the published package; no workspace source aliases. */
-export default { serverExternalPackages: ["pg", "drizzle-orm"] };
+/** The example consumes the installed package, with NodeNext-style .js imports in TS source. */
+export default {
+  serverExternalPackages: ["pg", "drizzle-orm"],
+  experimental: { extensionAlias: { ".js": [".ts", ".tsx", ".js"] } },
+};

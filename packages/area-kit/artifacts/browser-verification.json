@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "verified": true,
+  "startedAt": "2026-09-17T15:27:38.269Z",
+  "checks": [
+    "select/submit/clear/keyboard/same-name search/path fill/no overflow 1280",
+    "transport retry and real-response race 1280",
+    "admin save/disable/restore/pagination/no overflow 1280",
+    "select/submit/clear/keyboard/same-name search/path fill/no overflow 390",
+    "transport retry and real-response race 390",
+    "admin save/disable/restore/pagination/no overflow 390"
+  ],
+  "externalAttempts": 0,
+  "pageErrors": [],
+  "browser": "146.0.7680.164",
+  "viewports": [
+    1280,
+    390
+  ]
+}

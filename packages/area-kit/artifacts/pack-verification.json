@@ -1,0 +1,295 @@
+{
+  "passed": true,
+  "verified": true,
+  "browserOnly": true,
+  "workspace": "/tmp/area-kit-pack-6ercjT",
+  "startedAt": "2026-09-17T14:53:34.306Z",
+  "checks": [
+    {
+      "name": "build",
+      "passed": true,
+      "elapsedMs": 7940
+    },
+    {
+      "name": "tarball inventory",
+      "passed": true,
+      "elapsedMs": 15578
+    },
+    {
+      "name": "Node clean install",
+      "passed": true,
+      "elapsedMs": 118142
+    },
+    {
+      "name": "Next clean install",
+      "passed": true,
+      "elapsedMs": 183643
+    },
+    {
+      "name": "consumer TypeScript",
+      "passed": true,
+      "elapsedMs": 1347
+    },
+    {
+      "name": "esbuild browser positive and negative boundaries",
+      "passed": true,
+      "elapsedMs": 647
+    },
+    {
+      "name": "installed migration",
+      "passed": true,
+      "elapsedMs": 2735
+    },
+    {
+      "name": "Next negative server",
+      "passed": true,
+      "elapsedMs": 40412
+    },
+    {
+      "name": "Next negative postgres",
+      "passed": true,
+      "elapsedMs": 32137
+    },
+    {
+      "name": "Next production build",
+      "passed": true,
+      "elapsedMs": 84010
+    },
+    {
+      "name": "Next real bootstrap and authorization before import",
+      "passed": true,
+      "elapsedMs": 4546
+    },
+    {
+      "name": "installed CLI full source import and activate",
+      "passed": true,
+      "elapsedMs": 948817
+    },
+    {
+      "name": "Next production start",
+      "passed": true,
+      "elapsedMs": 44441
+    },
+    {
+      "name": "HTTP routes and real business submit",
+      "passed": true,
+      "elapsedMs": 2929
+    },
+    {
+      "name": "offline guard negative preflight",
+      "passed": true,
+      "elapsedMs": 1807
+    },
+    {
+      "name": "Next offline production start",
+      "passed": true,
+      "elapsedMs": 2908
+    },
+    {
+      "name": "offline Node queries",
+      "passed": true,
+      "elapsedMs": 34354
+    },
+    {
+      "name": "offline HTTP and business submit",
+      "passed": true,
+      "elapsedMs": 2382
+    },
+    {
+      "name": "real browser desktop and narrow flows",
+      "passed": true,
+      "elapsedMs": 345576
+    },
+    {
+      "name": "persisted business submission",
+      "passed": true,
+      "elapsedMs": 96
+    }
+  ],
+  "tarball": "/home/node-kit/.worktrees/area-kit/packages/area-kit/artifacts/5392a2cfabb025ef410d5063beaa5756be0a588b6c7254f3b8357d2bd673a12f.tgz",
+  "sha256": "5392a2cfabb025ef410d5063beaa5756be0a588b6c7254f3b8357d2bd673a12f",
+  "files": [
+    "AI-USAGE.md",
+    "DATA-SOURCE.md",
+    "DATABASE.md",
+    "README.md",
+    "dist/browser-forbidden.d.ts",
+    "dist/browser-forbidden.js",
+    "dist/cli.d.ts",
+    "dist/cli.js",
+    "dist/client/contracts.d.ts",
+    "dist/client/contracts.js",
+    "dist/client/index.d.ts",
+    "dist/client/index.js",
+    "dist/client/transport.d.ts",
+    "dist/client/transport.js",
+    "dist/errors.d.ts",
+    "dist/errors.js",
+    "dist/import/activate.d.ts",
+    "dist/import/activate.js",
+    "dist/import/inherit.d.ts",
+    "dist/import/inherit.js",
+    "dist/import/runner.d.ts",
+    "dist/import/runner.js",
+    "dist/import/types.d.ts",
+    "dist/import/types.js",
+    "dist/index.d.ts",
+    "dist/index.js",
+    "dist/migrations/0001-area-kit.sql",
+    "dist/policy.d.ts",
+    "dist/policy.js",
+    "dist/postgres/import-backend.d.ts",
+    "dist/postgres/import-backend.js",
+    "dist/postgres/index.d.ts",
+    "dist/postgres/index.js",
+    "dist/postgres/locks.d.ts",
+    "dist/postgres/locks.js",
+    "dist/postgres/migration.d.ts",
+    "dist/postgres/migration.js",
+    "dist/postgres/next.d.ts",
+    "dist/postgres/next.js",
+    "dist/postgres/read-view.d.ts",
+    "dist/postgres/read-view.js",
+    "dist/postgres/schema.d.ts",
+    "dist/postgres/schema.js",
+    "dist/postgres/store.d.ts",
+    "dist/postgres/store.js",
+    "dist/react/cascader.d.ts",
+    "dist/react/cascader.js",
+    "dist/react/history.d.ts",
+    "dist/react/history.js",
+    "dist/react/index.d.ts",
+    "dist/react/index.js",
+    "dist/react/manager.d.ts",
+    "dist/react/manager.js",
+    "dist/react/selection-state.d.ts",
+    "dist/react/selection-state.js",
+    "dist/react/use-area-selection.d.ts",
+    "dist/react/use-area-selection.js",
+    "dist/server/contracts.d.ts",
+    "dist/server/contracts.js",
+    "dist/server/cursor.d.ts",
+    "dist/server/cursor.js",
+    "dist/server/index.d.ts",
+    "dist/server/index.js",
+    "dist/server/management.d.ts",
+    "dist/server/management.js",
+    "dist/server/next.d.ts",
+    "dist/server/next.js",
+    "dist/server/ports.d.ts",
+    "dist/server/ports.js",
+    "dist/server/query.d.ts",
+    "dist/server/query.js",
+    "dist/server/selection.d.ts",
+    "dist/server/selection.js",
+    "dist/server/summary.d.ts",
+    "dist/server/summary.js",
+    "dist/source/audit.d.ts",
+    "dist/source/audit.js",
+    "dist/source/csv.d.ts",
+    "dist/source/csv.js",
+    "dist/source/external-sort.d.ts",
+    "dist/source/external-sort.js",
+    "dist/source/kinds.d.ts",
+    "dist/source/kinds.js",
+    "dist/source/manifest.d.ts",
+    "dist/source/manifest.js",
+    "dist/source/prepare.d.ts",
+    "dist/source/prepare.js",
+    "dist/types.d.ts",
+    "dist/types.js",
+    "examples/next/app/admin/areas/page.tsx",
+    "examples/next/app/api/address-selection/route.ts",
+    "examples/next/app/api/area-kit/[...path]/route.ts",
+    "examples/next/app/areas/page.tsx",
+    "examples/next/app/layout.tsx",
+    "examples/next/app/page.tsx",
+    "examples/next/app/styles.css",
+    "examples/next/global.d.ts",
+    "examples/next/lib/client.ts",
+    "examples/next/lib/host.ts",
+    "examples/next/lib/http.ts",
+    "examples/next/lib/submission.ts",
+    "examples/next/next.config.mjs",
+    "licenses/Administrative-divisions-of-China.LICENSE.txt",
+    "migrations/0001-area-kit.sql",
+    "package.json",
+    "scripts/area-kit.mjs"
+  ],
+  "consumers": {
+    "node": "/tmp/area-kit-pack-6ercjT/node",
+    "next": "/tmp/area-kit-pack-6ercjT/next"
+  },
+  "resolutions": {
+    "node": "/tmp/area-kit-pack-6ercjT/node/node_modules/area-kit",
+    "next": "/tmp/area-kit-pack-6ercjT/next/node_modules/area-kit"
+  },
+  "origin": "http://127.0.0.1:37821",
+  "environment": {
+    "node": "v22.22.1",
+    "postgres": "18.3"
+  },
+  "dataset": {
+    "datasetId": "41734a0d-73ea-461f-8bd3-db2bd7134729",
+    "versionCode": "modood-administrative-divisions-of-china:c49d495b40ac73eb1a66f6eeae5f8fd10696f035:v1",
+    "source": "https://github.com/modood/Administrative-divisions-of-China",
+    "sourceCommit": "c49d495b40ac73eb1a66f6eeae5f8fd10696f035",
+    "rulesVersion": "v1",
+    "codeScheme": "statistics-source-short-codes",
+    "dataAsOf": "2023-06-30",
+    "sourcePublishedAt": "2023-09-11",
+    "coverage": {
+      "levels": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "excluded": [
+        "HK",
+        "MO",
+        "TW"
+      ],
+      "description": "固定于 2023-06-30 的统计来源快照，不代表最新数据，也不保证与当前行政建制一致。"
+    },
+    "levelCounts": {
+      "1": 31,
+      "2": 342,
+      "3": 2978,
+      "4": 41352,
+      "5": 620573
+    },
+    "status": "ready",
+    "isActive": true,
+    "importedAt": "2026-09-17T15:20:50.953Z"
+  },
+  "debugAttempts": [
+    {
+      "name": "real browser desktop and narrow flows",
+      "failure": "/home/meteor/.nvm/versions/node/v22.22.1/bin/node /home/node-kit/.worktrees/area-kit/packages/area-kit/scripts/verify-browser.mjs --consumer-dir failed (1)\n\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nlocator.click: Timeout 60000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: '重试加载第2级区域' })\u001b[22m\n\n    at <anonymous> (/tmp/area-kit-pack-6ercjT/next/area-flow.test.ts:37:81) {\n  name: 'TimeoutError'\n}\n\nNode.js v22.22.1\nnode:internal/modules/run_main:123\n    triggerUncaughtException(\n    ^\n\nAssertionError [ERR_ASSERTION]: Real browser flow failed\n\n1 !== 0\n\n    at file:///home/node-kit/.worktrees/area-kit/packages/area-kit/scripts/verify-browser.mjs:22:12\n    at process.processTicksAndRejections (node:internal/process/task_queues:103:5) {\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: 1,\n  expected: 0,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v22.22.1\n",
+      "at": "2026-09-17T15:27:04.196Z"
+    }
+  ],
+  "offline": {
+    "mode": "process-level Node network guard; not OS isolation",
+    "externalAttempts": 0
+  },
+  "elapsedMs": 2093054,
+  "finalArtifact": {
+    "passed": true,
+    "workspace": "/tmp/area-kit-final-Luaul7",
+    "runtimeArtifactSha256": "5392a2cfabb025ef410d5063beaa5756be0a588b6c7254f3b8357d2bd673a12f",
+    "consumers": {
+      "node": "/tmp/area-kit-final-Luaul7/node",
+      "core": "/tmp/area-kit-final-Luaul7/core",
+      "next": "/tmp/area-kit-final-Luaul7/next"
+    },
+    "sha256": "2013198e001fc04ab959308bf8b3f385263996fcb9fddf5404c09d2bab9d5249",
+    "tarball": "/home/node-kit/.worktrees/area-kit/packages/area-kit/artifacts/2013198e001fc04ab959308bf8b3f385263996fcb9fddf5404c09d2bab9d5249.tgz",
+    "identicalNonDocumentFiles": 102,
+    "documentation": "Compiled 7 documentation examples from installed area-kit.",
+    "freshCaches": true,
+    "elapsedMs": 72084
+  }
+}

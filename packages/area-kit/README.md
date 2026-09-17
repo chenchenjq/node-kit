@@ -95,3 +95,12 @@ export function AddressField() {
 ```
 
 See [DATABASE.md](./DATABASE.md), [DATA-SOURCE.md](./DATA-SOURCE.md), and [AI-USAGE.md](./AI-USAGE.md) before putting a snapshot into service.
+
+
+## Verified packed acceptance
+
+On 2026-09-17, the actual npm tarball was installed into independent core, Node, and Next consumers outside the repository. Core imports and CLI preparation/check worked without React, pg, or Drizzle; the Node consumer had no React. The installed CLI initialized and activated a fresh PostgreSQL database with all 665,276 rows of the pinned source. Installed documentation examples compiled, and the shipped Next example passed production build/start with `next build --webpack`. Browser-safe entries bundled successfully; importing either server entry from browser/Next client code failed as required.
+
+Real Chrome flows passed at widths 1280 and 390: selection, keyboard operation, same-name search/path refill, clearing, transport retry, delayed-response races, business submission, and administrative save/disable/restore/pagination, with no page overflow or uncaught page errors. Node queries, Next routes, and submissions also passed under a process-level external-network guard with zero external attempts; this is not OS network isolation. The final documentation-only tarball was installed into three new consumers with empty npm caches, its seven documentation examples compiled, and every non-document file matched the runtime-tested tarball byte for byte. Maintainer JSON reports and screenshots remain outside the distributed package.
+
+The tested baseline was Node 22.22.1, Next 16.3.5, React 19.3.0, TypeScript 7.0.2, pg 8.23.0, Drizzle 0.45.2, PostgreSQL 18.3, and Chrome 146.0.7680.164. This records one acceptance environment, not a general compatibility or capacity guarantee. The host still supplies production authentication, authorization, request protection/origin rules, trusted policies, persistence, migration execution, and dataset activation.

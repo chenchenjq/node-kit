@@ -46,7 +46,7 @@ async function main() {
     }
   }
 
-  await execute(process.execPath, [typescript, "--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022",
+  await execute(process.execPath, [typescript, "--ignoreConfig", "--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022",
     "--module", "NodeNext", "--moduleResolution", "NodeNext", "--jsx", "react-jsx", ...files], {
     cwd: consumerDirectory,
     env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "NODE_PATH")),

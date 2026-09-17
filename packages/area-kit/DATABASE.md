@@ -92,3 +92,10 @@ Its checks are `area_region_level` (1 through 5), `area_region_revision` (greate
 ## Transaction and cache responsibilities
 
 Import writes a full dataset, re-audits it, and marks it ready only after verification; activation chooses the one ready active dataset. `updatePresentation` checks the caller's `admin.write` authorization and exact revision inside a write transaction. The host must invalidate cache entries for every process after a successful presentation change. The package owns neither external caches nor host address writes.
+
+
+## Packed database acceptance
+
+On 2026-09-17, the installed tarball's migration and CLI initialized a fresh PostgreSQL 18.3 database with all 665,276 pinned source rows, then activated the ready dataset. A React-free Node consumer and the production Next example queried that same real database, including paths, same-name search, targets 1–5, and source navigation-group rules. Before initialization, the live Next adapter returned 503 for an authorized uninitialized read and 403 for an unauthenticated request.
+
+Browser business submissions used the example's same-connection validation/persistence transaction with a test-only host persistence implementation; the verifier checked persisted records in PostgreSQL. Administrative label saves, disable/restore, and pagination passed at desktop and narrow widths. Queries and business writes also passed after restarting Node/Next under the process-level offline guard. These results do not supply production credentials, authentication, business tables, migration orchestration, or cache invalidation for the host.
