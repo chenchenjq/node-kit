@@ -60,7 +60,7 @@ export function createDrizzleAreaStore(pool: Pool, options: { schemaName?: strin
     try {
       await client.query(write ? "BEGIN ISOLATION LEVEL READ COMMITTED" : "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       began = true;
-      await client.query("SET LOCAL search_path TO public");
+      await client.query("SET LOCAL search_path TO pg_catalog, public, pg_temp");
       // READ COMMITTED takes the first state snapshot after a waiting writer acquires this lock.
       if (write) await lockAreaLibrary(client, schemaName, "exclusive");
       const db = drizzle(client);
@@ -87,7 +87,7 @@ export function bindAreaStore(client: PoolClient, options: { schemaName?: string
   const tables = createAreaTables(options.schemaName ?? "public");
   return {
     async read(work) {
-      await client.query("SET LOCAL search_path TO public");
+      await client.query("SET LOCAL search_path TO pg_catalog, public, pg_temp");
       return scoped(createReadView(drizzle(client), tables), work);
     },
     async write() { throw new AreaKitError("INVALID_CONFIG"); },

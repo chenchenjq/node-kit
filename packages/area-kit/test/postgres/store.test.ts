@@ -257,3 +257,48 @@ it("targets public tables even when the connection search_path names a decoy lib
     } finally { await h.pool.query("DROP TABLE public.area_region, public.area_dataset"); }
   });
 });
+
+it.each(["owned-read", "owned-write", "bound-read"] as const)(
+  "keeps public dataset and region access ahead of temp decoys in %s", async mode => {
+    const { areaMigrationSql } = await import("../../src/postgres/migration.js");
+    await withHarness(async h => {
+      const id = await ready(h, "public", true);
+      await node(h, id, "01", 1, null, "region", "public region");
+      await h.pool.query(areaMigrationSql("public"));
+      try {
+        await h.pool.query(`INSERT INTO public.area_dataset SELECT * FROM "${h.schemaName}".area_dataset`);
+        await h.pool.query(`INSERT INTO public.area_region SELECT * FROM "${h.schemaName}".area_region`);
+        const client = await h.pool.connect();
+        await client.query("CREATE TEMP TABLE area_dataset AS SELECT * FROM public.area_dataset");
+        await client.query("CREATE TEMP TABLE area_region AS SELECT * FROM public.area_region");
+        await client.query("UPDATE pg_temp.area_dataset SET version_code='temp decoy'");
+        await client.query("UPDATE pg_temp.area_region SET source_name='temp decoy'");
+        const assertPublic = async (view: ReadView) => {
+          expect((await view.resolveDataset({}))?.versionCode).toBe("public");
+          expect((await view.findNodes(id, ["01"]))[0]?.sourceName).toBe("public region");
+        };
+        if (mode === "bound-read") {
+          try {
+            await client.query("BEGIN");
+            await bindAreaStore(client).read(assertPublic);
+          } finally { await client.query("ROLLBACK"); client.release(); }
+        } else {
+          // This harness has one pooled connection, carrying both session-local decoys.
+          client.release();
+          const store = createDrizzleAreaStore(h.pool);
+          if (mode === "owned-read") await store.read(assertPublic);
+          else {
+            await store.write(async view => {
+              await assertPublic(view);
+              await view.updatePresentation(id, "01", 1, { displayName: "public update" });
+            });
+            expect((await h.pool.query("SELECT display_name FROM public.area_region")).rows[0].display_name)
+              .toBe("public update");
+            expect((await h.pool.query("SELECT display_name FROM pg_temp.area_region")).rows[0].display_name)
+              .toBeNull();
+          }
+        }
+      } finally { await h.pool.query("DROP TABLE public.area_region, public.area_dataset"); }
+    });
+  },
+);
