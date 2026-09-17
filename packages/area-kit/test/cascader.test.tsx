@@ -6,7 +6,7 @@ import {afterEach, expect, it, vi} from "vitest";
 import {AreaCascader} from "../src/react/cascader.js";
 import type {AreaSelectionClient} from "../src/react/use-area-selection.js";
 import {evaluateSelection} from "../src/policy.js";
-import type {AreaValue, Page, RegionSummary, SearchHit} from "../src/types.js";
+import type {AreaValue, Page, RegionSummary, SearchHit, VersionSelector} from "../src/types.js";
 import {syntheticDataset, syntheticRegion} from "./fixtures/factory.js";
 
 const dataset=syntheticDataset();
@@ -14,6 +14,8 @@ const root=syntheticRegion({code:"01",label:"甲省",hasChildren:true,childrenSt
 const group=syntheticRegion({code:"0101",sourceName:"合成统计分组",label:"合成统计分组",level:2,parentCode:"01",nodeKind:"group",selectable:false,
   hasChildren:true,childrenState:"AVAILABLE"});
 const county=syntheticRegion({code:"010101",label:"同名县",level:3,parentCode:"0101",hasChildren:false,childrenState:"NONE_IN_SNAPSHOT"});
+const alternateDataset=syntheticDataset({datasetId:"00000000-0000-4000-8000-000000000002",versionCode:"synthetic:v2"});
+const alternateRoot=syntheticRegion({code:"77",label:"乙省",hasChildren:false,childrenState:"NONE_IN_SNAPSHOT"});
 
 function page(items: RegionSummary[], hasMore=false, nextCursor: string | null=null): Page<RegionSummary> {
   return {datasetId:dataset.datasetId,versionCode:dataset.versionCode,items,hasMore,nextCursor};
@@ -77,6 +79,47 @@ it("shows full search paths and closes search results with Escape", async () => 
   expect(await screen.findByRole("button",{name:/甲省.*合成统计分组.*同名县.*010101/})).not.toBeNull();
   await user.keyboard("{Escape}");
   expect(screen.queryByRole("button",{name:/甲省.*合成统计分组.*同名县/})).toBeNull();
+});
+
+it("searches from an enclosing form without submitting that form", async () => {
+  const hit: SearchHit={...county,pathCodes:[root.code,group.code,county.code],pathNames:[root.label,group.label,county.label]};
+  const submit=vi.fn();
+  const user=userEvent.setup();
+  render(<form onSubmit={submit}><AreaCascader client={client({search:async()=>searchPage([hit])})} value={null} onChange={()=>{}} /></form>);
+  await user.type(await screen.findByLabelText("搜索区域"),"同名");
+  await user.keyboard("{Enter}");
+  expect(await screen.findByRole("button",{name:/甲省.*同名县.*010101/})).not.toBeNull();
+  expect(submit).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button",{name:"搜索"}));
+  expect(submit).not.toHaveBeenCalled();
+});
+
+it("clears search hits from a previous controlled dataset before they can resolve against the new dataset", async () => {
+  const hit: SearchHit={...county,pathCodes:[root.code,group.code,county.code],pathNames:[root.label,group.label,county.label]};
+  const getPath=vi.fn(async (input: VersionSelector & {code: string})=>{
+    const nodes=input.code===alternateRoot.code ? [alternateRoot] : pathFor(input.code);
+    const selectedDataset=input.datasetId===alternateDataset.datasetId ? alternateDataset : dataset;
+    return {datasetId:selectedDataset.datasetId,versionCode:selectedDataset.versionCode,nodes,pathCodes:nodes.map(node=>node.code),pathNames:nodes.map(node=>node.label)};
+  });
+  const selectionClient=client({
+    getDataset:async (input={})=>input.datasetId===alternateDataset.datasetId ? alternateDataset : dataset,
+    getPath,
+    search:async()=>searchPage([hit]),
+  });
+  function SwitchingHost() {
+    const [value,setValue]=useState<AreaValue|null>(null);
+    return <><button type="button" onClick={()=>setValue({datasetId:alternateDataset.datasetId,code:alternateRoot.code})}>切换数据集</button>
+      <AreaCascader client={selectionClient} value={value} onChange={setValue} /></>;
+  }
+  const user=userEvent.setup();
+  render(<SwitchingHost />);
+  await user.type(await screen.findByLabelText("搜索区域"),"同名");
+  await user.click(screen.getByRole("button",{name:"搜索"}));
+  expect(await screen.findByRole("button",{name:/甲省.*同名县.*010101/})).not.toBeNull();
+  getPath.mockClear();
+  await user.click(screen.getByRole("button",{name:"切换数据集"}));
+  await waitFor(()=>expect(screen.queryByRole("button",{name:/甲省.*同名县.*010101/})).toBeNull());
+  expect(getPath).not.toHaveBeenCalledWith(expect.objectContaining({datasetId:alternateDataset.datasetId,code:county.code}),expect.any(AbortSignal));
 });
 
 it("offers retry and load-more controls for their corresponding layer state", async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import {useId, useRef, useState} from "react";
+import {useEffect, useId, useRef, useState} from "react";
 import type {KeyboardEvent, ReactNode} from "react";
 import type {SearchHit, SelectionResult} from "../types.js";
 import {useAreaSelection, type AreaCascaderProps} from "./use-area-selection.js";
@@ -33,6 +33,13 @@ function searchLabel(hit: SearchHit): string {
   return `${hit.pathNames.join(" / ")}（${hit.code}）`;
 }
 
+interface BoundSearchHit {
+  hit: SearchHit;
+  context: string;
+  datasetId: string;
+  versionCode: string;
+}
+
 function LayerFeedback({children}: {children: ReactNode}) {
   return <p role="status" aria-live="polite">{children}</p>;
 }
@@ -47,11 +54,25 @@ export function AreaCascader(props: AreaCascaderProps): React.JSX.Element {
   const id=useId();
   const searchId=`${id}-search`;
   const [keyword,setKeyword]=useState("");
-  const [hits,setHits]=useState<SearchHit[]>([]);
+  const [hits,setHits]=useState<BoundSearchHit[]>([]);
   const [searchError,setSearchError]=useState<string | null>(null);
   const [searching,setSearching]=useState(false);
   const searchRequest=useRef(0);
   const maxLevel=state.targetLevel;
+  const valueContext=props.value===null ? "" : JSON.stringify([props.value.datasetId,props.value.code,props.value.pathCodes ?? null]);
+  const searchContext=`${valueContext}|${state.dataset?.datasetId ?? ""}|${state.dataset?.versionCode ?? ""}|${state.targetLevel}|${state.policyKey}|${state.disabled}`;
+  const activeSearchContext=useRef(searchContext);
+  activeSearchContext.current=searchContext;
+  const clearedSearchContext=useRef(searchContext);
+
+  useEffect(()=>{
+    if (clearedSearchContext.current===searchContext) return;
+    clearedSearchContext.current=searchContext;
+    searchRequest.current++;
+    setHits([]);
+    setSearchError(null);
+    setSearching(false);
+  },[searchContext]);
 
   function closeSearch(): void {
     searchRequest.current++;
@@ -63,6 +84,8 @@ export function AreaCascader(props: AreaCascaderProps): React.JSX.Element {
   async function runSearch(): Promise<void> {
     const query=keyword.trim();
     const request=++searchRequest.current;
+    const originDataset=state.dataset;
+    const originContext=searchContext;
     setSearchError(null);
     if (!query) {
       setHits([]);
@@ -73,7 +96,9 @@ export function AreaCascader(props: AreaCascaderProps): React.JSX.Element {
     setSearching(true);
     try {
       const results=await controller.search(query);
-      if (request===searchRequest.current) setHits(results);
+      if (request===searchRequest.current && originContext===activeSearchContext.current && originDataset!==null) {
+        setHits(results.map(hit=>({hit,context:originContext,datasetId:originDataset.datasetId,versionCode:originDataset.versionCode})));
+      }
     } catch (error) {
       if (request===searchRequest.current) {
         setHits([]);
@@ -88,6 +113,9 @@ export function AreaCascader(props: AreaCascaderProps): React.JSX.Element {
     if (event.key==="Escape") {
       event.preventDefault();
       closeSearch();
+    } else if (event.key==="Enter") {
+      event.preventDefault();
+      void runSearch();
     }
   }
 
@@ -102,22 +130,28 @@ export function AreaCascader(props: AreaCascaderProps): React.JSX.Element {
       closeSearch();
     }
   }}>
-    <form onSubmit={event=>{event.preventDefault(); void runSearch();}}>
+    <div>
       <label htmlFor={searchId}>搜索区域</label>
       <input id={searchId} value={keyword} disabled={state.disabled} onChange={event=>setKeyword(event.target.value)}
         onKeyDown={onSearchKeyDown} autoComplete="off" />
-      <button type="submit" disabled={state.disabled || searching}>{searching ? "正在搜索" : "搜索"}</button>
-    </form>
+      <button type="button" disabled={state.disabled || searching} onClick={()=>void runSearch()}>{searching ? "正在搜索" : "搜索"}</button>
+    </div>
 
     {searchError!==null ? <LayerFeedback>{searchError}</LayerFeedback> : null}
     {hits.length>0 ? <ul aria-label="区域搜索结果" onKeyDown={event=>{
       if (event.key==="Escape") { event.preventDefault(); closeSearch(); }
     }}>
-      {hits.map(hit=><li key={hit.code}>
+      {hits.map(result=><li key={`${result.datasetId}:${result.versionCode}:${result.hit.code}`}>
         <button type="button" disabled={state.disabled} onClick={()=>{
+          if (result.context!==activeSearchContext.current || state.dataset?.datasetId!==result.datasetId
+            || state.dataset.versionCode!==result.versionCode) {
+            closeSearch();
+            setSearchError("搜索结果已过期，请重新搜索");
+            return;
+          }
           closeSearch();
-          void controller.selectSearchHit(hit);
-        }}>{searchLabel(hit)}</button>
+          void controller.selectSearchHit(result.hit);
+        }}>{searchLabel(result.hit)}</button>
       </li>)}
     </ul> : null}
 
