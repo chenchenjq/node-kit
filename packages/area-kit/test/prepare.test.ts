@@ -1,7 +1,7 @@
 import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import type { SourceManifest } from "../src/source/manifest.js";
 import {
@@ -9,6 +9,8 @@ import {
   prepareSourceWithManifest,
   sha256,
 } from "../src/source/prepare.js";
+
+const DOWNLOAD_TIMEOUT_MS = 30_000;
 
 function fixtureManifest(contents: string): SourceManifest {
   return {
@@ -69,16 +71,19 @@ it("does not leave a partial file when a response stream is interrupted", async 
 it("rejects HTTP errors before writing the destination", async () => {
   const dir = await mkdtemp(join(tmpdir(), "area-prepare-test-"));
   const file = join(dir, "provinces.csv");
+  await writeFile(`${file}.partial`, "stale partial");
   const fetcher: typeof fetch = async () => new Response(null, { status: 404 });
 
   await expect(downloadVerified("https://example.test/data", file, "0".repeat(64), fetcher))
     .rejects.toMatchObject({ code: "IMPORT_CONFLICT" });
   await expect(access(file)).rejects.toBeDefined();
+  await expect(access(`${file}.partial`)).rejects.toBeDefined();
 });
 
 it("retries transient server failures no more than three times", async () => {
   const dir = await mkdtemp(join(tmpdir(), "area-prepare-test-"));
   const file = join(dir, "provinces.csv");
+  await writeFile(`${file}.partial`, "stale partial");
   let calls = 0;
   const fetcher: typeof fetch = async () => {
     calls += 1;
@@ -89,6 +94,56 @@ it("retries transient server failures no more than three times", async () => {
     .rejects.toMatchObject({ code: "IMPORT_CONFLICT" });
   expect(calls).toBe(3);
   await expect(access(file)).rejects.toBeDefined();
+  await expect(access(`${file}.partial`)).rejects.toBeDefined();
+});
+
+it("aborts a stalled fetch at the bounded deadline without retrying", async () => {
+  vi.useFakeTimers();
+  try {
+    const dir = await mkdtemp(join(tmpdir(), "area-prepare-test-"));
+    const file = join(dir, "provinces.csv");
+    await writeFile(`${file}.partial`, "stale partial");
+    let calls = 0;
+    let aborted = false;
+    const fetcher: typeof fetch = async (_input, init) => {
+      calls += 1;
+      if (calls > 1) throw new DOMException("cancelled", "AbortError");
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            controller.error(new DOMException("timed out", "AbortError"));
+          });
+        },
+      }));
+    };
+    const pending = downloadVerified("https://example.test/data", file, "0".repeat(64), fetcher);
+
+    await vi.advanceTimersByTimeAsync(DOWNLOAD_TIMEOUT_MS);
+
+    expect(aborted).toBe(true);
+    await expect(pending).rejects.toMatchObject({ code: "IMPORT_CONFLICT" });
+    expect(calls).toBe(1);
+    await expect(access(`${file}.partial`)).rejects.toBeDefined();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("does not retry an aborted fetch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "area-prepare-test-"));
+  const file = join(dir, "provinces.csv");
+  await writeFile(`${file}.partial`, "stale partial");
+  let calls = 0;
+  const fetcher: typeof fetch = async () => {
+    calls += 1;
+    throw new DOMException("cancelled", "AbortError");
+  };
+
+  await expect(downloadVerified("https://example.test/data", file, "0".repeat(64), fetcher))
+    .rejects.toMatchObject({ code: "IMPORT_CONFLICT" });
+  expect(calls).toBe(1);
+  await expect(access(`${file}.partial`)).rejects.toBeDefined();
 });
 
 it("rejects a source file with the right checksum but wrong manifest byte count", async () => {

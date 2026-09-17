@@ -33,6 +33,8 @@ interface VerifiedFile {
   sha256: string;
 }
 
+const DOWNLOAD_TIMEOUT_MS = 30_000;
+
 class DownloadFailure extends Error {
   constructor(readonly retryable: boolean) {
     super("source download failed");
@@ -45,6 +47,10 @@ export function sha256(bytes: Uint8Array): string {
 
 function conflict(): AreaKitError {
   return new AreaKitError("IMPORT_CONFLICT");
+}
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
 }
 
 async function verifyExistingFile(path: string): Promise<VerifiedFile | null> {
@@ -102,14 +108,19 @@ async function downloadOnce(
   destination: string,
   fetcher: typeof fetch,
 ): Promise<VerifiedFile> {
-  let response: Response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
   try {
-    response = await fetcher(url);
-  } catch {
+    const response = await fetcher(url, { signal: controller.signal });
+    if (!response.ok) throw new DownloadFailure(response.status >= 500 && response.status <= 599);
+    return await writeResponse(response, destination);
+  } catch (error) {
+    if (controller.signal.aborted || isAbortError(error)) throw new DownloadFailure(false);
+    if (error instanceof DownloadFailure) throw error;
     throw new DownloadFailure(true);
+  } finally {
+    clearTimeout(timeout);
   }
-  if (!response.ok) throw new DownloadFailure(response.status >= 500 && response.status <= 599);
-  return writeResponse(response, destination);
 }
 
 async function downloadWithRetry(
@@ -133,6 +144,7 @@ async function downloadWithRetry(
       await rename(partial, destination);
       return result;
     } catch (error) {
+      await rm(partial, { force: true });
       if (!(error instanceof DownloadFailure) || !error.retryable || attempt === 3) throw conflict();
     }
   }
