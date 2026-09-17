@@ -37,3 +37,23 @@ node scripts/check-doc-examples.mjs --consumer-dir /tmp/area-task17-consumer
 ```
 
 It reported: `Compiled 7 documentation examples from installed area-kit.` The tarball contents included all four documents and the upstream license copy. Package build, unit tests, PostgreSQL tests, and browser checks were not rerun because this task only changes documentation, the consumer checker, and type-only Next example annotations; Task 18 remains the final packed-consumer/browser verification.
+
+## Follow-up correction
+
+The follow-up review corrected the validation result shape: `NOT_SELECTABLE` is a resolved rejection that retains code, level, and canonical path, not an unresolved null result. `AI-USAGE.md` now documents exact selector, paging, batch, search, tree, validation-version-policy, parameter, default, and return limits from the server contracts.
+
+`README.md` now states that `AREA_KIT_DATABASE_URL` is required for both import and activation, that the import command's final `DatasetSummary` stdout supplies `datasetId`, and that `--activate` performs the equivalent activation in the import invocation. `DATABASE.md` now enumerates every field type/nullability/default, check, unique/partial index, and foreign key from the migration.
+
+### Follow-up verification evidence
+
+The focused follow-up commands exited 0:
+
+```sh
+cd packages/area-kit
+npm run typecheck
+node --check scripts/check-doc-examples.mjs
+node scripts/check-doc-examples.mjs --consumer-dir /tmp/area-task17-followup-consumer.LkCIhr
+git diff --check
+```
+
+The final command compiled 7 extracted examples from the newly packed, installed `area-kit` tarball. No implementation, unit, PostgreSQL, build, or browser checks were rerun because the follow-up changes documentation only.
