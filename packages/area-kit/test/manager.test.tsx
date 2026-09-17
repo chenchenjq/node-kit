@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {cleanup, render, screen, waitFor, within} from "@testing-library/react";
+import {act, cleanup, render, screen, waitFor, within} from "@testing-library/react";
 import {userEvent} from "@testing-library/user-event";
 import {afterEach, expect, it, vi} from "vitest";
 import {AreaClientError} from "../src/client/index.js";
@@ -12,7 +12,7 @@ const dataset=syntheticDataset();
 const root=syntheticRegion({code:"01",label:"甲省",hasChildren:true,childrenState:"AVAILABLE"});
 const child=syntheticRegion({code:"0101",label:"甲市",level:2,parentCode:"01"});
 const page=(items:RegionSummary[],hasMore=false,nextCursor:string|null=null):Page<RegionSummary>=>({datasetId:dataset.datasetId,versionCode:dataset.versionCode,items,hasMore,nextCursor});
-function deferred<T>() { let resolve!:(value:T)=>void; const promise=new Promise<T>(next=>{resolve=next;}); return {promise,resolve}; }
+function deferred<T>() { let resolve!:(value:T)=>void, reject!:(error:unknown)=>void; const promise=new Promise<T>((next,fail)=>{resolve=next;reject=fail;}); return {promise,resolve,reject}; }
 
 function client(overrides:Partial<AreaAdminClient>={}):AreaAdminClient {
   return {
@@ -213,4 +213,18 @@ it("does not let a delayed save replace a newer selected leaf",async()=>{
   pendingSave.resolve(child);
   await waitFor(()=>expect(screen.getByRole("heading",{name:/0102/})).not.toBeNull());
   expect(getPath).not.toHaveBeenLastCalledWith(expect.objectContaining({code:child.code}),expect.any(AbortSignal));
+});
+
+it("does not show a delayed save failure against a newer selected leaf",async()=>{
+  const other=syntheticRegion({code:"0102",label:"乙市",level:2,parentCode:"01"});
+  const pendingSave=deferred<RegionSummary>();
+  const user=userEvent.setup();
+  render(<AreaManager client={client({listRegions:async()=>page([child,other]),updatePresentation:async()=>pendingSave.promise})}/>);
+  await user.click(await screen.findByRole("button",{name:/甲市/}));
+  await user.click(screen.getByRole("button",{name:"保存展示设置"}));
+  await user.click(screen.getByRole("button",{name:/乙市/}));
+  expect(await screen.findByRole("heading",{name:/0102/})).not.toBeNull();
+  await act(async()=>{ pendingSave.reject(new AreaClientError("REVISION_CONFLICT")); await Promise.resolve(); });
+  expect(screen.queryByText("区域设置已被更新，请重新加载后再保存")).toBeNull();
+  expect(screen.getByRole("heading",{name:/0102/})).not.toBeNull();
 });

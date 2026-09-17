@@ -138,7 +138,7 @@ export function AreaManager({client,className}:AreaManagerProps):React.JSX.Eleme
       if (!current(expected) || selectionRequest.current!==selection) return;
       setDetailPath(result.nodes); await loadNodes(makeQuery(selectedDataset),currentCursor,false,expected);
     } catch(error) {
-      if (!current(expected) || isAbort(error)) return;
+      if (!current(expected) || selectionRequest.current!==selection || isAbort(error)) return;
       setSaveError(errorCode(error)==="REVISION_CONFLICT" ? "区域设置已被更新，请重新加载后再保存"
         : errorCode(error)==="FORBIDDEN" ? "无权保存区域展示设置" : "保存区域展示设置失败");
     } finally { release(controller); if (current(expected)) setSaving(false); }
