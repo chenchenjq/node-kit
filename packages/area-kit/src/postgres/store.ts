@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Pool, PoolClient } from "pg";
 import { AreaKitError } from "../errors.js";
@@ -16,13 +16,23 @@ function createWriteView(db: NodePgDatabase, tables: AreaTables): WriteView {
       const target = await read.resolveDataset({datasetId});
       if (!target || target.status !== "ready") throw new AreaKitError("VERSION_UNAVAILABLE");
       // Copy only supported presentation fields; never spread untrusted input into an update.
-      const changes: Partial<typeof region.$inferInsert> = { revision: revision + 1, updatedAt: new Date() };
+      const changes: { revision: SQL; updatedAt: SQL; displayName?: string | null; sort?: number; enabled?: boolean } = {
+        revision: sql`${region.revision} + 1`, updatedAt: sql`now()`,
+      };
       if (patch.displayName !== undefined) changes.displayName = patch.displayName;
       if (patch.sort !== undefined) changes.sort = patch.sort;
       if (patch.enabled !== undefined) changes.enabled = patch.enabled;
       const updated = await db.update(region).set(changes).where(and(eq(region.datasetId, datasetId),
-        eq(region.code, code), eq(region.revision, revision))).returning({ code: region.code });
-      return updated.length ? (await read.findNodes(datasetId, [code]))[0]! : null;
+        eq(region.code, code), eq(region.revision, revision))).returning({ code: region.code, revision: region.revision });
+      if (!updated.length) {
+        const [existing] = await db.select({ code: region.code }).from(region)
+          .where(and(eq(region.datasetId, datasetId), eq(region.code, code))).limit(1);
+        if (!existing) throw new AreaKitError("UNKNOWN_CODE");
+        throw new AreaKitError("REVISION_CONFLICT");
+      }
+      const saved = (await read.findNodes(datasetId, [code]))[0];
+      if (!saved) throw new AreaKitError("QUERY_FAILED");
+      return saved;
     },
     async setActive(datasetId) {
       const [target] = await db.select().from(dataset).where(eq(dataset.id, datasetId)).limit(1);

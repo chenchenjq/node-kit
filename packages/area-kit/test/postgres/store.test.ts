@@ -115,7 +115,8 @@ it("uses optimistic updates, rolls back failed callbacks and invalidates escaped
     const store = createDrizzleAreaStore(h.pool, { schemaName: h.schemaName });
     expect(await store.write(v => v.updatePresentation(id, "01", 1, { displayName: "别名", sort: 9 })))
       .toMatchObject({ sourceName: "同名", displayName: "别名", sort: 9, revision: 2 });
-    expect(await store.write(v => v.updatePresentation(id, "01", 1, { enabled: false }))).toBeNull();
+    await expect(store.write(v => v.updatePresentation(id, "01", 1, { enabled: false })))
+      .rejects.toMatchObject({ code: "REVISION_CONFLICT" });
     await expect(store.write(async view => {
       await view.updatePresentation(id, "01", 2, { enabled: false }); await view.setActive(other);
       throw new Error("callback failed");

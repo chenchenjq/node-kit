@@ -1,10 +1,11 @@
 import { AreaKitError, sanitizeError } from "../errors.js";
 import type { DatasetRef, ListInput, Page, PageInput, RegionSummary, SearchHit, TreeNode, VersionSelector } from "../types.js";
-import type { AreaKit, AreaKitOptions, AreaReadKit, AuthorizationRequest } from "./contracts.js";
+import type { AreaKit, AreaKitOptions, AuthorizationRequest } from "./contracts.js";
 import type { DatasetRecord, NodeQuery, ReadView, StoredRegion } from "./ports.js";
 import { decodeCursor, encodeCursor, normalizeQuery } from "./cursor.js";
 import { summarizeDataset, summarizeNodes } from "./summary.js";
 import { createSelectionValidator } from "./selection.js";
+import { createManagementMethods } from "./management.js";
 
 function invalid(): never { throw new AreaKitError("INVALID_ARGUMENT"); }
 function inputObject(value: unknown): void {
@@ -56,7 +57,7 @@ async function checkRange(view: ReadView, datasetId: string, query: NodeQuery): 
 }
 
 /** Every operation authorizes before storage; dataset resolution and all subsequent reads share one view. */
-export function createAreaKit<C>(options: AreaKitOptions<C>): AreaReadKit<C> & Pick<AreaKit<C>, "validateSelection"> {
+export function createAreaKit<C>(options: AreaKitOptions<C>): AreaKit<C> {
   async function authorize(ctx: C, request: AuthorizationRequest): Promise<void> {
     if (await options.authorize(ctx, request) !== true) throw new AreaKitError("FORBIDDEN");
   }
@@ -94,6 +95,7 @@ export function createAreaKit<C>(options: AreaKitOptions<C>): AreaReadKit<C> & P
       ? encodeCursor(libraryKey, dataset.datasetId, query, {sort: last.sort, code: last.code}) : null};
   }
   return {
+    ...createManagementMethods(options),
     validateSelection: createSelectionValidator(options),
     getDataset: (ctx, selector = {}) => read(ctx, selector, async (_view, dataset) => summarizeDataset(dataset)),
     listDatasets: (ctx, input = {}) => guard(ctx, async () => {

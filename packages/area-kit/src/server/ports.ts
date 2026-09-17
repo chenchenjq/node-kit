@@ -38,7 +38,7 @@ export interface ReadView {
   getChildFacts(datasetId: string, codes: readonly string[]): Promise<ReadonlyMap<string, ChildFacts>>;
 }
 export interface WriteView extends ReadView {
-  updatePresentation(datasetId: string, code: string, revision: number, patch: PresentationPatch): Promise<StoredRegion | null>;
+  updatePresentation(datasetId: string, code: string, revision: number, patch: PresentationPatch): Promise<StoredRegion>;
   setActive(datasetId: string): Promise<void>;
 }
 export interface AreaStore {
