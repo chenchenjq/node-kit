@@ -102,10 +102,10 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
 
   const currentGeneration=useCallback(() => generationRef.current,[]);
 
-  const failRoot=useCallback((generation: number, error: unknown) => {
+  const failRoot=useCallback((generation: number, error: unknown, path: readonly RegionSummary[] = []) => {
     if (generation!==currentGeneration()) return;
     const requestId=++requestRef.current;
-    dispatch({type:"hydrate",generation,path:[]});
+    dispatch({type:"hydrate",generation,path:[...path]});
     dispatch({type:"start",generation,layerIndex:0,requestId});
     dispatch({type:"failed",generation,layerIndex:0,requestId,message:message(error)});
     onStatusRef.current?.(null);
@@ -312,6 +312,7 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     const generation=++generationRef.current;
     abortAll();
     dispatch({type:"clear"});
+    onStatusRef.current?.(null);
     pathController.current=new AbortController();
     const controller=pathController.current;
     try {
@@ -330,6 +331,7 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       }
     } catch (error) {
       if (generation!==currentGeneration() || isAbort(error)) return;
+      failRoot(generation,error,snapshot.path);
     } finally {
       if (pathController.current===controller) pathController.current=null;
     }

@@ -105,6 +105,26 @@ it("clears an unvalidated path after validation fails and retries it", async () 
   await waitFor(()=>expect(result.current.state.status).toEqual(accepted(["01"])));
 });
 
+it("preserves a valid controlled path and exposes retry when search-hit hydration fails", async () => {
+  const path: PathResult={datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",nodes:[province],pathCodes:["01"],pathNames:["合成省"]};
+  const getPath=vi.fn().mockResolvedValueOnce(path).mockRejectedValueOnce(new Error("search path offline")).mockResolvedValueOnce(path);
+  const client=fakeClient({getPath,listProvinces:async()=>page([province]),listChildren:async()=>page([]),validateSelection:async()=>accepted(["01"])});
+  const input=props(client,{datasetId:syntheticDataset().datasetId,code:"01",pathCodes:["01"]});
+  const {result}=renderHook(()=>useAreaSelection(input));
+  await waitFor(()=>expect(result.current.state.status).toEqual(accepted(["01"])));
+  input.onStatus.mockClear();
+  input.onChange.mockClear();
+  const hit={...province,code:"search",pathCodes:["search"],pathNames:["搜索结果"]} as SearchHit;
+  await act(async()=>{await result.current.selectSearchHit(hit);});
+  await waitFor(()=>expect(result.current.state.layers[0]).toMatchObject({phase:"error",error:"search path offline"}));
+  expect(result.current.state.path).toEqual([province]);
+  expect(result.current.state.status).toBeNull();
+  expect(input.onStatus).toHaveBeenCalledWith(null);
+  expect(input.onChange).not.toHaveBeenCalled();
+  await act(async()=>{await result.current.retry(0);});
+  await waitFor(()=>expect(result.current.state.status).toEqual(accepted(["01"])));
+});
+
 it("does not allow an old child response to restore a declined controlled selection", async () => {
   const oldChildren=deferred<Page<RegionSummary>>();
   const client=fakeClient({
@@ -269,6 +289,7 @@ it("does not notify after unmount when search-hit hydration completes late", asy
   let selecting!: Promise<void>;
   act(()=>{selecting=result.current.selectSearchHit(hit);});
   await waitFor(()=>expect(getPath).toHaveBeenCalledWith(expect.objectContaining({code:"search"}),expect.any(AbortSignal)));
+  input.onStatus.mockClear();
   unmount();
   await act(async()=>{
     selectedPath.resolve({datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",nodes:[province],pathCodes:["01"],pathNames:["合成省"]});
