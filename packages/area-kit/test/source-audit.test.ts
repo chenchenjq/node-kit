@@ -75,12 +75,22 @@ it("refuses bytes that do not match the manifest", async () => {
   expect(result.report.counts[1].valid).toBe(0);
 });
 it("finds duplicates and conflicts across 10000-row chunks and caps samples", async () => {
-  const lines = ['code,name,cityCode,provinceCode'];
+  // The first conflicting tuple is record 1; its differing tuple is record 10003.
+  // Identical 010101 tuples also straddle the 10000-record chunk boundary.
+  const lines = ['code,name,cityCode,provinceCode', '010102,同名县,0101,01'];
   for (let index = 0; index < 10001; index++) lines.push('010101,同名县,0101,01');
-  lines.push('010102,同名县,0101,01', '010102,同名县,0101,02');
+  lines.push('010102,同名县,0101,02');
   for (let index = 0; index < 30; index++) lines.push(' ,invalid,0101,01');
   const result = await modified(3, lines.join('\n') + '\n');
-  expect(result.report.counts[3]).toMatchObject({ duplicate: 10029, conflict: 1, valid: 1, invalid: 30 });
+  expect(result.report.passed).toBe(false);
+  expect(result.report.counts[3]).toMatchObject({ duplicate: 10029, conflict: 1, valid: 1, invalid: 30, ancestorMismatch: 1 });
+  expect((await rows(result.normalizedFiles[3])).map(row => row.code)).toEqual(['010101']);
+  const issues = (await readFile(result.report.issuesPath!, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  expect(issues.filter(issue => issue.code === '010102' && issue.reason === 'conflict').map(issue => issue.raw.provinceCode)).toEqual(['01', '02']);
+  const stored = JSON.parse(await readFile(join(result.directory, 'report.json'), 'utf8'));
+  expect(stored.passed).toBe(false);
+  expect(stored.counts[3].conflict).toBe(1);
+  expect(stored.issuesPath).toBe(result.report.issuesPath);
   expect(result.report.samples.filter(sample => sample.level === 3)).toHaveLength(20);
 });
 it("classifies only exact fixed-source evidence and never guesses special names", () => {
