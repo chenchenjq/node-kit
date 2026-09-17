@@ -29,5 +29,5 @@ it("uses the explicit snapshot only for an unavailable historical record",async(
     getDataset:async()=>{throw new Error("Unexpected call");},
   };
   await expect(resolveHistoricalArea(client,value)).resolves.toEqual({pathNames:["合成旧省"],source:"snapshot",status:"unverified"});
-  await expect(resolveHistoricalArea(client,{...value,pathNames:undefined})).resolves.toEqual({pathNames:[],source:"snapshot",status:"unverified"});
+  await expect(resolveHistoricalArea(client,{datasetId:value.datasetId,code:value.code})).resolves.toEqual({pathNames:[],source:"snapshot",status:"unverified"});
 });
