@@ -138,9 +138,35 @@ it("rejects manifest identity changes for an existing version", async () => {
   const { h, audit, backend, table } = await setup();
   await importAuditedSource(backend, audit);
   const before = (await h.pool.query(`SELECT * FROM ${table}.area_dataset`)).rows;
+  expect(before[0].import_report.passed).toBe(true);
   audit.manifest.rulesVersion = "different-rules";
   await expect(importAuditedSource(backend, audit)).rejects.toMatchObject({code:"IMPORT_CONFLICT"});
   expect((await h.pool.query(`SELECT * FROM ${table}.area_dataset`)).rows).toEqual(before);
+  const operationReport = JSON.parse(await readFile(join(audit.directory,"import-report.json"),"utf8"));
+  expect(operationReport.passed).toBe(false);
+  expect(operationReport.samples.length).toBeGreaterThan(0);
+});
+
+it.each(["raw source", "lock acquisition", "batch size"])("records a failed %s attempt before dataset resolution without altering accepted data", async phase => {
+  const { h, fixture, audit, backend, table } = await setup();
+  await importAuditedSource(backend, audit);
+  const before = (await h.pool.query(`SELECT * FROM ${table}.area_dataset`)).rows;
+  expect(before[0].import_report.passed).toBe(true);
+  if (phase === "raw source") {
+    await appendFile(join(fixture.directory,fixture.manifest.files[0]!.path),"02,注入省\n");
+    await expect(importAuditedSource(backend,audit)).rejects.toMatchObject({code:"IMPORT_CONFLICT"});
+  } else if (phase === "lock acquisition") {
+    await backend.withDatasetLock(audit.manifest.versionCode, async () => {
+      await expect(importAuditedSource(backend,audit)).rejects.toMatchObject({code:"IMPORT_CONFLICT"});
+    });
+  } else {
+    await expect(importAuditedSource(backend,audit,{batchSize:0})).rejects.toMatchObject({code:"INVALID_ARGUMENT"});
+  }
+  expect((await h.pool.query(`SELECT * FROM ${table}.area_dataset`)).rows).toEqual(before);
+  const operationReport = JSON.parse(await readFile(join(audit.directory,"import-report.json"),"utf8"));
+  expect(operationReport.passed).toBe(false);
+  expect(operationReport.samples.length).toBeGreaterThan(0);
+  expect(operationReport.databaseDigests).toEqual({});
 });
 
 it("loses lock and writes together when its physical client is terminated, then resumes", async () => {

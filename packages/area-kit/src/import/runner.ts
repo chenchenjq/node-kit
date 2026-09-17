@@ -38,51 +38,66 @@ async function verify(audit: AuditResult, directory: string): Promise<AuditResul
 }
 
 export async function importAuditedSource(backend: ImportBackend, audit: AuditResult, options: ImportOptions = {}): Promise<DatasetSummary> {
-  const batchSize = options.batchSize ?? 1000;
-  assertBatchSize(batchSize);
-  const directory = await mkdtemp(join(tmpdir(), "area-import-verified-"));
+  const report = structuredClone(audit.report);
+  report.databaseDigests = {};
+  let failureRecorded = false;
+  function recordFailure() {
+    report.passed = false;
+    if (!failureRecorded) {
+      report.samples.push({level: 1, code: null, reason: "Source or database import verification failed"});
+      failureRecorded = true;
+    }
+  }
   try {
-    const source = await verify(audit, directory);
-    return await backend.withDatasetLock(source.manifest.versionCode, async session => {
-      const dataset = await session.ensureDataset(source.manifest);
-      const report = structuredClone(audit.report);
-      try {
-        if (dataset.status !== "ready") {
-          for (const level of LEVELS) {
-            let batch: CanonicalRow[] = [], recordsCommitted = 0;
-            const digest = createHash("sha256");
-            for await (const row of readCanonicalRows(source.normalizedFiles[level])) {
-              digest.update(canonicalDigestLine(row));
-              batch.push(row);
-              if (batch.length === batchSize) {
+    const batchSize = options.batchSize ?? 1000;
+    assertBatchSize(batchSize);
+    const directory = await mkdtemp(join(tmpdir(), "area-import-verified-"));
+    let ready: DatasetSummary;
+    try {
+      const source = await verify(audit, directory);
+      ready = await backend.withDatasetLock(source.manifest.versionCode, async session => {
+        const dataset = await session.ensureDataset(source.manifest);
+        try {
+          if (dataset.status !== "ready") {
+            for (const level of LEVELS) {
+              let batch: CanonicalRow[] = [], recordsCommitted = 0;
+              const digest = createHash("sha256");
+              for await (const row of readCanonicalRows(source.normalizedFiles[level])) {
+                digest.update(canonicalDigestLine(row));
+                batch.push(row);
+                if (batch.length === batchSize) {
+                  recordsCommitted += batch.length;
+                  await session.appendBatch(dataset.datasetId, batch, {level, recordsCommitted, batchSize});
+                  batch = [];
+                }
+              }
+              if (batch.length) {
                 recordsCommitted += batch.length;
                 await session.appendBatch(dataset.datasetId, batch, {level, recordsCommitted, batchSize});
-                batch = [];
               }
+              if (recordsCommitted !== source.report.counts[level].valid || digest.digest("hex") !== source.report.sourceDigests[level]) conflict();
             }
-            if (batch.length) {
-              recordsCommitted += batch.length;
-              await session.appendBatch(dataset.datasetId, batch, {level, recordsCommitted, batchSize});
-            }
-            if (recordsCommitted !== source.report.counts[level].valid || digest.digest("hex") !== source.report.sourceDigests[level]) conflict();
           }
+          const database = await session.auditDataset(dataset.datasetId);
+          report.databaseDigests = database.digests;
+          if (!database.passed || LEVELS.some(level => database.levelCounts[level] !== report.counts[level].valid ||
+              database.digests[level] !== report.sourceDigests[level])) conflict();
+          return await session.markReady(dataset.datasetId, report);
+        } catch (error) {
+          recordFailure();
+          // Only resolved, non-ready datasets can fail, and only while their session still owns the lock.
+          // A dead connection leaves importing state for verified replay on the next attempt.
+          if (dataset.status !== "ready") await session.markFailed(dataset.datasetId, report).catch(() => undefined);
+          throw error;
         }
-        const database = await session.auditDataset(dataset.datasetId);
-        report.databaseDigests = database.digests;
-        if (!database.passed || LEVELS.some(level => database.levelCounts[level] !== report.counts[level].valid ||
-            database.digests[level] !== report.sourceDigests[level])) conflict();
-        const ready = await session.markReady(dataset.datasetId, report);
-        await writeFile(join(audit.directory, "import-report.json"), JSON.stringify(report, null, 2) + "\n");
-        return ready;
-      } catch (error) {
-        report.passed = false;
-        report.samples.push({level: 1, code: null, reason: "Database import or verification failed"});
-        // This operation report also survives failed verification of an immutable ready dataset.
-        await writeFile(join(audit.directory, "import-report.json"), JSON.stringify(report, null, 2) + "\n").catch(() => undefined);
-        // A dead connection cannot persist a report. The next attempt verifies and replays every batch.
-        if (dataset.status !== "ready") await session.markFailed(dataset.datasetId, report).catch(() => undefined);
-        throw error;
-      }
-    });
-  } finally { await rm(directory, {recursive: true, force: true}); }
+      });
+    } finally { await rm(directory, {recursive: true, force: true}); }
+    await writeFile(join(audit.directory, "import-report.json"), JSON.stringify(report, null, 2) + "\n");
+    return ready;
+  } catch (error) {
+    recordFailure();
+    // Include failures before a dataset resolves; never leave a previous success as this attempt's report.
+    await writeFile(join(audit.directory, "import-report.json"), JSON.stringify(report, null, 2) + "\n").catch(() => undefined);
+    throw error;
+  }
 }
