@@ -52,3 +52,13 @@ it("deduplicates pagination by code only for the current layer request", () => {
   expect(paged.layers[0]?.items).toEqual([replacement,second]);
   expect(paged.layers[0]).toMatchObject({hasMore:false,nextCursor:null,phase:"loaded"});
 });
+
+it("clears a hydrated path when a controlled value becomes null", () => {
+  const province=syntheticRegion({code:"01",level:1});
+  const initial=initialSelectionState({disabled:false,targetLevel:3,policyKey:"strict",valueKey:"value"});
+  const hydrated=selectionReducer(initial,{type:"hydrate",generation:0,path:[province]});
+  const cleared=selectionReducer(hydrated,{type:"props",disabled:false,targetLevel:3,policyKey:"strict",valueKey:""});
+  expect(cleared.path).toEqual([]);
+  expect(cleared.layers).toHaveLength(1);
+  expect(cleared.layers[0]).toMatchObject({parentCode:null,phase:"unloaded"});
+});

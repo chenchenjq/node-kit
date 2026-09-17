@@ -64,6 +64,10 @@ export function selectionReducer(state: SelectionState, action: SelectionAction)
   switch (action.type) {
     case "props":
       if (!changedProps(state,action)) return state;
+      if (state.valueKey!==action.valueKey && action.valueKey==="") {
+        return {...state,generation:state.generation+1,path:[],layers:layersFor([]),status:null,disabled:action.disabled,
+          targetLevel:action.targetLevel,policyKey:action.policyKey,valueKey:action.valueKey};
+      }
       return {...state,generation:state.generation+1,status:null,disabled:action.disabled,targetLevel:action.targetLevel,
         policyKey:action.policyKey,valueKey:action.valueKey};
     case "dataset":

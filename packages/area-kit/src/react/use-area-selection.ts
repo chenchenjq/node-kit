@@ -64,24 +64,34 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
   const [state,dispatch]=useReducer(selectionReducer,{disabled,targetLevel,policyKey,valueKey:externalValueKey},initialSelectionState);
   const stateRef=useRef(state);
   stateRef.current=state;
+  const onChangeRef=useRef(props.onChange);
+  onChangeRef.current=props.onChange;
+  const onStatusRef=useRef(props.onStatus);
+  onStatusRef.current=props.onStatus;
   const generationRef=useRef(0);
   const requestRef=useRef(0);
+  const searchRequestRef=useRef(0);
   const previousRef=useRef({disabled,targetLevel,policyKey,valueKey:externalValueKey});
   const layerControllers=useRef(new Map<number,AbortController>());
   const searchController=useRef<AbortController | null>(null);
   const pathController=useRef<AbortController | null>(null);
   const validationController=useRef<AbortController | null>(null);
 
+  const invalidateSearch=useCallback(() => {
+    searchRequestRef.current++;
+    searchController.current?.abort();
+    searchController.current=null;
+  },[]);
+
   const abortAll=useCallback(() => {
     for (const controller of layerControllers.current.values()) controller.abort();
     layerControllers.current.clear();
-    searchController.current?.abort();
+    invalidateSearch();
     pathController.current?.abort();
     validationController.current?.abort();
-    searchController.current=null;
     pathController.current=null;
     validationController.current=null;
-  },[]);
+  },[invalidateSearch]);
 
   const currentGeneration=useCallback(() => generationRef.current,[]);
 
@@ -115,15 +125,15 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       const result=await props.client.validateSelection({datasetId:dataset.datasetId,pathCodes:path.map(node=>node.code),targetLevel},controller.signal);
       if (generation!==currentGeneration()) return;
       dispatch({type:"status",generation,result});
-      props.onStatus?.(result);
+      onStatusRef.current?.(result);
     } catch (error) {
       if (generation!==currentGeneration() || isAbort(error)) return;
       dispatch({type:"status",generation,result:null});
-      props.onStatus?.(null);
+      onStatusRef.current?.(null);
     } finally {
       if (validationController.current===controller) validationController.current=null;
     }
-  },[currentGeneration,props.client,props.onStatus,targetLevel]);
+  },[currentGeneration,props.client,targetLevel]);
 
   const hydrateValue=useCallback(async (generation: number, dataset: DatasetSummary, value: AreaValue): Promise<void> => {
     pathController.current?.abort();
@@ -133,6 +143,7 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       const result=await props.client.getPath({datasetId:dataset.datasetId,code:value.code},controller.signal);
       if (generation!==currentGeneration()) return;
       dispatch({type:"hydrate",generation,path:result.nodes});
+      void validate(generation,dataset,result.nodes);
       for (let index=0; index<=result.nodes.length; index++) {
         const parentCode=index===0 ? null : result.nodes[index-1]?.code ?? null;
         void loadLayer(generation,index,parentCode,dataset,null);
@@ -142,7 +153,7 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     } finally {
       if (pathController.current===controller) pathController.current=null;
     }
-  },[currentGeneration,loadLayer,props.client]);
+  },[currentGeneration,loadLayer,props.client,validate]);
 
   useEffect(() => {
     const previous=previousRef.current;
@@ -151,6 +162,7 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       generationRef.current++;
       abortAll();
       dispatch({type:"props",disabled,targetLevel,policyKey,valueKey:externalValueKey});
+      onStatusRef.current?.(null);
       previousRef.current={disabled,targetLevel,policyKey,valueKey:externalValueKey};
     }
     const generation=currentGeneration();
@@ -171,7 +183,10 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     return () => { disposed=true; };
   },[abortAll,currentGeneration,disabled,externalValueKey,hydrateValue,loadLayer,policyKey,props.client,props.value,targetLevel]);
 
-  useEffect(() => abortAll,[abortAll]);
+  useEffect(() => () => {
+    generationRef.current++;
+    abortAll();
+  },[abortAll]);
 
   const choose=useCallback((node: RegionSummary) => {
     const snapshot=stateRef.current;
@@ -180,20 +195,20 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     abortAll();
     const path=pathWith(snapshot.path,node);
     dispatch({type:"choose",node});
-    props.onChange(asValue(snapshot.dataset,path),null);
-    props.onStatus?.(null);
+    onChangeRef.current(asValue(snapshot.dataset,path),null);
+    onStatusRef.current?.(null);
     void validate(generation,snapshot.dataset,path);
     void loadLayer(generation,node.level,node.code,snapshot.dataset,null);
-  },[abortAll,loadLayer,props.onChange,props.onStatus,validate]);
+  },[abortAll,loadLayer,validate]);
 
   const clear=useCallback(() => {
     if (stateRef.current.disabled) return;
     generationRef.current++;
     abortAll();
     dispatch({type:"clear"});
-    props.onChange(null,null);
-    props.onStatus?.(null);
-  },[abortAll,props.onChange,props.onStatus]);
+    onChangeRef.current(null,null);
+    onStatusRef.current?.(null);
+  },[abortAll]);
 
   const loadMore=useCallback(async (layerIndex: number): Promise<void> => {
     const snapshot=stateRef.current;
@@ -211,21 +226,25 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
 
   const search=useCallback(async (keyword: string): Promise<SearchHit[]> => {
     const snapshot=stateRef.current;
-    if (snapshot.disabled || !snapshot.dataset || keyword.length===0) return [];
-    searchController.current?.abort();
+    if (snapshot.disabled || !snapshot.dataset || keyword.length===0) {
+      invalidateSearch();
+      return [];
+    }
+    invalidateSearch();
     const controller=new AbortController();
     searchController.current=controller;
     const generation=currentGeneration();
+    const requestId=searchRequestRef.current;
     try {
       const page=await props.client.search({datasetId:snapshot.dataset.datasetId,keyword},controller.signal);
-      return generation===currentGeneration() ? page.items : [];
+      return generation===currentGeneration() && requestId===searchRequestRef.current ? page.items : [];
     } catch (error) {
-      if (isAbort(error) || generation!==currentGeneration()) return [];
+      if (isAbort(error) || generation!==currentGeneration() || requestId!==searchRequestRef.current) return [];
       throw error;
     } finally {
       if (searchController.current===controller) searchController.current=null;
     }
-  },[currentGeneration,props.client]);
+  },[currentGeneration,invalidateSearch,props.client]);
 
   const selectSearchHit=useCallback(async (hit: SearchHit): Promise<void> => {
     const snapshot=stateRef.current;
@@ -240,8 +259,8 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       if (generation!==currentGeneration()) return;
       const path=result.nodes;
       dispatch({type:"hydrate",generation,path});
-      props.onChange(asValue(snapshot.dataset,path),null);
-      props.onStatus?.(null);
+      onChangeRef.current(asValue(snapshot.dataset,path),null);
+      onStatusRef.current?.(null);
       void validate(generation,snapshot.dataset,path);
       for (let index=0; index<=path.length; index++) {
         const parentCode=index===0 ? null : path[index-1]?.code ?? null;
@@ -252,7 +271,7 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     } finally {
       if (pathController.current===controller) pathController.current=null;
     }
-  },[abortAll,loadLayer,props.client,props.onChange,props.onStatus,validate]);
+  },[abortAll,loadLayer,props.client,validate]);
 
   return {state,choose,loadMore,retry,search,selectSearchHit,clear};
 }
