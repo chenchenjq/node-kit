@@ -13,6 +13,8 @@ function createWriteView(db: NodePgDatabase, tables: AreaTables): WriteView {
   return {
     ...read,
     async updatePresentation(datasetId, code, revision, patch) {
+      const target = await read.resolveDataset({datasetId});
+      if (!target || target.status !== "ready") throw new AreaKitError("VERSION_UNAVAILABLE");
       // Copy only supported presentation fields; never spread untrusted input into an update.
       const changes: Partial<typeof region.$inferInsert> = { revision: revision + 1, updatedAt: new Date() };
       if (patch.displayName !== undefined) changes.displayName = patch.displayName;

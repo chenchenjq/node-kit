@@ -2,9 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Pool, PoolClient } from "pg";
 import { AreaKitError } from "../errors.js";
+import { sameSourceMeaning } from "../import/inherit.js";
+import { bindAreaStore } from "./store.js";
 import { assertBatchSize } from "../import/runner.js";
 import type { DatasetAudit, ImportBackend, ImportSession } from "../import/types.js";
-import type { DatasetRecord } from "../server/ports.js";
+import type { DatasetRecord, StoredRegion } from "../server/ports.js";
 import { canonicalDigestLine } from "../source/audit.js";
 import type { CanonicalRow } from "../source/audit.js";
 import type { SourceManifest } from "../source/manifest.js";
@@ -37,8 +39,8 @@ function createSession(client: PoolClient, schema: string, versionCode: string):
     const result = await client.query(`SELECT ${DATASET_COLUMNS} FROM ${datasets} WHERE version_code=$1`, [versionCode]);
     return result.rows[0] ? datasetRecord(result.rows[0]) : undefined;
   }
-  async function transaction<T>(work: () => Promise<T>): Promise<T> {
-    await client.query("BEGIN");
+  async function transaction<T>(work: () => Promise<T>, repeatableRead = false): Promise<T> {
+    await client.query(repeatableRead ? "BEGIN ISOLATION LEVEL REPEATABLE READ" : "BEGIN");
     try { const value = await work(); await client.query("COMMIT"); return value; }
     catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
   }
@@ -105,9 +107,58 @@ function createSession(client: PoolClient, schema: string, versionCode: string):
           // 5000 rows * 7 parameters = 35000, below PostgreSQL's parameter limit.
           await client.query(`INSERT INTO ${regions} (id,dataset_id,code,source_name,level,parent_id,node_kind) VALUES ${values.join(",")}`, parameters);
         }
-        await client.query(`UPDATE ${datasets} SET import_progress=$2,updated_at=now() WHERE id=$1 AND status='importing'`,
+        await client.query(`UPDATE ${datasets} SET import_progress=import_progress || $2::jsonb,updated_at=now() WHERE id=$1 AND status='importing'`,
           [datasetId,JSON.stringify(progress)]);
       });
+    },
+    async inheritSettings(targetId, sourceId) {
+      if (requireDataset(targetId).status !== "importing" || targetId === sourceId) conflict();
+      if (typeof sourceId !== "string" || !sourceId.trim()) throw new AreaKitError("INVALID_ARGUMENT");
+      lastAudit = undefined;
+      // The import advisory lock remains held on this connection. Every page of old
+      // settings and both source paths belongs to one snapshot and one atomic commit.
+      const conflicts = await transaction(async () => {
+        const target = await get();
+        if (!target || target.status !== "importing") conflict();
+        const completed = target.progress.inheritance as {sourceId?: string; conflicts?: number; completed?: boolean} | undefined;
+        if (completed?.completed === true) {
+          if (completed.sourceId !== sourceId || !Number.isSafeInteger(completed.conflicts) || completed.conflicts! < 0) conflict();
+          return completed.conflicts!;
+        }
+        return bindAreaStore(client,{schemaName:schema}).read(async view => {
+          const source = await view.resolveDataset({datasetId:sourceId});
+          if (!source || source.status !== "ready" || source.report.passed !== true) conflict();
+          let after = "", conflicts = 0;
+          for (;;) {
+            // Only non-default local settings need transfer or conflict reporting.
+            const page = await client.query<{code: string}>(`SELECT code FROM ${regions}
+              WHERE dataset_id=$1 AND code COLLATE "C">$2 COLLATE "C"
+              AND (display_name IS NOT NULL OR sort<>0 OR NOT enabled)
+              ORDER BY code COLLATE "C" LIMIT 1000`, [sourceId,after]);
+            const codes = page.rows.map(row => row.code);
+            const oldPaths = await view.getPaths(sourceId,codes);
+            const newPaths = await view.getPaths(targetId,codes);
+            const settings: Pick<StoredRegion,"code" | "displayName" | "sort" | "enabled">[] = [];
+            for (const code of codes) {
+              const previous = oldPaths.get(code), next = newPaths.get(code);
+              if (!previous || !next || !sameSourceMeaning(previous,next)) { conflicts++; continue; }
+              const {displayName,sort,enabled} = previous.at(-1)!;
+              settings.push({code,displayName,sort,enabled});
+            }
+            if (settings.length) await client.query(`UPDATE ${regions} AS r
+              SET display_name=s."displayName",sort=s.sort,enabled=s.enabled,updated_at=now()
+              FROM jsonb_to_recordset($2::jsonb) AS s(code text,"displayName" text,sort integer,enabled boolean)
+              WHERE r.dataset_id=$1 AND r.code=s.code`, [targetId,JSON.stringify(settings)]);
+            if (codes.length < 1000) break;
+            after = codes.at(-1)!;
+          }
+          await client.query(`UPDATE ${datasets} SET import_progress=import_progress || $2::jsonb,updated_at=now()
+            WHERE id=$1 AND status='importing'`, [targetId,JSON.stringify({inheritance:{sourceId,conflicts,completed:true}})]);
+          return conflicts;
+        });
+      }, true);
+      current = (await get())!;
+      return conflicts;
     },
     async auditDataset(datasetId) {
       requireDataset(datasetId);

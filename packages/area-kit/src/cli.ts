@@ -5,12 +5,35 @@ import { AreaKitError } from "./errors.js";
 
 export async function runCli(arguments_: readonly string[]): Promise<void> {
   const command = arguments_[0];
+  if (command === "activate") {
+    if (arguments_.length !== 3 || arguments_[1] !== "--dataset-id" || !arguments_[2]?.trim()) throw new AreaKitError("INVALID_ARGUMENT");
+    if (!process.env.AREA_KIT_DATABASE_URL?.trim()) throw new AreaKitError("INVALID_CONFIG");
+    const [{Pool},{createDrizzleAreaStore},{activateDataset}] = await Promise.all([
+      import("pg"), import("./postgres/store.js"), import("./import/activate.js"),
+    ]);
+    const pool = new Pool({connectionString:process.env.AREA_KIT_DATABASE_URL,connectionTimeoutMillis:10_000});
+    try {
+      const dataset = await activateDataset(createDrizzleAreaStore(pool),arguments_[2]);
+      process.stdout.write(`${JSON.stringify(dataset)}\n`);
+    } finally { await pool.end(); }
+    return;
+  }
   if (command === "check" || command === "import") {
     const values = new Map<string, string>();
-    for (let index = 1; index < arguments_.length; index += 2) {
-      const key = arguments_[index], value = arguments_[index + 1];
-      if ((key !== "--dir" && key !== "--report-dir" && !(command === "import" && key === "--batch-size")) || !value || values.has(key)) throw new AreaKitError("INVALID_ARGUMENT");
-      values.set(key, value);
+    let activate = false;
+    for (let index = 1; index < arguments_.length; index++) {
+      const key = arguments_[index]!;
+      if (command === "import" && key === "--activate") {
+        if (activate) throw new AreaKitError("INVALID_ARGUMENT");
+        activate = true;
+        continue;
+      }
+      const value = arguments_[++index];
+      if ((key !== "--dir" && key !== "--report-dir" && !(command === "import" &&
+          (key === "--batch-size" || key === "--inherit-from"))) || !value?.trim() || value.startsWith("--") || values.has(key)) {
+        throw new AreaKitError("INVALID_ARGUMENT");
+      }
+      values.set(key,value);
     }
     if (!values.has("--dir") || !values.has("--report-dir")) throw new AreaKitError("INVALID_ARGUMENT");
     let batchSize = 1000;
@@ -32,7 +55,16 @@ export async function runCli(arguments_: readonly string[]): Promise<void> {
       ]);
       const pool = new Pool({ connectionString: process.env.AREA_KIT_DATABASE_URL, connectionTimeoutMillis: 10_000 });
       try {
-        const dataset = await importAuditedSource(createPostgresImportBackend(pool), audit, {batchSize});
+        const inheritFromDatasetId = values.get("--inherit-from");
+        let dataset = await importAuditedSource(createPostgresImportBackend(pool), audit, {
+          batchSize, ...(inheritFromDatasetId === undefined ? {} : {inheritFromDatasetId}),
+        });
+        if (activate) {
+          const [{createDrizzleAreaStore},{activateDataset}] = await Promise.all([
+            import("./postgres/store.js"),import("./import/activate.js"),
+          ]);
+          dataset = await activateDataset(createDrizzleAreaStore(pool),dataset.datasetId);
+        }
         process.stdout.write(`${JSON.stringify(dataset)}\n`);
       } finally { await pool.end(); }
     }

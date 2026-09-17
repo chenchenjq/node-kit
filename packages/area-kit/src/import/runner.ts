@@ -78,6 +78,19 @@ export async function importAuditedSource(backend: ImportBackend, audit: AuditRe
               if (recordsCommitted !== source.report.counts[level].valid || digest.digest("hex") !== source.report.sourceDigests[level]) conflict();
             }
           }
+          if (dataset.status !== "ready" && options.inheritFromDatasetId !== undefined) {
+            report.inheritanceConflicts = await session.inheritSettings(dataset.datasetId, options.inheritFromDatasetId);
+          } else if (dataset.status === "ready") {
+            report.inheritanceConflicts = dataset.report.inheritanceConflicts;
+          } else {
+            // A previous attempt may have committed inheritance before losing its
+            // response. Omitting the option on retry must not erase that report.
+            const inherited = dataset.progress.inheritance as {completed?: boolean; conflicts?: number} | undefined;
+            if (inherited?.completed === true && typeof inherited.conflicts === "number" &&
+                Number.isSafeInteger(inherited.conflicts) && inherited.conflicts >= 0) {
+              report.inheritanceConflicts = inherited.conflicts;
+            }
+          }
           const database = await session.auditDataset(dataset.datasetId);
           report.databaseDigests = database.digests;
           if (!database.passed || LEVELS.some(level => database.levelCounts[level] !== report.counts[level].valid ||
