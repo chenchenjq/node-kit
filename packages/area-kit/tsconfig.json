@@ -1,6 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "skipLibCheck": true,
     "jsx": "react-jsx",
     "noEmit": true,
     "rootDir": ".",
@@ -21,6 +22,7 @@
     "scripts/**/*.mjs",
     "examples/**/*.ts",
     "examples/**/*.tsx",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.postgres.config.ts"
   ]
 }
