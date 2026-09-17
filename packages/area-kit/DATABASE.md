@@ -9,6 +9,15 @@ export const sqlForHostMigration = areaMigrationSql("public");
 export const tablesForHostQueries = createAreaTables("public");
 ```
 
+The default library schema is `public`. A custom schema must already exist before the host executes `areaMigrationSql("address_regions")`; use that same `schemaName` for stores, bound transactions, and the Next host. Database CLI commands select it explicitly:
+
+```sh
+area-kit import --schema address_regions --dir /srv/area-kit/prepared --report-dir /srv/area-kit/reports/import
+area-kit activate --schema address_regions --dataset-id "$AREA_KIT_DATASET_ID"
+```
+
+`import --activate` also honors `--schema` for activation. Without this option both commands use `public`. Schema names must match `[a-z][a-z0-9_]{0,62}` and come from trusted host/operator configuration. `AREA_KIT_DATABASE_URL` supplies the connection; HTTP requests cannot select a schema.
+
 ## Schema and relationships
 
 `area_dataset` is one immutable source identity plus mutable lifecycle/import metadata. `id` is the dataset identity; `version_code` is unique and stable for the pinned source rules.

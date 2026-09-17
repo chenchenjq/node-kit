@@ -4,17 +4,35 @@ import { pathToFileURL } from "node:url";
 
 import { AreaKitError } from "./errors.js";
 
+/** Schema is an operator-supplied identifier, never SQL or an HTTP parameter. */
+async function schemaOption(values: ReadonlyMap<string, string>): Promise<string> {
+  const schemaName = values.get("--schema") ?? "public";
+  const { validateSchemaName } = await import("./postgres/schema-name.js");
+  validateSchemaName(schemaName);
+  return schemaName;
+}
+
 export async function runCli(arguments_: readonly string[]): Promise<void> {
   const command = arguments_[0];
   if (command === "activate") {
-    if (arguments_.length !== 3 || arguments_[1] !== "--dataset-id" || !arguments_[2]?.trim()) throw new AreaKitError("INVALID_ARGUMENT");
+    const values = new Map<string, string>();
+    for (let index = 1; index < arguments_.length; index++) {
+      const key = arguments_[index]!, value = arguments_[++index];
+      if ((key !== "--dataset-id" && key !== "--schema") || !value?.trim() || value.startsWith("--") || values.has(key)) {
+        throw new AreaKitError("INVALID_ARGUMENT");
+      }
+      values.set(key, value);
+    }
+    const datasetId = values.get("--dataset-id");
+    if (!datasetId) throw new AreaKitError("INVALID_ARGUMENT");
+    const schemaName = await schemaOption(values);
     if (!process.env.AREA_KIT_DATABASE_URL?.trim()) throw new AreaKitError("INVALID_CONFIG");
     const [{Pool},{createDrizzleAreaStore},{activateDataset}] = await Promise.all([
       import("pg"), import("./postgres/store.js"), import("./import/activate.js"),
     ]);
     const pool = new Pool({connectionString:process.env.AREA_KIT_DATABASE_URL,connectionTimeoutMillis:10_000});
     try {
-      const dataset = await activateDataset(createDrizzleAreaStore(pool),arguments_[2]);
+      const dataset = await activateDataset(createDrizzleAreaStore(pool, {schemaName}),datasetId);
       process.stdout.write(`${JSON.stringify(dataset)}\n`);
     } finally { await pool.end(); }
     return;
@@ -31,17 +49,19 @@ export async function runCli(arguments_: readonly string[]): Promise<void> {
       }
       const value = arguments_[++index];
       if ((key !== "--dir" && key !== "--report-dir" && !(command === "import" &&
-          (key === "--batch-size" || key === "--inherit-from"))) || !value?.trim() || value.startsWith("--") || values.has(key)) {
+          (key === "--batch-size" || key === "--inherit-from" || key === "--schema"))) || !value?.trim() || value.startsWith("--") || values.has(key)) {
         throw new AreaKitError("INVALID_ARGUMENT");
       }
       values.set(key,value);
     }
     if (!values.has("--dir") || !values.has("--report-dir")) throw new AreaKitError("INVALID_ARGUMENT");
     let batchSize = 1000;
+    let schemaName = "public";
     if (command === "import") {
       batchSize = values.has("--batch-size") ? Number(values.get("--batch-size")) : 1000;
       const { assertBatchSize } = await import("./import/runner.js");
       assertBatchSize(batchSize);
+      schemaName = await schemaOption(values);
       if (!process.env.AREA_KIT_DATABASE_URL?.trim()) throw new AreaKitError("INVALID_CONFIG");
     }
     const { auditSource } = await import("./source/audit.js");
@@ -60,14 +80,14 @@ export async function runCli(arguments_: readonly string[]): Promise<void> {
       const pool = new Pool({ connectionString: process.env.AREA_KIT_DATABASE_URL, connectionTimeoutMillis: 10_000 });
       try {
         const inheritFromDatasetId = values.get("--inherit-from");
-        let dataset = await importAuditedSource(createPostgresImportBackend(pool), audit, {
+        let dataset = await importAuditedSource(createPostgresImportBackend(pool, {schemaName}), audit, {
           batchSize, onProgress: progress, ...(inheritFromDatasetId === undefined ? {} : {inheritFromDatasetId}),
         });
         if (activate) {
           const [{createDrizzleAreaStore},{activateDataset}] = await Promise.all([
             import("./postgres/store.js"),import("./import/activate.js"),
           ]);
-          dataset = await activateDataset(createDrizzleAreaStore(pool),dataset.datasetId);
+          dataset = await activateDataset(createDrizzleAreaStore(pool, {schemaName}),dataset.datasetId);
         }
         progress(`completed elapsedMs=${Math.round(performance.now() - started)} peakRssKiB=${process.resourceUsage().maxRSS}`);
         process.stdout.write(`${JSON.stringify(dataset)}\n`);

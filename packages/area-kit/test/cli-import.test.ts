@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import { runCli } from "../src/cli.js";
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const dirs: string[] = [];
@@ -33,4 +34,19 @@ it("check works when database optional dependencies are blocked", async () => {
   const result = await exec(process.execPath, ["--no-warnings","--loader",loader,"--import","tsx",cli,"check","--dir",join(directory,"missing"),"--report-dir",join(directory,"audit")], {env}).catch(error => error);
   expect(result.stderr).not.toContain("DATABASE_MODULE_LOADED");
   expect(JSON.parse(result.stdout).passed).toBe(false);
+});
+
+
+it.each(["import", "activate"])("validates %s schema configuration before opening a connection", async command => {
+  const base = command === "import" ? ["import", "--dir", "/unused", "--report-dir", "/unused-report"]
+    : ["activate", "--dataset-id", "unused"];
+  vi.stubEnv("AREA_KIT_DATABASE_URL", "postgres://must-not-connect.invalid/unused");
+  try {
+    for (const schema of ["public;drop schema public", "MixedCase", "tenant.schema", "a".repeat(64)]) {
+      await expect(runCli([...base, "--schema", schema])).rejects.toMatchObject({code: "INVALID_CONFIG"});
+    }
+    for (const args of [["--schema"], ["--schema", ""], ["--schema", "one", "--schema", "two"]]) {
+      await expect(runCli([...base, ...args])).rejects.toMatchObject({code: "INVALID_ARGUMENT"});
+    }
+  } finally { vi.unstubAllEnvs(); }
 });

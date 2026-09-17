@@ -2,15 +2,10 @@ import { sql } from "drizzle-orm";
 import { boolean, check, date, foreignKey, index, integer, jsonb, pgSchema, pgTable,
   smallint, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import type { PgTableFn } from "drizzle-orm/pg-core";
-import { AreaKitError } from "../errors.js";
+import { validateSchemaName } from "./schema-name.js";
+export { validateSchemaName } from "./schema-name.js";
 import type { Coverage, DatasetSummary, ImportReport, Level, NodeKind } from "../types.js";
 import type { SourceFile } from "../source/manifest.js";
-
-export function validateSchemaName(schemaName: string): void {
-  if (typeof schemaName !== "string" || !/^[a-z][a-z0-9_]{0,62}$/.test(schemaName)) {
-    throw new AreaKitError("INVALID_CONFIG");
-  }
-}
 
 /** These definitions describe one library. The host explicitly executes its migration. */
 export function createAreaTables(schemaName = "public") {

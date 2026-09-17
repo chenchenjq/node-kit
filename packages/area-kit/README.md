@@ -55,6 +55,17 @@ area-kit activate --dataset-id "$AREA_KIT_DATASET_ID"
 area-kit import --dir /srv/area-kit/prepared --report-dir /srv/area-kit/reports/import --activate
 ```
 
+Both database commands default to `public`. For a custom library, create its schema and run `areaMigrationSql("address_regions")` through the host migration system first, then pass the same trusted schema to every import and activation command and to the host's `schemaName` option:
+
+```sh
+area-kit import --schema address_regions --dir /srv/area-kit/prepared --report-dir /srv/area-kit/reports/import
+area-kit activate --schema address_regions --dataset-id "$AREA_KIT_DATASET_ID"
+# Combined import and activation use that same schema:
+area-kit import --schema address_regions --dir /srv/area-kit/prepared --report-dir /srv/area-kit/reports/import --activate
+```
+
+`--schema` accepts a lowercase identifier matching `[a-z][a-z0-9_]{0,62}`. It is trusted operator configuration; never derive it from public HTTP inputs. Import inheritance also resolves its source dataset inside that selected schema.
+
 Failed or interrupted imports have a report and cannot become active; resume with the same prepared directory after fixing the reported cause.
 
 The migration, import, and activation are privileged host operations. Public reads must pass `authorize(..., { action: "read" })`; administration uses `admin.read` or `admin.write`. HTTP adapters must authenticate and protect every request, select the trusted validation policy on the server, bound request bodies, and return sanitized errors. `area-kit` has no cache: after `updatePresentation`, the host must invalidate every process's path, search, tree, and descendant-state caches.

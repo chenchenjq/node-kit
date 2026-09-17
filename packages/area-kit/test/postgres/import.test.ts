@@ -7,7 +7,6 @@ import type { Pool, PoolClient } from "pg";
 import { sourceFixture } from "../fixtures/source-fixture.js";
 import { auditSource } from "../../src/source/audit.js";
 import * as sourceModule from "../../src/source/audit.js";
-import * as backendModule from "../../src/postgres/import-backend.js";
 import { runCli } from "../../src/cli.js";
 import { isolatedPostgresConfig } from "./config.js";
 import { importAuditedSource } from "../../src/import/runner.js";
@@ -245,12 +244,11 @@ it("imports a maximum-size batch offline and audits more than one keyset page", 
 });
 
 
-it("CLI imports a local audited source using only the ephemeral test connection", async () => {
+it.each(["separate", "inline"] as const)("CLI imports into a custom schema with %s activation using only the ephemeral connection", async activation => {
   const { h, fixture, audit, table } = await setup();
-  const originalAudit = auditSource, originalBackend = createPostgresImportBackend;
-  // Test-only manifest/schema seams retain the real audit, pool, runner, and backend.
+  const originalAudit = auditSource;
+  // Only the source manifest is synthetic; schema routing uses the real CLI and backend.
   vi.spyOn(sourceModule,"auditSource").mockImplementation((directory,output) => originalAudit(directory,output,fixture.manifest));
-  vi.spyOn(backendModule,"createPostgresImportBackend").mockImplementation(pool => originalBackend(pool,{schemaName:h.schemaName}));
   const config = isolatedPostgresConfig();
   const connection = new URL("postgres://isolated-test-only:isolated-test-only@localhost/area_kit_ephemeral_test");
   connection.hostname = config.host; connection.port = String(config.port);
@@ -258,10 +256,18 @@ it("CLI imports a local audited source using only the ephemeral test connection"
   const outputs: string[] = [];
   vi.spyOn(process.stdout,"write").mockImplementation(chunk => { outputs.push(String(chunk)); return true; });
   try {
-    await runCli(["import","--dir",fixture.directory,"--report-dir",audit.directory,"--batch-size","2"]);
-    expect(JSON.parse(outputs.join("")).status).toBe("ready");
+    await runCli(["import","--schema",h.schemaName,"--dir",fixture.directory,"--report-dir",audit.directory,"--batch-size","2", ...(activation === "inline" ? ["--activate"] : [])]);
+    const imported = JSON.parse(outputs.join(""));
+    expect(imported.status).toBe("ready");
+    expect(imported.isActive).toBe(activation === "inline");
     expect(outputs.join("")).not.toContain(connection.toString());
-    expect((await h.pool.query(`SELECT status,is_active FROM ${table}.area_dataset`)).rows).toEqual([{status:"ready",is_active:false}]);
+    expect((await h.pool.query(`SELECT status,is_active FROM ${table}.area_dataset`)).rows).toEqual([{status:"ready",is_active:activation === "inline"}]);
     expect((await h.pool.query(`SELECT * FROM ${table}.area_region`)).rowCount).toBe(6);
+    if (activation === "separate") {
+      outputs.length = 0;
+      await runCli(["activate", "--dataset-id", imported.datasetId, "--schema", h.schemaName]);
+      expect(JSON.parse(outputs.join(""))).toMatchObject({datasetId: imported.datasetId, isActive: true});
+      expect((await h.pool.query(`SELECT is_active FROM ${table}.area_dataset`)).rows).toEqual([{is_active:true}]);
+    }
   } finally { vi.restoreAllMocks(); vi.unstubAllEnvs(); }
 });
