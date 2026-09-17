@@ -188,3 +188,14 @@ it("rejects null for every required dataset and region column", async () => {
     }
   });
 });
+
+it("receives no ambient PostgreSQL settings and keeps its isolated connection writable", async () => {
+  expect(Object.keys(process.env).filter(key => /^PG/i.test(key))).toEqual([]);
+  expect(process.env.DATABASE_URL).toBeUndefined();
+  expect(process.env.AREA_KIT_DATABASE_URL).toBeUndefined();
+  await withHarness(async h => {
+    const result = await h.pool.query("SHOW default_transaction_read_only");
+    expect(result.rows[0].default_transaction_read_only).toBe("off");
+    await expect(h.seedDataset()).resolves.toEqual(expect.any(String));
+  });
+});

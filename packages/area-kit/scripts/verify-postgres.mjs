@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { postgresTestEnvironment } from "./postgres-test-environment.mjs";
 import { withPostgres } from "./with-postgres.mjs";
 
 try {
@@ -9,7 +10,7 @@ try {
       "run", "--config", "vitest.postgres.config.ts", ...process.argv.slice(2),
     ], {
       cwd: fileURLToPath(new URL("../", import.meta.url)),
-      env: { ...process.env, AREA_KIT_TEST_POSTGRES: JSON.stringify(config) },
+      env: postgresTestEnvironment(config),
       stdio: "inherit",
     });
     child.once("error", reject);

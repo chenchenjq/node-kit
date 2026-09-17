@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { GenericContainer, Wait } from "testcontainers";
-import pg from "pg";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { postgresTestEnvironment } from "./postgres-test-environment.mjs";
+
+const runFile = promisify(execFile);
 
 const IMAGE = "postgres@sha256:54451ecb8ab38c24c3ec123f2fd501303a3a1856a5c66e98cecf2460d5e1e9d7";
 
@@ -25,8 +30,18 @@ export async function withPostgres(run) {
       user: "isolated-test-only", password: "isolated-test-only",
       database: "area_kit_ephemeral_test", containerId: container.getId(),
     };
-    const pool = new pg.Pool({ ...config, ssl: false, connectionTimeoutMillis: 5_000 });
-    try { await pool.query("SELECT 1"); } finally { await pool.end(); }
+    // pg also reads PGOPTIONS, PGSSLNEGOTIATION, etc. at client construction.
+    // Use a clean child environment without mutating the caller's process.env.
+    await runFile(process.execPath, ["--input-type=module", "-e", `
+      import pg from "pg";
+      const config = JSON.parse(process.env.AREA_KIT_TEST_POSTGRES);
+      const pool = new pg.Pool({ ...config, ssl: false, connectionTimeoutMillis: 5000 });
+      try { await pool.query("SELECT 1"); } finally { await pool.end(); }
+    `], {
+      cwd: fileURLToPath(new URL("../", import.meta.url)),
+      env: postgresTestEnvironment(config),
+      timeout: 15_000,
+    });
     return await run(config);
   } finally {
     await container.stop();
