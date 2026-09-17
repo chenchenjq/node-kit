@@ -17,6 +17,9 @@
     "DATA-SOURCE.md",
     "AI-USAGE.md"
   ],
+  "bin": {
+    "area-kit": "./scripts/area-kit.mjs"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
