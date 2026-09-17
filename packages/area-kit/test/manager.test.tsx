@@ -135,3 +135,54 @@ it("keeps selected-detail ancestry independent from parent navigation",async()=>
   await waitFor(()=>expect(screen.getByRole("navigation",{name:"当前路径"}).textContent).toBe("根区域"));
   expect(within(screen.getByLabelText("区域详情")).getByText("甲省 / 甲市")).not.toBeNull();
 });
+
+it("refreshes the edited current pagination page after save",async()=>{
+  const listRegions=vi.fn()
+    .mockResolvedValueOnce(page([root],true,"page-two"))
+    .mockResolvedValueOnce(page([child],false,null))
+    .mockResolvedValueOnce(page([child],false,null));
+  const updatePresentation=vi.fn(async()=>child);
+  const user=userEvent.setup();
+  render(<AreaManager client={client({listRegions,updatePresentation})}/>);
+  await user.click(await screen.findByRole("button",{name:"加载更多"}));
+  await user.click(await screen.findByRole("button",{name:/甲市/}));
+  await user.click(screen.getByRole("button",{name:"保存展示设置"}));
+  await waitFor(()=>expect(listRegions.mock.calls.at(-1)?.[0]).toMatchObject({cursor:"page-two"}));
+});
+
+it("clears save and report loading flags when switching datasets",async()=>{
+  const historical=syntheticDataset({datasetId:"00000000-0000-4000-8000-000000000002",versionCode:"old:v1",isActive:false});
+  const pendingReport=deferred<DatasetAdminReport>();
+  const pendingSave=deferred<RegionSummary>();
+  const getDatasetReport=vi.fn(()=>pendingReport.promise);
+  const updatePresentation=vi.fn(()=>pendingSave.promise);
+  const user=userEvent.setup();
+  render(<AreaManager client={client({listDatasets:async()=>({items:[dataset,historical],hasMore:false,nextCursor:null}),getDatasetReport,updatePresentation})}/>);
+  await user.click(await screen.findByRole("button",{name:"查看导入报告"}));
+  await user.selectOptions(screen.getByLabelText("数据集"),historical.datasetId);
+  expect(screen.getByRole("button",{name:"查看导入报告"})).not.toHaveProperty("disabled",true);
+  await user.selectOptions(screen.getByLabelText("数据集"),dataset.datasetId);
+  await user.click(await screen.findByRole("button",{name:/甲省/}));
+  await user.click(screen.getByRole("button",{name:"保存展示设置"}));
+  await user.selectOptions(screen.getByLabelText("数据集"),historical.datasetId);
+  await user.selectOptions(screen.getByLabelText("数据集"),dataset.datasetId);
+  pendingReport.resolve(await client().getDatasetReport({datasetId:dataset.datasetId}));
+  pendingSave.resolve(root);
+  await user.click(await screen.findByRole("button",{name:/甲省/}));
+  expect(screen.getByRole("button",{name:"保存展示设置"})).not.toHaveProperty("disabled",true);
+  expect(screen.queryByRole("button",{name:"正在保存"})).toBeNull();
+});
+
+it("keeps the newest node path when a prior selection resolves last",async()=>{
+  const rootPath=deferred<Awaited<ReturnType<AreaAdminClient["getPath"]>>>();
+  const childPath=deferred<Awaited<ReturnType<AreaAdminClient["getPath"]>>>();
+  const getPath=vi.fn((input:{code:string})=>input.code===root.code ? rootPath.promise : childPath.promise);
+  const user=userEvent.setup();
+  render(<AreaManager client={client({listRegions:async()=>page([root,child]),getPath})}/>);
+  await user.click(await screen.findByRole("button",{name:/甲省/}));
+  await user.click(screen.getByRole("button",{name:/甲市/}));
+  childPath.resolve({datasetId:dataset.datasetId,versionCode:dataset.versionCode,nodes:[root,child],pathCodes:[root.code,child.code],pathNames:[root.label,child.label]});
+  rootPath.resolve({datasetId:dataset.datasetId,versionCode:dataset.versionCode,nodes:[root],pathCodes:[root.code],pathNames:[root.label]});
+  expect(await screen.findByRole("heading",{name:/0101/})).not.toBeNull();
+  expect(within(screen.getByLabelText("区域详情")).getByText("甲省 / 甲市")).not.toBeNull();
+});

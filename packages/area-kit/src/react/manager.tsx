@@ -28,17 +28,24 @@ function reportText(report:DatasetAdminReport):string {
 
 /** Small admin UI that reads one query page at a time. Authorization remains server-owned. */
 export function AreaManager({client,className}:AreaManagerProps):React.JSX.Element {
-  const id=useId(), generation=useRef(0), controllers=useRef(new Set<AbortController>());
+  const id=useId(), generation=useRef(0), controllers=useRef(new Set<AbortController>()), selectionRequest=useRef(0);
+  const selectionController=useRef<AbortController|null>(null);
   const [datasets,setDatasets]=useState<DatasetSummary[]>([]), [dataset,setDataset]=useState<DatasetSummary|null>(null);
   const [navigationParent,setNavigationParent]=useState<string|null>(null), [navigationPath,setNavigationPath]=useState<RegionSummary[]>([]);
   const [detailPath,setDetailPath]=useState<RegionSummary[]>([]), [nodes,setNodes]=useState<RegionSummary[]>([]);
-  const [nextCursor,setNextCursor]=useState<string|null>(null), [hasMore,setHasMore]=useState(false), [phase,setPhase]=useState<LoadPhase>("idle");
+  const [nextCursor,setNextCursor]=useState<string|null>(null), [currentCursor,setCurrentCursor]=useState<string|null>(null);
+  const [hasMore,setHasMore]=useState(false), [phase,setPhase]=useState<LoadPhase>("idle");
   const [listError,setListError]=useState<string|null>(null), [nameFilter,setNameFilter]=useState(""), [codeFilter,setCodeFilter]=useState(""), [levelFilter,setLevelFilter]=useState("");
   const [selected,setSelected]=useState<RegionSummary|null>(null), [displayName,setDisplayName]=useState(""), [sort,setSort]=useState("0"), [enabled,setEnabled]=useState(true);
   const [saveError,setSaveError]=useState<string|null>(null), [saving,setSaving]=useState(false), [report,setReport]=useState<DatasetAdminReport|null>(null);
   const [reportError,setReportError]=useState<string|null>(null), [loadingReport,setLoadingReport]=useState(false);
 
-  const nextGeneration=useCallback(()=>{ generation.current++; for (const controller of controllers.current) controller.abort(); controllers.current.clear(); return generation.current; },[]);
+  const nextGeneration=useCallback(()=>{
+    generation.current++; selectionRequest.current++; selectionController.current?.abort(); selectionController.current=null;
+    for (const controller of controllers.current) controller.abort(); controllers.current.clear();
+    setSaving(false); setLoadingReport(false);
+    return generation.current;
+  },[]);
   const request=useCallback((expected:number):AbortController|null=>{
     if (generation.current!==expected) return null;
     const controller=new AbortController(); controllers.current.add(controller); return controller;
@@ -67,7 +74,7 @@ export function AreaManager({client,className}:AreaManagerProps):React.JSX.Eleme
       }
       if (!current(expected)) return;
       setNodes(previous=>append ? [...previous,...page.items.filter(item=>!previous.some(old=>old.code===item.code))] : page.items);
-      setHasMore(page.hasMore); setNextCursor(page.nextCursor); setPhase("ready");
+      setHasMore(page.hasMore); setNextCursor(page.nextCursor); setCurrentCursor(cursor); setPhase("ready");
     } catch(error) {
       if (!current(expected) || isAbort(error)) return;
       setPhase(errorCode(error)==="FORBIDDEN" ? "forbidden" : "failed"); setListError(queryMessage(error));
@@ -89,7 +96,7 @@ export function AreaManager({client,className}:AreaManagerProps):React.JSX.Eleme
 
   useEffect(()=>{
     if (dataset===null) return;
-    const expected=nextGeneration(); setNodes([]); setNextCursor(null); setHasMore(false);
+    const expected=nextGeneration(); setNodes([]); setNextCursor(null); setCurrentCursor(null); setHasMore(false);
     void loadNodes(makeQuery(dataset),null,false,expected);
   },[dataset,navigationParent,navigationPath,codeFilter,levelFilter,nameFilter,loadNodes,makeQuery,nextGeneration]);
   useEffect(()=>{ if (selected!==null) { setDisplayName(selected.label); setSort(String(selected.sort)); setEnabled(selected.enabled); setSaveError(null); } },[selected]);
@@ -103,15 +110,18 @@ export function AreaManager({client,className}:AreaManagerProps):React.JSX.Eleme
   function changeCodeFilter(value:string):void { setCodeFilter(value); if (value) setNameFilter(""); }
   async function selectNode(node:RegionSummary):Promise<void> {
     if (dataset===null) return;
+    const selection=++selectionRequest.current;
+    selectionController.current?.abort(); selectionController.current=null;
     const selectedDataset=dataset, expected=generation.current, controller=request(expected); if (controller===null) return;
+    selectionController.current=controller;
     setSelected(node); setSaveError(null);
     try {
       const result=await client.getPath({datasetId:selectedDataset.datasetId,code:node.code},controller.signal);
-      if (!current(expected)) return;
+      if (!current(expected) || selectionRequest.current!==selection) return;
       setDetailPath(result.nodes);
       if (node.hasChildren) { setNavigationPath(result.nodes); setNavigationParent(node.code); }
-    } catch(error) { if (current(expected) && !isAbort(error)) setListError(queryMessage(error)); }
-    finally { release(controller); }
+    } catch(error) { if (current(expected) && selectionRequest.current===selection && !isAbort(error)) setListError(queryMessage(error)); }
+    finally { release(controller); if (selectionController.current===controller) selectionController.current=null; }
   }
   function returnToParent():void { nextGeneration(); setNavigationParent(navigationPath.at(-2)?.code ?? null); setNavigationPath(previous=>previous.slice(0,-1)); }
   async function save():Promise<void> {
@@ -126,7 +136,7 @@ export function AreaManager({client,className}:AreaManagerProps):React.JSX.Eleme
       setSelected(saved);
       const result=await client.getPath({datasetId:selectedDataset.datasetId,code:saved.code},controller.signal);
       if (!current(expected)) return;
-      setDetailPath(result.nodes); await loadNodes(makeQuery(selectedDataset),null,false,expected);
+      setDetailPath(result.nodes); await loadNodes(makeQuery(selectedDataset),currentCursor,false,expected);
     } catch(error) {
       if (!current(expected) || isAbort(error)) return;
       setSaveError(errorCode(error)==="REVISION_CONFLICT" ? "区域设置已被更新，请重新加载后再保存"
