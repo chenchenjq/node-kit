@@ -17,7 +17,7 @@ function host(): TestHost {
     validateSelection: vi.fn(async () => ({accepted: false, reason: "NAVIGATION_ONLY"})), updatePresentation: vi.fn(async () => ({code: "01"})),
     getDatasetReport: vi.fn(),
   };
-  return {kit, authenticate: vi.fn(async () => ({trusted: true})), protectRequest: vi.fn(async () => undefined),
+  return {kit, authorize: async () => true, authenticate: vi.fn(async () => ({trusted: true})), protectRequest: vi.fn(async () => undefined),
     previewPolicy: vi.fn(() => ({allowEarlyTermination: false})), submissionPolicy: vi.fn(() => ({targetLevel: 3, policy: {}, versionPolicy: "active-only"})),
     origin: "https://app.example.test"};
 }

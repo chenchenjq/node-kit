@@ -1,8 +1,9 @@
-import { AreaKitError, sanitizeError, type AreaKit } from "area-kit/server";
+import { AreaKitError, sanitizeError, type AreaKit, type AreaKitOptions } from "area-kit/server";
 import type { Level, PresentationInput, SelectionPolicy, ValidationInput, VersionPolicy } from "area-kit";
 
 export interface AreaHost<C> {
   kit: AreaKit<C>;
+  authorize: AreaKitOptions<C>["authorize"];
   authenticate(request: Request): Promise<C>;
   protectRequest(request: Request, ctx: C): Promise<void>;
   previewPolicy(ctx: C, targetLevel: Level): SelectionPolicy;
@@ -77,17 +78,17 @@ function levelQuery(params: URLSearchParams, name: string): Level | undefined {
   if (!levels.has(value as Level)) invalid();
   return value as Level;
 }
-function contentType(request: Request): void {
+export function requireAreaJson(request: Request): void {
   if (request.headers.get("content-type")?.split(";", 1)[0]?.toLowerCase() !== "application/json") invalid();
 }
-function json(data: unknown, status = 200): Response {
+export function areaJson(data: unknown, status = 200): Response {
   return Response.json({data}, {status, headers: {"cache-control": "no-store"}});
 }
-function error(error: unknown): Response {
+export function areaError(error: unknown): Response {
   const safe = sanitizeError(error);
   const statuses: Partial<Record<AreaKitError["code"], number>> = {
     FORBIDDEN: 403, UNKNOWN_CODE: 404, VERSION_UNAVAILABLE: 404, REVISION_CONFLICT: 409, IMPORT_CONFLICT: 409,
-    INVALID_ARGUMENT: 400, QUERY_LIMIT_EXCEEDED: 400, NOT_INITIALIZED: 503, QUERY_FAILED: 500,
+    INVALID_ARGUMENT: 400, QUERY_LIMIT_EXCEEDED: 400, TARGET_LEVEL_NOT_REACHED: 422, PARENT_MISMATCH: 422, NOT_SELECTABLE: 422, NOT_INITIALIZED: 503, QUERY_FAILED: 500,
   };
   return Response.json({error: safe.toJSON()}, {status: statuses[safe.code] ?? 500, headers: {"cache-control": "no-store"}});
 }
@@ -115,7 +116,7 @@ function concat(chunks: readonly Uint8Array[], size: number): Uint8Array {
   for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
   return result;
 }
-function validationInput(value: unknown): ValidationInput {
+export function parseValidationInput(value: unknown): ValidationInput {
   object(value); keys(value, ["datasetId", "versionCode", "pathCodes", "targetLevel"]);
   if (!Array.isArray(value.pathCodes) || value.pathCodes.length < 1 || value.pathCodes.length > 5) invalid();
   value.pathCodes.forEach(code);
@@ -152,38 +153,38 @@ export async function handleAreaRequest<C>(request: Request, path: readonly stri
     const ctx = await host.authenticate(request);
     await host.protectRequest(request, ctx);
     const params = new URL(request.url).searchParams;
-    if (route === "dataset") { validateQuery(params, ["datasetId", "versionCode"]); return json(await host.kit.getDataset(ctx, selector(params))); }
+    if (route === "dataset") { validateQuery(params, ["datasetId", "versionCode"]); return areaJson(await host.kit.getDataset(ctx, selector(params))); }
     if (route === "datasets") {
       validateQuery(params, ["limit", "cursor", "includeUnavailable"]); const includeUnavailable = booleanQuery(params, "includeUnavailable");
-      return json(await host.kit.listDatasets(ctx, {...page(params), ...(includeUnavailable === undefined ? {} : {includeUnavailable})}));
+      return areaJson(await host.kit.listDatasets(ctx, {...page(params), ...(includeUnavailable === undefined ? {} : {includeUnavailable})}));
     }
-    if (route === "provinces") { validateQuery(params, ["datasetId", "versionCode", "limit", "cursor"]); return json(await host.kit.listProvinces(ctx, {...selector(params), ...page(params)})); }
+    if (route === "provinces") { validateQuery(params, ["datasetId", "versionCode", "limit", "cursor"]); return areaJson(await host.kit.listProvinces(ctx, {...selector(params), ...page(params)})); }
     if (route === "children") {
       validateQuery(params, ["datasetId", "versionCode", "limit", "cursor", "parentCode", "ancestorCode", "level", "selectableOnly"]);
       const ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly");
-      return json(await host.kit.listChildren(ctx, {...selector(params), ...page(params), parentCode: stringQuery(params, "parentCode", true)!, ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
+      return areaJson(await host.kit.listChildren(ctx, {...selector(params), ...page(params), parentCode: stringQuery(params, "parentCode", true)!, ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
     }
     if (route === "regions") {
       validateQuery(params, ["datasetId", "versionCode", "limit", "cursor", "parentCode", "ancestorCode", "level", "selectableOnly"]);
       const parentCode = nullableCodeQuery(params, "parentCode"), ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly");
-      return json(await host.kit.listRegions(ctx, {...selector(params), ...page(params), ...(parentCode === undefined ? {} : {parentCode}), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
+      return areaJson(await host.kit.listRegions(ctx, {...selector(params), ...page(params), ...(parentCode === undefined ? {} : {parentCode}), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
     }
-    if (route === "region") { validateQuery(params, ["datasetId", "versionCode", "code"]); return json(await host.kit.getRegion(ctx, {...selector(params), code: stringQuery(params, "code", true)!})); }
+    if (route === "region") { validateQuery(params, ["datasetId", "versionCode", "code"]); return areaJson(await host.kit.getRegion(ctx, {...selector(params), code: stringQuery(params, "code", true)!})); }
     if (route === "batch") {
       validateQuery(params, ["datasetId", "versionCode", "codes"]); const codes = params.getAll("codes");
       if (!codes.length || codes.length > 200) invalid(); codes.forEach(code);
-      return json(await host.kit.getRegions(ctx, {...selector(params), codes}));
+      return areaJson(await host.kit.getRegions(ctx, {...selector(params), codes}));
     }
-    if (route === "path") { validateQuery(params, ["datasetId", "versionCode", "code"]); return json(await host.kit.getPath(ctx, {...selector(params), code: stringQuery(params, "code", true)!})); }
+    if (route === "path") { validateQuery(params, ["datasetId", "versionCode", "code"]); return areaJson(await host.kit.getPath(ctx, {...selector(params), code: stringQuery(params, "code", true)!})); }
     if (route === "search") {
       validateQuery(params, ["datasetId", "versionCode", "limit", "cursor", "parentCode", "ancestorCode", "level", "selectableOnly", "keyword"]);
       const parentCode = nullableCodeQuery(params, "parentCode"), ancestorCode = stringQuery(params, "ancestorCode"), level = levelQuery(params, "level"), selectableOnly = booleanQuery(params, "selectableOnly"), keyword = stringQuery(params, "keyword", true)!;
       if (keyword.length > 100) invalid();
-      return json(await host.kit.search(ctx, {...selector(params), ...page(params), keyword, ...(parentCode === undefined ? {} : {parentCode}), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
+      return areaJson(await host.kit.search(ctx, {...selector(params), ...page(params), keyword, ...(parentCode === undefined ? {} : {parentCode}), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(level === undefined ? {} : {level}), ...(selectableOnly === undefined ? {} : {selectableOnly})}));
     }
-    if (route === "tree") { validateQuery(params, ["datasetId", "versionCode", "ancestorCode", "depth", "maxNodes"]); const ancestorCode = stringQuery(params, "ancestorCode"), depth = intQuery(params, "depth", 1, 3), maxNodes = intQuery(params, "maxNodes", 1, 5000); return json(await host.kit.getTree(ctx, {...selector(params), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(depth === undefined ? {} : {depth}), ...(maxNodes === undefined ? {} : {maxNodes})})); }
-    if (route === "validate") { validateQuery(params, []); contentType(request); const input = validationInput(await readAreaJsonBody(request)); const targetLevel = input.targetLevel ?? 3; return json(await host.kit.validateSelection(ctx, input, {policy: host.previewPolicy(ctx, targetLevel), versionPolicy: "specified-ready"})); }
-    if (route === "admin/presentation") { validateQuery(params, []); contentType(request); return json(await host.kit.updatePresentation(ctx, presentationInput(await readAreaJsonBody(request)))); }
-    validateQuery(params, ["datasetId", "versionCode"]); return json(await host.kit.getDatasetReport(ctx, selector(params)));
-  } catch (cause) { return error(cause); }
+    if (route === "tree") { validateQuery(params, ["datasetId", "versionCode", "ancestorCode", "depth", "maxNodes"]); const ancestorCode = stringQuery(params, "ancestorCode"), depth = intQuery(params, "depth", 1, 3), maxNodes = intQuery(params, "maxNodes", 1, 5000); return areaJson(await host.kit.getTree(ctx, {...selector(params), ...(ancestorCode === undefined ? {} : {ancestorCode}), ...(depth === undefined ? {} : {depth}), ...(maxNodes === undefined ? {} : {maxNodes})})); }
+    if (route === "validate") { validateQuery(params, []); requireAreaJson(request); const input = parseValidationInput(await readAreaJsonBody(request)); const targetLevel = input.targetLevel ?? 3; return areaJson(await host.kit.validateSelection(ctx, input, {policy: host.previewPolicy(ctx, targetLevel), versionPolicy: "specified-ready"})); }
+    if (route === "admin/presentation") { validateQuery(params, []); requireAreaJson(request); return areaJson(await host.kit.updatePresentation(ctx, presentationInput(await readAreaJsonBody(request)))); }
+    validateQuery(params, ["datasetId", "versionCode"]); return areaJson(await host.kit.getDatasetReport(ctx, selector(params)));
+  } catch (cause) { return areaError(cause); }
 }
