@@ -26,7 +26,8 @@ export default function AreasPage(): React.JSX.Element {
 
   return <main>
     <h1>区域选择</h1>
-    <AreaCascader client={client} value={value} onChange={setValue} onStatus={setStatus} />
+    <AreaCascader client={client} value={value} targetLevel={3}
+      onChange={(nextValue)=>setValue(nextValue)} onStatus={setStatus} />
     <p><button type="button" disabled={submitting || !value?.pathCodes?.length || !status?.accepted} onClick={()=>{void submit();}}>{submitting ? "正在保存…" : "保存地址"}</button></p>
     <p role="status">{message}</p>
     <h2>当前受控值</h2>
