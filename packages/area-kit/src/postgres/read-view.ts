@@ -51,6 +51,8 @@ export function createReadView(db: NodePgDatabase, tables: AreaTables): ReadView
       return JSON.stringify([result.rows[0]!.database, getTableConfig(d).schema ?? "public", "area_dataset", "area_region"]);
     },
     async resolveDataset(selector) {
+      // Dataset ids are UUIDs in this adapter. An opaque unknown selector must not leak a SQL cast error.
+      if (selector.datasetId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(selector.datasetId)) return null;
       const clauses: SQL[] = [];
       if (selector.datasetId !== undefined) clauses.push(eq(d.id, selector.datasetId));
       if (selector.versionCode !== undefined) clauses.push(eq(d.versionCode, selector.versionCode));
@@ -141,6 +143,26 @@ export function createReadView(db: NodePgDatabase, tables: AreaTables): ReadView
       }
       const result = await db.execute<RegionRow>(sql`${prefix} SELECT ${columns(r, p)} FROM ${from}
         WHERE ${and(...clauses)} ORDER BY ${r.sort}, ${r.code} LIMIT ${take}`);
+      return result.rows;
+    },
+    async readSmallTree(datasetId, input, take) {
+      const depth = input.depth ?? 3;
+      if (!Number.isInteger(depth) || depth < 1 || depth > 3
+        || !Number.isInteger(take) || take < 1 || take > 5001) throw new AreaKitError("INVALID_ARGUMENT");
+      const a = alias(table, "a");
+      const seed = input.ancestorCode === undefined
+        ? sql`${a.parentId} IS NULL AND ${a.level} = 1` : eq(a.code, input.ancestorCode);
+      const result = await db.execute<RegionRow>(sql`WITH RECURSIVE subtree AS (
+        SELECT ${a.id} AS id, ${a.level} AS level, 1 AS depth FROM ${table} AS a
+          WHERE ${a.datasetId} = ${datasetId} AND ${seed} AND ${a.level} <= 3
+        UNION ALL
+        SELECT ${a.id}, ${a.level}, subtree.depth + 1 FROM ${table} AS a
+          JOIN subtree ON ${a.parentId} = subtree.id AND ${a.level} = subtree.level + 1
+          WHERE ${a.datasetId} = ${datasetId} AND subtree.depth < ${depth} AND ${a.level} <= 3
+      ) SELECT ${columns(r, p)} FROM subtree JOIN ${table} AS r ON ${r.id} = subtree.id
+        AND ${r.datasetId} = ${datasetId}
+        LEFT JOIN ${table} AS p ON ${p.id} = ${r.parentId} AND ${p.datasetId} = ${datasetId}
+        ORDER BY ${r.sort}, ${r.code} LIMIT ${take}`);
       return result.rows;
     },
     async getChildFacts(datasetId, codes) {

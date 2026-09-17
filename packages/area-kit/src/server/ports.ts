@@ -1,5 +1,5 @@
 import type { DatasetListInput, DatasetPage, DatasetSummary, ImportReport, Level, NodeKind,
-  PresentationPatch, VersionSelector } from "../types.js";
+  PresentationPatch, TreeInput, VersionSelector } from "../types.js";
 import type { SourceFile } from "../source/manifest.js";
 
 export interface StoredRegion {
@@ -34,6 +34,7 @@ export interface ReadView {
   findNodes(datasetId: string, codes: readonly string[]): Promise<StoredRegion[]>;
   getPaths(datasetId: string, codes: readonly string[]): Promise<ReadonlyMap<string, StoredRegion[]>>;
   listNodes(datasetId: string, query: NodeQuery, after: PageKey | null, take: number): Promise<StoredRegion[]>;
+  readSmallTree(datasetId: string, input: TreeInput, take: number): Promise<StoredRegion[]>;
   getChildFacts(datasetId: string, codes: readonly string[]): Promise<ReadonlyMap<string, ChildFacts>>;
 }
 export interface WriteView extends ReadView {
