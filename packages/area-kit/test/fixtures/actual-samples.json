@@ -1,0 +1,609 @@
+{
+  "sourceCommit": "c49d495b40ac73eb1a66f6eeae5f8fd10696f035",
+  "files": [
+    {
+      "name": "provinces",
+      "path": "dist/provinces.csv",
+      "level": 1,
+      "bytes": 532,
+      "sha256": "b17e76dab634e24e0f56021f15737c0a526dc7f0c4e39d21abeba5a8668383cd"
+    },
+    {
+      "name": "cities",
+      "path": "dist/cities.csv",
+      "level": 2,
+      "bytes": 7580,
+      "sha256": "a9c818e8a5120189173668b40882ce8bf59a7ec2b057c49d7a724a04bec727f2"
+    },
+    {
+      "name": "areas",
+      "path": "dist/areas.csv",
+      "level": 3,
+      "bytes": 85403,
+      "sha256": "169b8d99654c28cbd285e771e00688837f77af8d50c2b703592146388d2a99ab"
+    },
+    {
+      "name": "streets",
+      "path": "dist/streets.csv",
+      "level": 4,
+      "bytes": 1630789,
+      "sha256": "831dc1c483079cee166717118e57f4b69ef6212c699dbd4bff868b59513ac14b"
+    },
+    {
+      "name": "villages",
+      "path": "dist/villages.csv",
+      "level": 5,
+      "bytes": 37730558,
+      "sha256": "31a824829aeef7b472fced6a3f9f8321cbd9fb26661052be98904f9763ec88ce"
+    }
+  ],
+  "ordinary": {
+    "pathCodes": [
+      "13",
+      "1301",
+      "130102",
+      "130102001",
+      "130102001001"
+    ],
+    "pathNames": [
+      "河北省",
+      "石家庄市",
+      "长安区",
+      "建北街道",
+      "棉一东社区居民委员会"
+    ]
+  },
+  "groups": [
+    {
+      "code": "1101",
+      "level": 2,
+      "sourceName": "市辖区",
+      "pathCodes": [
+        "11",
+        "1101"
+      ]
+    },
+    {
+      "code": "1201",
+      "level": 2,
+      "sourceName": "市辖区",
+      "pathCodes": [
+        "12",
+        "1201"
+      ]
+    },
+    {
+      "code": "3101",
+      "level": 2,
+      "sourceName": "市辖区",
+      "pathCodes": [
+        "31",
+        "3101"
+      ]
+    },
+    {
+      "code": "4190",
+      "level": 2,
+      "sourceName": "省直辖县级行政区划",
+      "pathCodes": [
+        "41",
+        "4190"
+      ]
+    },
+    {
+      "code": "4290",
+      "level": 2,
+      "sourceName": "省直辖县级行政区划",
+      "pathCodes": [
+        "42",
+        "4290"
+      ]
+    },
+    {
+      "code": "4690",
+      "level": 2,
+      "sourceName": "省直辖县级行政区划",
+      "pathCodes": [
+        "46",
+        "4690"
+      ]
+    },
+    {
+      "code": "5001",
+      "level": 2,
+      "sourceName": "市辖区",
+      "pathCodes": [
+        "50",
+        "5001"
+      ]
+    },
+    {
+      "code": "5002",
+      "level": 2,
+      "sourceName": "县",
+      "pathCodes": [
+        "50",
+        "5002"
+      ]
+    },
+    {
+      "code": "6590",
+      "level": 2,
+      "sourceName": "自治区直辖县级行政区划",
+      "pathCodes": [
+        "65",
+        "6590"
+      ]
+    }
+  ],
+  "sameNamePairs": [
+    {
+      "codes": [
+        "4419",
+        "441900"
+      ],
+      "sourceName": "东莞市"
+    },
+    {
+      "codes": [
+        "4420",
+        "442000"
+      ],
+      "sourceName": "中山市"
+    },
+    {
+      "codes": [
+        "4604",
+        "460400"
+      ],
+      "sourceName": "儋州市"
+    },
+    {
+      "sourceName": "朝阳区",
+      "codes": [
+        "110105",
+        "220104"
+      ]
+    }
+  ],
+  "unknownSpecial": [
+    {
+      "code": "130171",
+      "level": 3,
+      "sourceName": "石家庄高新技术产业开发区",
+      "pathCodes": [
+        "13",
+        "1301",
+        "130171"
+      ]
+    },
+    {
+      "code": "130271",
+      "level": 3,
+      "sourceName": "河北唐山芦台经济开发区",
+      "pathCodes": [
+        "13",
+        "1302",
+        "130271"
+      ]
+    },
+    {
+      "code": "130272",
+      "level": 3,
+      "sourceName": "唐山市汉沽管理区",
+      "pathCodes": [
+        "13",
+        "1302",
+        "130272"
+      ]
+    },
+    {
+      "code": "130273",
+      "level": 3,
+      "sourceName": "唐山高新技术产业开发区",
+      "pathCodes": [
+        "13",
+        "1302",
+        "130273"
+      ]
+    },
+    {
+      "code": "130274",
+      "level": 3,
+      "sourceName": "河北唐山海港经济开发区",
+      "pathCodes": [
+        "13",
+        "1302",
+        "130274"
+      ]
+    },
+    {
+      "code": "130371",
+      "level": 3,
+      "sourceName": "秦皇岛市经济技术开发区",
+      "pathCodes": [
+        "13",
+        "1303",
+        "130371"
+      ]
+    }
+  ],
+  "sourceNodes": [
+    {
+      "code": "13",
+      "sourceName": "河北省",
+      "level": 1,
+      "pathCodes": [
+        "13"
+      ]
+    },
+    {
+      "code": "1301",
+      "sourceName": "石家庄市",
+      "level": 2,
+      "pathCodes": [
+        "13",
+        "1301"
+      ]
+    },
+    {
+      "code": "130102",
+      "sourceName": "长安区",
+      "level": 3,
+      "pathCodes": [
+        "13",
+        "1301",
+        "130102"
+      ]
+    },
+    {
+      "code": "130102001",
+      "sourceName": "建北街道",
+      "level": 4,
+      "pathCodes": [
+        "13",
+        "1301",
+        "130102",
+        "130102001"
+      ]
+    },
+    {
+      "code": "130102001001",
+      "sourceName": "棉一东社区居民委员会",
+      "level": 5,
+      "pathCodes": [
+        "13",
+        "1301",
+        "130102",
+        "130102001",
+        "130102001001"
+      ]
+    },
+    {
+      "code": "11",
+      "sourceName": "北京市",
+      "level": 1,
+      "pathCodes": [
+        "11"
+      ]
+    },
+    {
+      "code": "1101",
+      "sourceName": "市辖区",
+      "level": 2,
+      "pathCodes": [
+        "11",
+        "1101"
+      ]
+    },
+    {
+      "code": "12",
+      "sourceName": "天津市",
+      "level": 1,
+      "pathCodes": [
+        "12"
+      ]
+    },
+    {
+      "code": "1201",
+      "sourceName": "市辖区",
+      "level": 2,
+      "pathCodes": [
+        "12",
+        "1201"
+      ]
+    },
+    {
+      "code": "31",
+      "sourceName": "上海市",
+      "level": 1,
+      "pathCodes": [
+        "31"
+      ]
+    },
+    {
+      "code": "3101",
+      "sourceName": "市辖区",
+      "level": 2,
+      "pathCodes": [
+        "31",
+        "3101"
+      ]
+    },
+    {
+      "code": "41",
+      "sourceName": "河南省",
+      "level": 1,
+      "pathCodes": [
+        "41"
+      ]
+    },
+    {
+      "code": "4190",
+      "sourceName": "省直辖县级行政区划",
+      "level": 2,
+      "pathCodes": [
+        "41",
+        "4190"
+      ]
+    },
+    {
+      "code": "42",
+      "sourceName": "湖北省",
+      "level": 1,
+      "pathCodes": [
+        "42"
+      ]
+    },
+    {
+      "code": "4290",
+      "sourceName": "省直辖县级行政区划",
+      "level": 2,
+      "pathCodes": [
+        "42",
+        "4290"
+      ]
+    },
+    {
+      "code": "46",
+      "sourceName": "海南省",
+      "level": 1,
+      "pathCodes": [
+        "46"
+      ]
+    },
+    {
+      "code": "4690",
+      "sourceName": "省直辖县级行政区划",
+      "level": 2,
+      "pathCodes": [
+        "46",
+        "4690"
+      ]
+    },
+    {
+      "code": "50",
+      "sourceName": "重庆市",
+      "level": 1,
+      "pathCodes": [
+        "50"
+      ]
+    },
+    {
+      "code": "5001",
+      "sourceName": "市辖区",
+      "level": 2,
+      "pathCodes": [
+        "50",
+        "5001"
+      ]
+    },
+    {
+      "code": "5002",
+      "sourceName": "县",
+      "level": 2,
+      "pathCodes": [
+        "50",
+        "5002"
+      ]
+    },
+    {
+      "code": "65",
+      "sourceName": "新疆维吾尔自治区",
+      "level": 1,
+      "pathCodes": [
+        "65"
+      ]
+    },
+    {
+      "code": "6590",
+      "sourceName": "自治区直辖县级行政区划",
+      "level": 2,
+      "pathCodes": [
+        "65",
+        "6590"
+      ]
+    },
+    {
+      "code": "130171",
+      "sourceName": "石家庄高新技术产业开发区",
+      "level": 3,
+      "pathCodes": [
+        "13",
+        "1301",
+        "130171"
+      ]
+    },
+    {
+      "code": "1302",
+      "sourceName": "唐山市",
+      "level": 2,
+      "pathCodes": [
+        "13",
+        "1302"
+      ]
+    },
+    {
+      "code": "130271",
+      "sourceName": "河北唐山芦台经济开发区",
+      "level": 3,
+      "pathCodes": [
+        "13",
+        "1302",
+        "130271"
+      ]
+    },
+    {
+      "code": "130272",
+      "sourceName": "唐山市汉沽管理区",
+      "level": 3,
+      "pathCodes": [
+        "13",
+        "1302",
+        "130272"
+      ]
+    },
+    {
+      "code": "130273",
+      "sourceName": "唐山高新技术产业开发区",
+      "level": 3,
+      "pathCodes": [
+        "13",
+        "1302",
+        "130273"
+      ]
+    },
+    {
+      "code": "130274",
+      "sourceName": "河北唐山海港经济开发区",
+      "level": 3,
+      "pathCodes": [
+        "13",
+        "1302",
+        "130274"
+      ]
+    },
+    {
+      "code": "1303",
+      "sourceName": "秦皇岛市",
+      "level": 2,
+      "pathCodes": [
+        "13",
+        "1303"
+      ]
+    },
+    {
+      "code": "130371",
+      "sourceName": "秦皇岛市经济技术开发区",
+      "level": 3,
+      "pathCodes": [
+        "13",
+        "1303",
+        "130371"
+      ]
+    },
+    {
+      "code": "4419",
+      "sourceName": "东莞市",
+      "level": 2,
+      "pathCodes": [
+        "44",
+        "4419"
+      ]
+    },
+    {
+      "code": "44",
+      "sourceName": "广东省",
+      "level": 1,
+      "pathCodes": [
+        "44"
+      ]
+    },
+    {
+      "code": "441900",
+      "sourceName": "东莞市",
+      "level": 3,
+      "pathCodes": [
+        "44",
+        "4419",
+        "441900"
+      ]
+    },
+    {
+      "code": "4420",
+      "sourceName": "中山市",
+      "level": 2,
+      "pathCodes": [
+        "44",
+        "4420"
+      ]
+    },
+    {
+      "code": "442000",
+      "sourceName": "中山市",
+      "level": 3,
+      "pathCodes": [
+        "44",
+        "4420",
+        "442000"
+      ]
+    },
+    {
+      "code": "4604",
+      "sourceName": "儋州市",
+      "level": 2,
+      "pathCodes": [
+        "46",
+        "4604"
+      ]
+    },
+    {
+      "code": "460400",
+      "sourceName": "儋州市",
+      "level": 3,
+      "pathCodes": [
+        "46",
+        "4604",
+        "460400"
+      ]
+    },
+    {
+      "code": "110105",
+      "sourceName": "朝阳区",
+      "level": 3,
+      "pathCodes": [
+        "11",
+        "1101",
+        "110105"
+      ]
+    },
+    {
+      "code": "220104",
+      "sourceName": "朝阳区",
+      "level": 3,
+      "pathCodes": [
+        "22",
+        "2201",
+        "220104"
+      ]
+    },
+    {
+      "code": "22",
+      "sourceName": "吉林省",
+      "level": 1,
+      "pathCodes": [
+        "22"
+      ]
+    },
+    {
+      "code": "2201",
+      "sourceName": "长春市",
+      "level": 2,
+      "pathCodes": [
+        "22",
+        "2201"
+      ]
+    }
+  ],
+  "selectionBasis": "Every path/name comes from fixed-commit raw CSV columns. Ordinary first nongroup five-level path, nine explicit city groups, repeated city/county and county names, first six special-looking names retained as unknown."
+}

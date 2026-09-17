@@ -20,6 +20,7 @@
     "test/**/*.ts",
     "test/**/*.tsx",
     "scripts/**/*.mjs",
+    "scripts/**/*.ts",
     "examples/**/*.ts",
     "examples/**/*.tsx",
     "vitest.config.ts",

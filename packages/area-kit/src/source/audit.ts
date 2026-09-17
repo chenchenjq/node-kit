@@ -34,7 +34,7 @@ async function verified(file: string, expected: SourceFile): Promise<boolean> {
   return bytes === expected.bytes && hash.digest("hex") === expected.sha256;
 }
 /** The optional manifest is an internal controlled test seam, never a CLI argument. */
-export async function auditSource(sourceDirectory: string, outputDirectory: string, manifest: SourceManifest = SOURCE_MANIFEST): Promise<AuditResult> {
+export async function auditSource(sourceDirectory: string, outputDirectory: string, manifest: SourceManifest = SOURCE_MANIFEST, onProgress?: (level: Level, valid: number) => void): Promise<AuditResult> {
   const directory = resolve(outputDirectory);
   if (directory === resolve(sourceDirectory)) throw new Error("Audit output must be separate from source");
   await mkdir(directory, { recursive: true });
@@ -116,6 +116,7 @@ export async function auditSource(sourceDirectory: string, outputDirectory: stri
       } finally { await output.close(); }
       report.sourceDigests[level] ??= hash.digest("hex");
       if (level < 5) indexes.set(level, currentIndex);
+      onProgress?.(level, counts.valid);
     }
   } finally { await issues.close(); }
   if (report.passed) { await rm(report.issuesPath!, { force: true }); report.issuesPath = null; }

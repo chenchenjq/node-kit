@@ -18,9 +18,9 @@ function conflict(): never { throw new AreaKitError("IMPORT_CONFLICT"); }
 /** Rebuild trusted canonical data from the original checksummed files on every attempt.
  * Keep this private snapshot for import so later edits to caller-owned files cannot alter a batch.
  */
-async function verify(audit: AuditResult, directory: string): Promise<AuditResult> {
+async function verify(audit: AuditResult, directory: string, onProgress?: (message: string) => void): Promise<AuditResult> {
   if (!audit.report.passed || !audit.sourceDirectory || !audit.manifest.versionCode) conflict();
-  const fresh = await auditSource(audit.sourceDirectory, directory, audit.manifest);
+  const fresh = await auditSource(audit.sourceDirectory, directory, audit.manifest, (level, count) => onProgress?.(`source recheck level ${level}: ${count}`));
   if (!fresh.report.passed || fresh.report.digestAlgorithm !== audit.report.digestAlgorithm ||
       !isDeepStrictEqual(fresh.report.counts, audit.report.counts) ||
       !isDeepStrictEqual(fresh.report.sourceDigests, audit.report.sourceDigests)) conflict();
@@ -54,7 +54,7 @@ export async function importAuditedSource(backend: ImportBackend, audit: AuditRe
     const directory = await mkdtemp(join(tmpdir(), "area-import-verified-"));
     let ready: DatasetSummary;
     try {
-      const source = await verify(audit, directory);
+      const source = await verify(audit, directory, options.onProgress);
       ready = await backend.withDatasetLock(source.manifest.versionCode, async session => {
         const dataset = await session.ensureDataset(source.manifest);
         try {
@@ -68,6 +68,7 @@ export async function importAuditedSource(backend: ImportBackend, audit: AuditRe
                 if (batch.length === batchSize) {
                   recordsCommitted += batch.length;
                   await session.appendBatch(dataset.datasetId, batch, {level, recordsCommitted, batchSize});
+                  if (recordsCommitted % (batchSize * 25) === 0) options.onProgress?.(`import level ${level}: ${recordsCommitted} committed`);
                   batch = [];
                 }
               }
@@ -75,6 +76,7 @@ export async function importAuditedSource(backend: ImportBackend, audit: AuditRe
                 recordsCommitted += batch.length;
                 await session.appendBatch(dataset.datasetId, batch, {level, recordsCommitted, batchSize});
               }
+              options.onProgress?.(`import level ${level}: ${recordsCommitted} committed (complete)`);
               if (recordsCommitted !== source.report.counts[level].valid || digest.digest("hex") !== source.report.sourceDigests[level]) conflict();
             }
           }
@@ -91,7 +93,9 @@ export async function importAuditedSource(backend: ImportBackend, audit: AuditRe
               report.inheritanceConflicts = inherited.conflicts;
             }
           }
+          options.onProgress?.("database digest audit started");
           const database = await session.auditDataset(dataset.datasetId);
+          options.onProgress?.("database digest audit completed");
           report.databaseDigests = database.digests;
           if (!database.passed || LEVELS.some(level => database.levelCounts[level] !== report.counts[level].valid ||
               database.digests[level] !== report.sourceDigests[level])) conflict();
