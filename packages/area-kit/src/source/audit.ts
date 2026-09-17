@@ -15,7 +15,7 @@ export interface CanonicalRow {
   nodeKind: NodeKind; ancestorCodes: string[];
 }
 export interface AuditResult {
-  manifest: SourceManifest; directory: string; normalizedFiles: Record<Level, string>; report: ImportReport;
+  manifest: SourceManifest; sourceDirectory: string; directory: string; normalizedFiles: Record<Level, string>; report: ImportReport;
 }
 export function canonicalDigestLine(row: CanonicalRow): string {
   return JSON.stringify([row.level, row.code, row.sourceName, row.parentCode, row.nodeKind]) + "\n";
@@ -123,5 +123,5 @@ export async function auditSource(sourceDirectory: string, outputDirectory: stri
     countingNotes: "valid counts unique codes passing every check; duplicate counts extra identical records; conflict counts codes with multiple source tuples; other issue counts count affected records and may overlap. Counts cannot be summed to derive valid.",
     manifest,
   }, null, 2) + "\n");
-  return { manifest, directory, normalizedFiles, report };
+  return { manifest, sourceDirectory: resolve(sourceDirectory), directory, normalizedFiles, report };
 }
