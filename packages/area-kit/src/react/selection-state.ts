@@ -27,6 +27,7 @@ export type SelectionAction =
   | {type: "dataset"; generation: number; dataset: DatasetSummary}
   | {type: "choose"; node: RegionSummary}
   | {type: "clear"}
+  | {type: "lifecycle"; generation: number}
   | {type: "hydrate"; generation: number; path: RegionSummary[]}
   | {type: "start"; generation: number; layerIndex: number; requestId: number}
   | {type: "loaded"; generation: number; layerIndex: number; requestId: number; parentCode: string | null; page: Page<RegionSummary>}
@@ -78,6 +79,8 @@ export function selectionReducer(state: SelectionState, action: SelectionAction)
     }
     case "clear":
       return {...state,generation:state.generation+1,path:[],layers:layersFor([]),status:null};
+    case "lifecycle":
+      return action.generation===state.generation+1 ? {...state,generation:action.generation} : state;
     case "hydrate":
       return action.generation===state.generation ? {...state,path:action.path,layers:layersFor(action.path),status:null} : state;
     case "start": {

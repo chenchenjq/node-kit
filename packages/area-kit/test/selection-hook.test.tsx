@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {act, renderHook, waitFor} from "@testing-library/react";
+import {StrictMode, type ReactNode, useState} from "react";
 import {expect, it, vi} from "vitest";
 import {useAreaSelection, type AreaSelectionClient} from "../src/react/use-area-selection.js";
 import type {AreaValue, Level, Page, PathResult, RegionSummary, SearchHit, SelectionPolicy, SelectionResult} from "../src/types.js";
@@ -36,51 +37,105 @@ function props(client: AreaSelectionClient, value: AreaValue | null = null) {
   return {client,value,onChange:vi.fn(),onStatus:vi.fn()};
 }
 
+function useAcceptingSelection(input: ReturnType<typeof props>) {
+  const [value,setValue]=useState(input.value);
+  return useAreaSelection({...input,value,onChange:(next,result)=>{input.onChange(next,result);setValue(next);}});
+}
+
 function accepted(pathCodes: string[], targetLevel: Level = 3): SelectionResult {
   const endpoint=pathCodes.at(-1)!;
   return {datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",code:endpoint,level:1 as const,actualLevel:1 as const,pathCodes,pathNames:["合成省"],
     candidatePathCodes:pathCodes,targetLevel,reachedTargetLevel:true,accepted:true,reason:"TARGET_REACHED"};
 }
 
-it("does not allow an old child response to overwrite a newer parent layer", async () => {
+it("loads the active dataset after StrictMode replays effect cleanup", async () => {
+  const getDataset=vi.fn(async()=>syntheticDataset());
+  const client=fakeClient({getDataset,listProvinces:async()=>page([province])});
+  const wrapper=({children}: {children: ReactNode})=><StrictMode>{children}</StrictMode>;
+  const {result}=renderHook(()=>useAreaSelection(props(client)),{wrapper});
+  await waitFor(()=>expect(result.current.state.layers[0]).toMatchObject({phase:"loaded",items:[province]}));
+  expect(result.current.state.dataset).toEqual(syntheticDataset());
+  expect(getDataset).toHaveBeenCalled();
+});
+
+it("restores the supplied value when a host declines an onChange path mutation", async () => {
+  const input=props(fakeClient({listProvinces:async()=>page([province]),listChildren:async()=>page([city]),validateSelection:async()=>accepted(["01"])}));
+  const {result}=renderHook(()=>useAreaSelection(input));
+  await waitFor(()=>expect(result.current.state.layers[0]?.phase).toBe("loaded"));
+  act(()=>result.current.choose(province));
+  expect(input.onChange).toHaveBeenCalledWith(expect.objectContaining({code:"01"}),null);
+  await waitFor(()=>expect(result.current.state.path).toEqual([]));
+  expect(result.current.state.layers).toHaveLength(1);
+});
+
+it("surfaces an initial dataset failure and retries it", async () => {
+  const getDataset=vi.fn().mockRejectedValueOnce(new Error("dataset offline")).mockResolvedValueOnce(syntheticDataset());
+  const client=fakeClient({getDataset,listProvinces:async()=>page([province])});
+  const {result}=renderHook(()=>useAreaSelection(props(client)));
+  await waitFor(()=>expect(result.current.state.layers[0]).toMatchObject({phase:"error",error:"dataset offline"}));
+  await act(async()=>{await result.current.retry(0);});
+  await waitFor(()=>expect(result.current.state.layers[0]).toMatchObject({phase:"loaded",items:[province]}));
+});
+
+it("clears a stale controlled path after hydration fails and retries it", async () => {
+  const child=syntheticRegion({code:"0101",level:2,parentCode:"01"});
+  const oldPath: PathResult={datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",nodes:[province],pathCodes:["01"],pathNames:["合成省"]};
+  const newPath: PathResult={datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",nodes:[province,child],pathCodes:["01","0101"],pathNames:["合成省","合成市"]};
+  const getPath=vi.fn().mockResolvedValueOnce(oldPath).mockRejectedValueOnce(new Error("path offline")).mockResolvedValueOnce(newPath);
+  const client=fakeClient({getPath,listProvinces:async()=>page([province]),listChildren:async()=>page([child]),validateSelection:async()=>accepted(["01"])});
+  const initial=props(client,{datasetId:syntheticDataset().datasetId,code:"01",pathCodes:["01"]});
+  const {result,rerender}=renderHook(({input})=>useAreaSelection(input),{initialProps:{input:initial}});
+  await waitFor(()=>expect(result.current.state.path).toEqual([province]));
+  await act(async()=>{rerender({input:props(client,{datasetId:syntheticDataset().datasetId,code:"0101",pathCodes:["01","0101"]})});});
+  await waitFor(()=>expect(result.current.state.layers[0]).toMatchObject({phase:"error",error:"path offline"}));
+  expect(result.current.state.path).toEqual([]);
+  await act(async()=>{await result.current.retry(0);});
+  await waitFor(()=>expect(result.current.state.path).toEqual([province,child]));
+});
+
+it("clears an unvalidated path after validation fails and retries it", async () => {
+  const path: PathResult={datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",nodes:[province],pathCodes:["01"],pathNames:["合成省"]};
+  const validateSelection=vi.fn().mockRejectedValueOnce(new Error("validation offline")).mockResolvedValueOnce(accepted(["01"]));
+  const client=fakeClient({getPath:async()=>path,listProvinces:async()=>page([province]),listChildren:async()=>page([]),validateSelection});
+  const input=props(client,{datasetId:syntheticDataset().datasetId,code:"01",pathCodes:["01"]});
+  const {result}=renderHook(()=>useAreaSelection(input));
+  await waitFor(()=>expect(result.current.state.layers[0]).toMatchObject({phase:"error",error:"validation offline"}));
+  expect(result.current.state.path).toEqual([]);
+  await act(async()=>{await result.current.retry(0);});
+  await waitFor(()=>expect(result.current.state.status).toEqual(accepted(["01"])));
+});
+
+it("does not allow an old child response to restore a declined controlled selection", async () => {
   const oldChildren=deferred<Page<RegionSummary>>();
-  const newChildren=deferred<Page<RegionSummary>>();
-  let calls=0;
   const client=fakeClient({
-    listProvinces: async()=>page([province,syntheticRegion({code:"02",label:"乙省",hasChildren:true})]),
-    listChildren: ()=>++calls===1 ? oldChildren.promise : newChildren.promise,
+    listProvinces: async()=>page([province]),
+    listChildren: ()=>oldChildren.promise,
     validateSelection: async()=>unaccepted(["01"]),
   });
   const input=props(client);
   const {result}=renderHook(()=>useAreaSelection(input));
   await waitFor(()=>expect(result.current.state.layers[0]?.phase).toBe("loaded"));
-  await act(async()=>{result.current.choose(province);});
-  await waitFor(()=>expect(calls).toBe(1));
-  const other=syntheticRegion({code:"02",label:"乙省",level:1,hasChildren:true});
-  await act(async()=>{result.current.choose(other);});
-  await waitFor(()=>expect(calls).toBe(2));
-  await act(async()=>{newChildren.resolve(page([city]));});
-  await waitFor(()=>expect(result.current.state.layers[1]?.items).toEqual([city]));
+  act(()=>result.current.choose(province));
   await act(async()=>{oldChildren.resolve(page([syntheticRegion({code:"old",parentCode:"01"})]));});
-  await Promise.resolve();
-  expect(result.current.state.layers[1]?.parentCode).toBe("02");
-  expect(result.current.state.layers[1]?.items).toEqual([city]);
+  await waitFor(()=>expect(result.current.state.path).toEqual([]));
+  expect(result.current.state.layers).toHaveLength(1);
 });
 
 it("does not show an error when an aborted layer request rejects late", async () => {
   const oldChildren=deferred<Page<RegionSummary>>();
+  let calls=0;
   const client=fakeClient({
     listProvinces: async()=>page([province,syntheticRegion({code:"02",label:"乙省",hasChildren:true})]),
-    listChildren: async()=>oldChildren.promise,
+    listChildren: async()=>{calls++; return oldChildren.promise;},
     validateSelection: async()=>unaccepted(["01"]),
   });
   const {result}=renderHook(()=>useAreaSelection(props(client)));
   await waitFor(()=>expect(result.current.state.layers[0]?.phase).toBe("loaded"));
-  await act(async()=>{result.current.choose(province);});
-  await waitFor(()=>expect(result.current.state.layers[1]?.phase).toBe("loading"));
-  act(()=>result.current.clear());
+  act(()=>result.current.choose(province));
+  await waitFor(()=>expect(calls).toBe(1));
   await act(async()=>{oldChildren.reject(new Error("late transport failure"));});
-  expect(result.current.state.layers[0]).toMatchObject({phase:"unloaded",error:null});
+  await waitFor(()=>expect(result.current.state.path).toEqual([]));
+  expect(result.current.state.layers[0]).toMatchObject({error:null});
   expect(result.current.state.layers).toHaveLength(1);
 });
 
@@ -226,11 +281,10 @@ it("does not notify after unmount when search-hit hydration completes late", asy
 it("clears the status and emits a null value without retaining a previous acceptance", async () => {
   const accepted={...unaccepted(["01"]),accepted:true,reason:"TARGET_REACHED",code:"01",level:1,actualLevel:1,
     pathCodes:["01"],pathNames:["合成省"],reachedTargetLevel:true} as SelectionResult;
-  const client=fakeClient({listProvinces:async()=>page([province]),listChildren:async()=>page([]),validateSelection:async()=>accepted});
-  const input=props(client);
-  const {result}=renderHook(()=>useAreaSelection(input));
-  await waitFor(()=>expect(result.current.state.layers[0]?.phase).toBe("loaded"));
-  await act(async()=>{result.current.choose(province);});
+  const path: PathResult={datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",nodes:[province],pathCodes:["01"],pathNames:["合成省"]};
+  const client=fakeClient({getPath:async()=>path,listProvinces:async()=>page([province]),listChildren:async()=>page([]),validateSelection:async()=>accepted});
+  const input=props(client,{datasetId:syntheticDataset().datasetId,code:"01",pathCodes:["01"]});
+  const {result}=renderHook(()=>useAcceptingSelection(input));
   await waitFor(()=>expect(result.current.state.status).toEqual(accepted));
   act(()=>result.current.clear());
   expect(result.current.state.status).toBeNull();
@@ -244,10 +298,9 @@ it("retries a genuine failed layer request and keeps pagination pinned to the da
     .mockRejectedValueOnce(error)
     .mockResolvedValueOnce(page([child],"cursor-2"))
     .mockResolvedValueOnce(page([child,syntheticRegion({code:"0102",level:2,parentCode:"01"})]));
-  const client=fakeClient({listProvinces:async()=>page([province]),listChildren,validateSelection:async()=>unaccepted(["01"])});
-  const {result}=renderHook(()=>useAreaSelection(props(client)));
-  await waitFor(()=>expect(result.current.state.layers[0]?.phase).toBe("loaded"));
-  await act(async()=>{result.current.choose(province);});
+  const path: PathResult={datasetId:syntheticDataset().datasetId,versionCode:"synthetic:v1",nodes:[province],pathCodes:["01"],pathNames:["合成省"]};
+  const client=fakeClient({getPath:async()=>path,listProvinces:async()=>page([province]),listChildren,validateSelection:async()=>unaccepted(["01"])});
+  const {result}=renderHook(()=>useAreaSelection(props(client,{datasetId:syntheticDataset().datasetId,code:"01",pathCodes:["01"]})));
   await waitFor(()=>expect(result.current.state.layers[1]?.phase).toBe("error"));
   await act(async()=>{await result.current.retry(1);});
   await waitFor(()=>expect(result.current.state.layers[1]?.phase).toBe("loaded"));

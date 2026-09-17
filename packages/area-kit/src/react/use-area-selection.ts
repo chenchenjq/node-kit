@@ -68,12 +68,17 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
   onChangeRef.current=props.onChange;
   const onStatusRef=useRef(props.onStatus);
   onStatusRef.current=props.onStatus;
+  const valueRef=useRef(props.value);
+  valueRef.current=props.value;
+  const valueKeyRef=useRef(externalValueKey);
+  valueKeyRef.current=externalValueKey;
   const generationRef=useRef(0);
   const requestRef=useRef(0);
   const searchRequestRef=useRef(0);
   const previousRef=useRef({disabled,targetLevel,policyKey,valueKey:externalValueKey});
   const layerControllers=useRef(new Map<number,AbortController>());
   const searchController=useRef<AbortController | null>(null);
+  const datasetController=useRef<AbortController | null>(null);
   const pathController=useRef<AbortController | null>(null);
   const validationController=useRef<AbortController | null>(null);
 
@@ -87,13 +92,24 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     for (const controller of layerControllers.current.values()) controller.abort();
     layerControllers.current.clear();
     invalidateSearch();
+    datasetController.current?.abort();
     pathController.current?.abort();
     validationController.current?.abort();
+    datasetController.current=null;
     pathController.current=null;
     validationController.current=null;
   },[invalidateSearch]);
 
   const currentGeneration=useCallback(() => generationRef.current,[]);
+
+  const failRoot=useCallback((generation: number, error: unknown) => {
+    if (generation!==currentGeneration()) return;
+    const requestId=++requestRef.current;
+    dispatch({type:"hydrate",generation,path:[]});
+    dispatch({type:"start",generation,layerIndex:0,requestId});
+    dispatch({type:"failed",generation,layerIndex:0,requestId,message:message(error)});
+    onStatusRef.current?.(null);
+  },[currentGeneration]);
 
   const loadLayer=useCallback(async (generation: number, layerIndex: number, parentCode: string | null, dataset: DatasetSummary,
     cursor: string | null): Promise<void> => {
@@ -128,17 +144,18 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       onStatusRef.current?.(result);
     } catch (error) {
       if (generation!==currentGeneration() || isAbort(error)) return;
-      dispatch({type:"status",generation,result:null});
-      onStatusRef.current?.(null);
+      failRoot(generation,error);
     } finally {
       if (validationController.current===controller) validationController.current=null;
     }
-  },[currentGeneration,props.client,targetLevel]);
+  },[currentGeneration,failRoot,props.client,targetLevel]);
 
   const hydrateValue=useCallback(async (generation: number, dataset: DatasetSummary, value: AreaValue): Promise<void> => {
     pathController.current?.abort();
     const controller=new AbortController();
     pathController.current=controller;
+    const requestId=++requestRef.current;
+    dispatch({type:"start",generation,layerIndex:0,requestId});
     try {
       const result=await props.client.getPath({datasetId:dataset.datasetId,code:value.code},controller.signal);
       if (generation!==currentGeneration()) return;
@@ -150,10 +167,33 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       }
     } catch (error) {
       if (generation!==currentGeneration() || isAbort(error)) return;
+      failRoot(generation,error);
     } finally {
       if (pathController.current===controller) pathController.current=null;
     }
-  },[currentGeneration,loadLayer,props.client,validate]);
+  },[currentGeneration,failRoot,loadLayer,props.client,validate]);
+
+  const bootstrap=useCallback(async (generation: number): Promise<void> => {
+    if (generation!==currentGeneration()) return;
+    datasetController.current?.abort();
+    const controller=new AbortController();
+    datasetController.current=controller;
+    const requestId=++requestRef.current;
+    dispatch({type:"start",generation,layerIndex:0,requestId});
+    const value=valueRef.current;
+    try {
+      const dataset=await props.client.getDataset(value===null ? {} : {datasetId:value.datasetId},controller.signal);
+      if (generation!==currentGeneration()) return;
+      dispatch({type:"dataset",generation,dataset});
+      if (value===null) void loadLayer(generation,0,null,dataset,null);
+      else void hydrateValue(generation,dataset,value);
+    } catch (error) {
+      if (generation!==currentGeneration() || isAbort(error)) return;
+      failRoot(generation,error);
+    } finally {
+      if (datasetController.current===controller) datasetController.current=null;
+    }
+  },[currentGeneration,failRoot,hydrateValue,loadLayer,props.client]);
 
   useEffect(() => {
     const previous=previousRef.current;
@@ -167,26 +207,34 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     }
     const generation=currentGeneration();
     if (disabled) return;
-    let disposed=false;
-    const activate=async () => {
-      try {
-        const dataset=await props.client.getDataset(props.value===null ? {} : {datasetId:props.value.datasetId});
-        if (disposed || generation!==currentGeneration()) return;
-        dispatch({type:"dataset",generation,dataset});
-        if (props.value===null) void loadLayer(generation,0,null,dataset,null);
-        else void hydrateValue(generation,dataset,props.value);
-      } catch (error) {
-        if (disposed || generation!==currentGeneration() || isAbort(error)) return;
-      }
-    };
-    void activate();
-    return () => { disposed=true; };
-  },[abortAll,currentGeneration,disabled,externalValueKey,hydrateValue,loadLayer,policyKey,props.client,props.value,targetLevel]);
+    void bootstrap(generation);
+  },[abortAll,bootstrap,currentGeneration,disabled,externalValueKey,policyKey,targetLevel]);
 
   useEffect(() => () => {
-    generationRef.current++;
+    const generation=++generationRef.current;
     abortAll();
+    dispatch({type:"lifecycle",generation});
   },[abortAll]);
+
+  const reconcileControlledValue=useCallback((generation: number, expectedValueKey: string) => {
+    queueMicrotask(() => {
+      if (generation!==currentGeneration() || valueKeyRef.current!==expectedValueKey) return;
+      const snapshot=stateRef.current;
+      const nextGeneration=++generationRef.current;
+      abortAll();
+      dispatch({type:"lifecycle",generation:nextGeneration});
+      onStatusRef.current?.(null);
+      const value=valueRef.current;
+      if (snapshot.dataset===null) {
+        void bootstrap(nextGeneration);
+      } else if (value===null) {
+        dispatch({type:"hydrate",generation:nextGeneration,path:[]});
+        void loadLayer(nextGeneration,0,null,snapshot.dataset,null);
+      } else {
+        void hydrateValue(nextGeneration,snapshot.dataset,value);
+      }
+    });
+  },[abortAll,bootstrap,currentGeneration,hydrateValue,loadLayer]);
 
   const choose=useCallback((node: RegionSummary) => {
     const snapshot=stateRef.current;
@@ -194,21 +242,25 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     const generation=++generationRef.current;
     abortAll();
     const path=pathWith(snapshot.path,node);
+    const expectedValueKey=valueKeyRef.current;
     dispatch({type:"choose",node});
     onChangeRef.current(asValue(snapshot.dataset,path),null);
     onStatusRef.current?.(null);
+    reconcileControlledValue(generation,expectedValueKey);
     void validate(generation,snapshot.dataset,path);
     void loadLayer(generation,node.level,node.code,snapshot.dataset,null);
-  },[abortAll,loadLayer,validate]);
+  },[abortAll,loadLayer,reconcileControlledValue,validate]);
 
   const clear=useCallback(() => {
     if (stateRef.current.disabled) return;
     generationRef.current++;
     abortAll();
+    const expectedValueKey=valueKeyRef.current;
     dispatch({type:"clear"});
     onChangeRef.current(null,null);
     onStatusRef.current?.(null);
-  },[abortAll]);
+    reconcileControlledValue(generationRef.current,expectedValueKey);
+  },[abortAll,reconcileControlledValue]);
 
   const loadMore=useCallback(async (layerIndex: number): Promise<void> => {
     const snapshot=stateRef.current;
@@ -220,9 +272,17 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
   const retry=useCallback(async (layerIndex: number): Promise<void> => {
     const snapshot=stateRef.current;
     const current: LayerState | undefined=snapshot.layers[layerIndex];
-    if (snapshot.disabled || !snapshot.dataset || !current || current.phase!=="error") return;
+    if (snapshot.disabled || !current || current.phase!=="error") return;
+    if (snapshot.dataset===null) {
+      await bootstrap(currentGeneration());
+      return;
+    }
+    if (layerIndex===0 && valueRef.current!==null) {
+      await hydrateValue(currentGeneration(),snapshot.dataset,valueRef.current);
+      return;
+    }
     await loadLayer(currentGeneration(),layerIndex,current.parentCode,snapshot.dataset,current.nextCursor);
-  },[currentGeneration,loadLayer]);
+  },[bootstrap,currentGeneration,hydrateValue,loadLayer]);
 
   const search=useCallback(async (keyword: string): Promise<SearchHit[]> => {
     const snapshot=stateRef.current;
@@ -258,9 +318,11 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
       const result=await props.client.getPath({datasetId:snapshot.dataset.datasetId,code:hit.code},controller.signal);
       if (generation!==currentGeneration()) return;
       const path=result.nodes;
+      const expectedValueKey=valueKeyRef.current;
       dispatch({type:"hydrate",generation,path});
       onChangeRef.current(asValue(snapshot.dataset,path),null);
       onStatusRef.current?.(null);
+      reconcileControlledValue(generation,expectedValueKey);
       void validate(generation,snapshot.dataset,path);
       for (let index=0; index<=path.length; index++) {
         const parentCode=index===0 ? null : path[index-1]?.code ?? null;
@@ -271,7 +333,7 @@ export function useAreaSelection(props: AreaCascaderProps): AreaSelectionControl
     } finally {
       if (pathController.current===controller) pathController.current=null;
     }
-  },[abortAll,loadLayer,props.client,validate]);
+  },[abortAll,loadLayer,props.client,reconcileControlledValue,validate]);
 
   return {state,choose,loadMore,retry,search,selectSearchHit,clear};
 }
