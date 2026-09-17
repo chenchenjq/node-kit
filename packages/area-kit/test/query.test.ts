@@ -57,3 +57,29 @@ it("strictly validates cursor structure, version, filters, key types and canonic
     expect(()=>decodeCursor(Buffer.from(JSON.stringify(changed)).toString("base64url"),"library","dataset",query)).toThrowError(expect.objectContaining({code:"INVALID_ARGUMENT"}));
   }
 });
+it.each([null, " \t本地 市　\n"])("normalizes displayed labels and paths without changing source names (alias %j)", async displayName => {
+  const rows = [
+    {code:"01",sourceName:" \t合成 省　\n",displayName:null,level:1,parentCode:null,nodeKind:"region",enabled:true,sort:0,revision:1},
+    {code:"0101",sourceName:" \t合成 市　\n",displayName,level:2,parentCode:"01",nodeKind:"region",enabled:true,sort:0,revision:1},
+  ] as const;
+  const sourceNames = rows.map(row => row.sourceName);
+  const names = ["合成 省", displayName === null ? "合成 市" : "本地 市"];
+  const view = {
+    resolveDataset:async()=>({datasetId:"d",versionCode:"v",status:"ready"}),
+    getLibraryKey:async()=>"library",
+    findNodes:async(_datasetId:string,codes:readonly string[])=>rows.filter(row=>codes.includes(row.code)),
+    listNodes:async()=>[rows[1]],
+    getPaths:async(_datasetId:string,codes:readonly string[])=>new Map(codes.map(value=>[value,rows.slice(0,value==="01"?1:2)])),
+    getChildFacts:async(_datasetId:string,codes:readonly string[])=>new Map(codes.map(value=>[value,{hasChildren:value==="01",hasNavigableChildren:value==="01"}])),
+  } as unknown as ReadView;
+  const kit=server.createAreaKit({store:{read:async work=>work(view),write:vi.fn()},authorize:async()=>true});
+  expect(await kit.getRegion(null,{code:"0101"})).toMatchObject({sourceName:sourceNames[1],label:names[1]});
+  const path=await kit.getPath(null,{code:"0101"});
+  expect(path.pathNames).toEqual(names);
+  expect(path.nodes.map(node=>node.label)).toEqual(names);
+  expect(path.nodes.map(node=>node.sourceName)).toEqual(sourceNames);
+  const search=await kit.search(null,{keyword:"市"});
+  expect(search.items[0]).toMatchObject({sourceName:sourceNames[1],label:names[1],pathNames:names});
+  expect(rows.map(row=>row.sourceName)).toEqual(sourceNames);
+  expect(rows[1].displayName).toBe(displayName);
+});

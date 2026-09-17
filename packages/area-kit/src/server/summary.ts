@@ -2,6 +2,10 @@ import { AreaKitError } from "../errors.js";
 import type { ChildrenState, DatasetSummary, RegionSummary } from "../types.js";
 import type { ChildFacts, ReadView, StoredRegion } from "./ports.js";
 
+/** Normalize display text only; source fields remain unchanged for provenance. */
+export function displayLabel(node: Pick<StoredRegion, "displayName" | "sourceName">): string {
+  return (node.displayName ?? node.sourceName).trim();
+}
 export function effectiveEnabled(path: readonly StoredRegion[]): boolean {
   return path.length > 0 && path.every(node => node.enabled);
 }
@@ -24,7 +28,7 @@ export async function summarizeNodes(view: ReadView, datasetId: string, rows: re
     const path = paths.get(row.code), childFacts = facts.get(row.code);
     if (!path?.length || path.at(-1)?.code !== row.code || !childFacts) throw new AreaKitError("QUERY_FAILED");
     const enabled = effectiveEnabled(path);
-    return {code: row.code, sourceName: row.sourceName, label: row.displayName ?? row.sourceName,
+    return {code: row.code, sourceName: row.sourceName, label: displayLabel(row),
       level: row.level, parentCode: row.parentCode, nodeKind: row.nodeKind, enabled: row.enabled,
       effectiveEnabled: enabled, navigable: enabled, selectable: enabled && row.nodeKind !== "group",
       hasChildren: childFacts.hasChildren, childrenState: childrenState(childFacts), sort: row.sort, revision: row.revision};

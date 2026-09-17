@@ -3,7 +3,7 @@ import type { DatasetRef, ListInput, Page, PageInput, RegionSummary, SearchHit, 
 import type { AreaKit, AreaKitOptions, AuthorizationRequest } from "./contracts.js";
 import type { DatasetRecord, NodeQuery, ReadView, StoredRegion } from "./ports.js";
 import { decodeCursor, encodeCursor, normalizeQuery } from "./cursor.js";
-import { summarizeDataset, summarizeNodes } from "./summary.js";
+import { displayLabel, summarizeDataset, summarizeNodes } from "./summary.js";
 import { createSelectionValidator } from "./selection.js";
 import { createManagementMethods } from "./management.js";
 
@@ -143,7 +143,7 @@ export function createAreaKit<C>(options: AreaKitOptions<C>): AreaKit<C> {
       const items: SearchHit[] = result.items.map(item => {
         const path = paths.get(item.code);
         if (!path?.length) throw new AreaKitError("QUERY_FAILED");
-        return {...item, pathCodes: path.map(node => node.code), pathNames: path.map(node => node.displayName ?? node.sourceName)};
+        return {...item, pathCodes: path.map(node => node.code), pathNames: path.map(displayLabel)};
       });
       return {...result, items};
     }),
