@@ -1,0 +1,14 @@
+:root { font-family: system-ui, sans-serif; color: #182c3d; background: #f6f8fa; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header, main { width: min(72rem, 100%); margin: auto; padding: 1.5rem; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #d3dce2; }
+nav { display: flex; gap: 1.25rem; }
+a { color: #125e7a; text-underline-offset: .2em; }
+button, input, select { font: inherit; padding: .5rem; max-width: 100%; min-width: 0; }
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+:focus-visible { outline: 3px solid #087ca4; outline-offset: 3px; }
+pre { overflow-x: auto; padding: 1rem; background: #fff; border: 1px solid #d3dce2; }
+[role="alert"] { color: #9e2424; }
+@media (max-width: 40rem) { header { align-items: flex-start; flex-direction: column; } }
