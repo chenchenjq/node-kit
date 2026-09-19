@@ -8,6 +8,7 @@ export interface CreateSkuServiceOptions<RequestContext> {
   authorize(context: RequestContext, action: SkuAction, resource: { spuId: string }): Promise<AuthorizationResult>;
   projectConsumer?(skus: readonly PersistedSku[]): Promise<readonly ConsumerProjection[]>;
   resolveInventoryAuthority?(context: RequestContext, scopeKey: string): Promise<InventoryAuthority>;
+  approveModeChange?(context: RequestContext, change: { spuId: string; from: "default" | "multi"; to: "default" | "multi"; document: ProductDocument }): Promise<Result<true>>;
   createId?: () => string;
 }
 
@@ -145,7 +146,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (invalid !== null) return { ok: false, problem: invalid };
       const requestFingerprint = fingerprint(input);
 
-      return options.store.transact(scopeKey, input.spuId, (existing) => {
+      return options.store.transact(scopeKey, input.spuId, async (existing) => {
         const document = existing === null ? createDocument(scopeKey, input) : clone(existing);
         if (document.registeredSpuCode !== input.spuCode) return { document, result: fail("SPU_CODE_MISMATCH", "SPU 编码已冻结，不能修改") };
         const receipt = document.commands.find((candidate) => candidate.commandId === input.commandId);
@@ -159,6 +160,16 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
         }
         if (input.expectedStructureVersion !== undefined && input.expectedStructureVersion !== document.structureVersion.toString()) {
           return { document, result: fail("VERSION_CONFLICT", "规格结构已被其他编辑修改") };
+        }
+        const from = document.skus.some((sku) => !sku.archived && sku.pairs.length === 0) ? "default" : "multi";
+        const to = input.dimensions.length === 0 ? "default" : "multi";
+        if (existing !== null && from !== to) {
+          const approval = options.approveModeChange === undefined
+            ? Object.values(document.inventories).some((inventory) => inventory.quantity !== 0)
+              ? fail<true>("TRANSITION_BLOCKED", "模式转换前必须由宿主处理非零库存")
+              : { ok: true as const, value: true }
+            : await options.approveModeChange(context, { spuId: input.spuId, from, to, document: clone(document) });
+          if (!approval.ok) return { document, result: approval };
         }
         const mappings: Record<string, string> = {};
         const dimensions: PersistedDimension[] = input.dimensions.map((dimension) => {
