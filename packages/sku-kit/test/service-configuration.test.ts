@@ -44,4 +44,12 @@ describe("SKU configuration patches", () => {
     expect(result).toMatchObject({ ok: false, problem: { code: "NOT_FOUND" } });
     expect(await store.read("shop-a", "missing")).toBeNull();
   });
+
+  it("rejects a batch addressed to a stale structure revision", async () => {
+    const service = createSkuService({ store: createInMemorySkuStore(), resolveScope: async () => "shop-a", authorize: async () => ({ ok: true }), createId: () => "sku" });
+    const created = await service.saveConfiguration({}, { spuId: "p", spuCode: "P", commandId: "create", dimensions: [], selectedCombinations: [] });
+    if (!created.ok) throw new Error("fixture creation failed");
+    const result = await service.patchSkuConfigurations({}, { spuId: "p", commandId: "stale", expectedStructureVersion: "0", patches: [{ skuId: "sku", expectedConfigVersion: "1", status: "enabled" }] });
+    expect(result).toMatchObject({ ok: false, problem: { code: "VERSION_CONFLICT" } });
+  });
 });
