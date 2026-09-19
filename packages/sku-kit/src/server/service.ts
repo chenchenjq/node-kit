@@ -82,6 +82,11 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
     const authorization = await options.authorize(context, action, { spuId });
     return authorization.ok ? { ok: true, value: true } : { ok: false, problem: authorization.problem ?? problem("FORBIDDEN", "没有执行该操作的权限") };
   };
+  const inventoryAuthorityFor = async (context: RequestContext, scopeKey: string): Promise<Result<InventoryAuthority>> => {
+    const authority = await (options.resolveInventoryAuthority?.(context, scopeKey) ?? Promise.resolve({ kind: "local-read-write" as const, authorityKey: "sku-kit-local" }));
+    if (authority.authorityKey.trim() === "") return fail("VALIDATION_FAILED", "库存权威键不能为空");
+    return options.store.ensureInventoryAuthority === undefined ? { ok: true, value: authority } : options.store.ensureInventoryAuthority(scopeKey, authority);
+  };
 
   const preview = (existing: ProductDocument | null, input: Omit<SaveConfigurationInput, "commandId" | "expectedStructureVersion" | "restoreArchivedSkuIds">): Result<ConfigurationPreview> => {
     const mappings: Record<string, string> = {};
@@ -132,6 +137,8 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail("SCOPE_MISMATCH", "可信作用域不能为空");
       const authorization = await allowed(context, "structure.write", input.spuId);
       if (!authorization.ok) return authorization;
+      const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
+      if (!inventoryAuthority.ok) return inventoryAuthority;
       const code = validateRegisteredSpuCode(input.spuCode);
       if (!code.ok) return code;
       const invalid = validateStructure(input);
@@ -214,6 +221,8 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail<readonly SkuConfigurationDto[]>("SCOPE_MISMATCH", "可信作用域不能为空");
       const configurationAuthorization = await allowed(context, "configuration.write", input.spuId);
       if (!configurationAuthorization.ok) return configurationAuthorization;
+      const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
+      if (!inventoryAuthority.ok) return inventoryAuthority;
       if (input.patches.some((patch) => patch.supplyPrice !== undefined)) {
         const supplyAuthorization = await allowed(context, "supply-price.write", input.spuId);
         if (!supplyAuthorization.ok) return supplyAuthorization;
@@ -312,7 +321,9 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail<InventoryDto>("SCOPE_MISMATCH", "可信作用域不能为空");
       const authorization = await allowed(context, "inventory.write", input.spuId);
       if (!authorization.ok) return authorization;
-      const authority = await (options.resolveInventoryAuthority?.(context, scopeKey) ?? Promise.resolve({ kind: "local-read-write" as const, authorityKey: "sku-kit-local" }));
+      const resolvedAuthority = await inventoryAuthorityFor(context, scopeKey);
+      if (!resolvedAuthority.ok) return resolvedAuthority;
+      const authority = resolvedAuthority.value;
       if (authority.kind !== "local-read-write") return fail<InventoryDto>(authority.kind === "external-read-only" ? "INVENTORY_READ_ONLY" : "ADAPTER_FAILURE", "当前作用域不由本地库存权威管理");
       if (!Number.isInteger(input.quantity) || input.quantity < 0) return fail("VALIDATION_FAILED", "库存必须是非负整数");
       const requestFingerprint = fingerprint(input);

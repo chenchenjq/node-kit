@@ -17,6 +17,7 @@ export type SkuProblemCode =
   | "TRANSITION_BLOCKED"
   | "INVENTORY_UNKNOWN"
   | "INVENTORY_READ_ONLY"
+  | "INVENTORY_AUTHORITY_MISMATCH"
   | "ADAPTER_FAILURE";
 
 export interface SkuProblem {

@@ -1,4 +1,5 @@
-import type { CommandReceipt, PersistedDimension, PersistedSku, ProductDocument, SkuStore } from "../server/contracts.js";
+import type { CommandReceipt, InventoryAuthority, PersistedDimension, PersistedSku, ProductDocument, SkuStore } from "../server/contracts.js";
+import type { Result } from "../types.js";
 import { validateSkuSchemaName } from "./schema.js";
 
 /** The small subset of `pg` used by the adapter, so consumers control pool setup. */
@@ -26,6 +27,7 @@ const nullable = (value: unknown): string | null => value === null || value === 
 const tableNames = (schemaName: string) => {
   const schema = quoteSchema(schemaName);
   return {
+    scope: `${schema}.sku_scope_config`,
     product: `${schema}.sku_product_config`, dimension: `${schema}.sku_dimension`, value: `${schema}.sku_value`,
     sku: `${schema}.sku_sku`, selection: `${schema}.sku_selection`, inventory: `${schema}.sku_local_inventory`,
     receipt: `${schema}.sku_command_receipt`,
@@ -117,6 +119,14 @@ export const createPostgresSkuStore = (pool: PgPool, options: { schemaName?: str
       try { return await readDocument(client, schemaName, scopeKey, spuId); }
       finally { client.release(); }
     },
+    async ensureInventoryAuthority(scopeKey, authority): Promise<Result<InventoryAuthority>> {
+      const client = await pool.connect(); const t = tableNames(schemaName);
+      try {
+        const result = await client.query(`INSERT INTO ${t.scope} (scope_key, inventory_authority_kind, authority_key) VALUES ($1,$2,$3) ON CONFLICT (scope_key) DO UPDATE SET version = ${t.scope}.version WHERE ${t.scope}.inventory_authority_kind = EXCLUDED.inventory_authority_kind AND ${t.scope}.authority_key = EXCLUDED.authority_key RETURNING inventory_authority_kind, authority_key`, [scopeKey, authority.kind, authority.authorityKey]);
+        if (result.rows.length === 0) return { ok: false, problem: { code: "INVENTORY_AUTHORITY_MISMATCH", message: "库存权威已绑定，不能静默修改", retryable: false } };
+        return { ok: true, value: authority };
+      } finally { client.release(); }
+    },
   };
 };
 
@@ -137,5 +147,10 @@ export const createPostgresSkuStoreForTransaction = (client: PgTransactionClient
       return outcome.result;
     },
     async read(scopeKey, spuId) { return readDocument(client, schemaName, scopeKey, spuId); },
+    async ensureInventoryAuthority(scopeKey, authority): Promise<Result<InventoryAuthority>> {
+      const t = tableNames(schemaName);
+      const result = await client.query(`INSERT INTO ${t.scope} (scope_key, inventory_authority_kind, authority_key) VALUES ($1,$2,$3) ON CONFLICT (scope_key) DO UPDATE SET version = ${t.scope}.version WHERE ${t.scope}.inventory_authority_kind = EXCLUDED.inventory_authority_kind AND ${t.scope}.authority_key = EXCLUDED.authority_key RETURNING inventory_authority_kind`, [scopeKey, authority.kind, authority.authorityKey]);
+      return result.rows.length === 0 ? { ok: false, problem: { code: "INVENTORY_AUTHORITY_MISMATCH", message: "库存权威已绑定，不能静默修改", retryable: false } } : { ok: true, value: authority };
+    },
   };
 };
