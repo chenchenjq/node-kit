@@ -804,6 +804,44 @@ export declare const createSkuTables: (schemaName?: string) => {
                 identity: undefined;
                 generated: undefined;
             }, {}, {}>;
+            scopeKey: import("drizzle-orm/pg-core").PgColumn<{
+                name: "scope_key";
+                tableName: "sku_selection";
+                dataType: "string";
+                columnType: "PgVarchar";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: 128;
+            }>;
+            spuId: import("drizzle-orm/pg-core").PgColumn<{
+                name: "spu_id";
+                tableName: "sku_selection";
+                dataType: "string";
+                columnType: "PgVarchar";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: 128;
+            }>;
             dimensionId: import("drizzle-orm/pg-core").PgColumn<{
                 name: "dimension_id";
                 tableName: "sku_selection";

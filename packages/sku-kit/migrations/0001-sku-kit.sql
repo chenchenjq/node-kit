@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS sku_dimension (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sku_dimension_active_name
   ON sku_dimension(scope_key, spu_id, normalized_label) WHERE archived_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS sku_dimension_owner_id ON sku_dimension(scope_key, spu_id, id);
 
 CREATE TABLE IF NOT EXISTS sku_value (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS sku_value (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS sku_value_active_name
   ON sku_value(dimension_id, normalized_label) WHERE archived_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS sku_value_owner_id ON sku_value(scope_key, spu_id, id);
 
 CREATE TABLE IF NOT EXISTS sku_sku (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -65,14 +67,20 @@ CREATE TABLE IF NOT EXISTS sku_sku (
   FOREIGN KEY (scope_key, spu_id) REFERENCES sku_product_config(scope_key, spu_id),
   UNIQUE (scope_key, sku_code),
   UNIQUE (scope_key, spu_id, sequence),
-  UNIQUE (scope_key, spu_id, combination_key)
+  UNIQUE (scope_key, spu_id, combination_key),
+  UNIQUE (scope_key, spu_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS sku_selection (
   sku_id uuid NOT NULL REFERENCES sku_sku(id),
+  scope_key varchar(128) NOT NULL,
+  spu_id varchar(128) NOT NULL,
   dimension_id uuid NOT NULL REFERENCES sku_dimension(id),
   value_id uuid NOT NULL REFERENCES sku_value(id),
-  PRIMARY KEY (sku_id, dimension_id)
+  PRIMARY KEY (sku_id, dimension_id),
+  FOREIGN KEY (scope_key, spu_id, sku_id) REFERENCES sku_sku(scope_key, spu_id, id),
+  FOREIGN KEY (scope_key, spu_id, dimension_id) REFERENCES sku_dimension(scope_key, spu_id, id),
+  FOREIGN KEY (scope_key, spu_id, value_id) REFERENCES sku_value(scope_key, spu_id, id)
 );
 
 CREATE TABLE IF NOT EXISTS sku_local_inventory (

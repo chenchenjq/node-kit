@@ -2,6 +2,12 @@ import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX
 const problem = (code, message, retryable = false) => ({ code, message, retryable });
 const fail = (code, message) => ({ ok: false, problem: problem(code, message) });
 const fingerprint = (value) => JSON.stringify(value);
+const compareDecimal = (left, right) => {
+    const [leftInteger = "", leftFraction = ""] = left.split(".");
+    const [rightInteger = "", rightFraction = ""] = right.split(".");
+    const integer = (leftInteger.length - rightInteger.length) || leftInteger.localeCompare(rightInteger);
+    return integer || leftFraction.padEnd(18, "0").localeCompare(rightFraction.padEnd(18, "0"));
+};
 const clone = (value) => structuredClone(value);
 const createDocument = (scopeKey, input) => ({
     scopeKey,
@@ -73,6 +79,12 @@ export const createSkuService = (options) => {
         const authorization = await options.authorize(context, action, { spuId });
         return authorization.ok ? { ok: true, value: true } : { ok: false, problem: authorization.problem ?? problem("FORBIDDEN", "没有执行该操作的权限") };
     };
+    const inventoryAuthorityFor = async (context, scopeKey, bind = true) => {
+        const authority = await (options.resolveInventoryAuthority?.(context, scopeKey) ?? Promise.resolve({ kind: "local-read-write", authorityKey: "sku-kit-local" }));
+        if (authority.authorityKey.trim() === "")
+            return fail("VALIDATION_FAILED", "库存权威键不能为空");
+        return !bind || options.store.ensureInventoryAuthority === undefined ? { ok: true, value: authority } : options.store.ensureInventoryAuthority(scopeKey, authority);
+    };
     const preview = (existing, input) => {
         const mappings = {};
         const dimensions = input.dimensions.map((dimension) => {
@@ -134,6 +146,9 @@ export const createSkuService = (options) => {
             const authorization = await allowed(context, "structure.write", input.spuId);
             if (!authorization.ok)
                 return authorization;
+            const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
+            if (!inventoryAuthority.ok)
+                return inventoryAuthority;
             const code = validateRegisteredSpuCode(input.spuCode);
             if (!code.ok)
                 return code;
@@ -141,7 +156,7 @@ export const createSkuService = (options) => {
             if (invalid !== null)
                 return { ok: false, problem: invalid };
             const requestFingerprint = fingerprint(input);
-            return options.store.transact(scopeKey, input.spuId, (existing) => {
+            return options.store.transact(scopeKey, input.spuId, async (existing) => {
                 const document = existing === null ? createDocument(scopeKey, input) : clone(existing);
                 if (document.registeredSpuCode !== input.spuCode)
                     return { document, result: fail("SPU_CODE_MISMATCH", "SPU 编码已冻结，不能修改") };
@@ -156,6 +171,17 @@ export const createSkuService = (options) => {
                 }
                 if (input.expectedStructureVersion !== undefined && input.expectedStructureVersion !== document.structureVersion.toString()) {
                     return { document, result: fail("VERSION_CONFLICT", "规格结构已被其他编辑修改") };
+                }
+                const from = document.skus.some((sku) => !sku.archived && sku.pairs.length === 0) ? "default" : "multi";
+                const to = input.dimensions.length === 0 ? "default" : "multi";
+                if (existing !== null && from !== to) {
+                    const approval = options.approveModeChange === undefined
+                        ? Object.values(document.inventories).some((inventory) => inventory.quantity !== 0)
+                            ? fail("TRANSITION_BLOCKED", "模式转换前必须由宿主处理非零库存")
+                            : { ok: true, value: true }
+                        : await options.approveModeChange(context, { spuId: input.spuId, from, to, document: clone(document) });
+                    if (!approval.ok)
+                        return { document, result: approval };
                 }
                 const mappings = {};
                 const dimensions = input.dimensions.map((dimension) => {
@@ -231,6 +257,9 @@ export const createSkuService = (options) => {
             const configurationAuthorization = await allowed(context, "configuration.write", input.spuId);
             if (!configurationAuthorization.ok)
                 return configurationAuthorization;
+            const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
+            if (!inventoryAuthority.ok)
+                return inventoryAuthority;
             if (input.patches.some((patch) => patch.supplyPrice !== undefined)) {
                 const supplyAuthorization = await allowed(context, "supply-price.write", input.spuId);
                 if (!supplyAuthorization.ok)
@@ -287,6 +316,54 @@ export const createSkuService = (options) => {
                 return { document, result: { ok: true, value: affected } };
             });
         },
+        async copySkuConfiguration(context, input) {
+            const scopeKey = await scopeFor(context);
+            if (scopeKey === null)
+                return fail("SCOPE_MISMATCH", "可信作用域不能为空");
+            const configuration = await allowed(context, "configuration.write", input.spuId);
+            if (!configuration.ok)
+                return configuration;
+            if (input.fields.includes("supplyPrice")) {
+                const supply = await allowed(context, "supply-price.write", input.spuId);
+                if (!supply.ok)
+                    return supply;
+            }
+            if (input.fields.length === 0 || input.targetSkuIds.length === 0)
+                return fail("VALIDATION_FAILED", "复制必须指定字段和目标 SKU");
+            const authority = await inventoryAuthorityFor(context, scopeKey);
+            if (!authority.ok)
+                return authority;
+            const requestFingerprint = fingerprint(input);
+            return options.store.transact(scopeKey, input.spuId, (existing) => {
+                if (existing === null)
+                    return { result: fail("NOT_FOUND", "未找到 SKU 配置") };
+                const document = clone(existing);
+                const receipt = document.commands.find((item) => item.commandId === input.commandId);
+                if (receipt !== undefined)
+                    return { document, result: receipt.fingerprint === requestFingerprint ? { ok: true, value: clone(receipt.result) } : fail("IDEMPOTENCY_CONFLICT", "相同 commandId 使用了不同载荷") };
+                const source = document.skus.find((sku) => sku.id === input.sourceSkuId && !sku.archived);
+                if (source === undefined)
+                    return { document, result: fail("NOT_FOUND", "未找到来源 SKU") };
+                const targets = input.targetSkuIds.map((id) => document.skus.find((sku) => sku.id === id && !sku.archived));
+                if (targets.some((target) => target === undefined) || input.targetSkuIds.includes(source.id))
+                    return { document, result: fail("VALIDATION_FAILED", "复制目标必须是其他有效 SKU") };
+                const copied = [];
+                for (const target of targets) {
+                    for (const field of input.fields) {
+                        if (field === "suggestedRetailPrice" && (input.mode === "overwrite" || target.suggestedRetailPrice === null))
+                            target.suggestedRetailPrice = source.suggestedRetailPrice;
+                        if (field === "supplyPrice" && (input.mode === "overwrite" || target.supplyPrice === null))
+                            target.supplyPrice = source.supplyPrice;
+                        if (field === "image" && (input.mode === "overwrite" || target.image === null))
+                            target.image = source.image;
+                    }
+                    target.configVersion += 1n;
+                    copied.push({ currency: "CNY", skuId: target.id, skuCode: target.skuCode, status: target.status, suggestedRetailPrice: target.suggestedRetailPrice, supplyPrice: target.supplyPrice, image: target.image, configVersion: target.configVersion.toString() });
+                }
+                document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(copied) });
+                return { document, result: { ok: true, value: copied } };
+            });
+        },
         async getManagementConfiguration(context, input) {
             const scopeKey = await scopeFor(context);
             if (scopeKey === null)
@@ -331,8 +408,9 @@ export const createSkuService = (options) => {
             const selected = new Set(input.selectedValueIds);
             const candidates = visible.filter((sku) => sku.pairs.filter((pair) => selected.has(pair.valueId)).length === selected.size);
             const exact = candidates.filter((sku) => sku.pairs.length === selected.size && projections.get(sku.id)?.selectable === true);
-            const known = visible.map((sku) => projections.get(sku.id)?.salePrice).filter((price) => price !== null && price !== undefined).sort((a, b) => Number(a) - Number(b));
-            const range = known.length === 0 ? { status: "unknown", min: null, max: null } : { status: known.length === visible.length ? "complete" : "partial", min: known[0] ?? null, max: known.at(-1) ?? null };
+            const priceCandidates = selected.size === 0 ? visible : candidates;
+            const known = priceCandidates.map((sku) => projections.get(sku.id)?.salePrice).filter((price) => price !== null && price !== undefined).sort(compareDecimal);
+            const range = known.length === 0 ? { status: "unknown", min: null, max: null } : { status: known.length === priceCandidates.length ? "complete" : "partial", min: known[0] ?? null, max: known.at(-1) ?? null };
             const dimensions = document.dimensions.filter((dimension) => !dimension.archived).map((dimension) => ({ dimensionId: dimension.id, label: dimension.label, options: dimension.values.filter((value) => !value.archived).map((value) => {
                     const valueCandidates = candidates.filter((sku) => sku.pairs.some((pair) => pair.valueId === value.id));
                     const projection = valueCandidates.map((sku) => projections.get(sku.id)).find((entry) => entry?.selectable === true);
@@ -343,6 +421,27 @@ export const createSkuService = (options) => {
             const selectedProjection = resolved === undefined ? undefined : projections.get(resolved.id);
             return { ok: true, value: { currency: "CNY", dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, priceRange: range } };
         },
+        async getInventory(context, input) {
+            const scopeKey = await scopeFor(context);
+            if (scopeKey === null)
+                return fail("SCOPE_MISMATCH", "可信作用域不能为空");
+            const authorization = await allowed(context, "inventory.read", input.spuId);
+            if (!authorization.ok)
+                return authorization;
+            const authority = await inventoryAuthorityFor(context, scopeKey, false);
+            if (!authority.ok)
+                return authority;
+            if (authority.value.kind !== "local-read-write") {
+                return options.readExternalInventory === undefined
+                    ? { ok: true, value: { state: "unknown", skuId: input.skuId, reason: "外部库存适配器不可用" } }
+                    : options.readExternalInventory(context, { scopeKey, spuId: input.spuId, skuId: input.skuId, authority: authority.value });
+            }
+            const document = await options.store.read(scopeKey, input.spuId);
+            const inventory = document?.inventories[input.skuId];
+            if (document === null || inventory === undefined || !document.skus.some((sku) => sku.id === input.skuId && !sku.archived))
+                return fail("NOT_FOUND", "未找到可读取的 SKU 库存");
+            return { ok: true, value: { state: "known", skuId: input.skuId, quantity: inventory.quantity, inventoryVersion: inventory.version.toString() } };
+        },
         async setLocalInventory(context, input) {
             const scopeKey = await scopeFor(context);
             if (scopeKey === null)
@@ -350,7 +449,10 @@ export const createSkuService = (options) => {
             const authorization = await allowed(context, "inventory.write", input.spuId);
             if (!authorization.ok)
                 return authorization;
-            const authority = await (options.resolveInventoryAuthority?.(context, scopeKey) ?? Promise.resolve({ kind: "local-read-write", authorityKey: "sku-kit-local" }));
+            const resolvedAuthority = await inventoryAuthorityFor(context, scopeKey);
+            if (!resolvedAuthority.ok)
+                return resolvedAuthority;
+            const authority = resolvedAuthority.value;
             if (authority.kind !== "local-read-write")
                 return fail(authority.kind === "external-read-only" ? "INVENTORY_READ_ONLY" : "ADAPTER_FAILURE", "当前作用域不由本地库存权威管理");
             if (!Number.isInteger(input.quantity) || input.quantity < 0)

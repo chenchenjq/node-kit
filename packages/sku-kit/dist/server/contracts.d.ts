@@ -102,6 +102,16 @@ export interface InventoryDto {
     quantity: number;
     inventoryVersion: string;
 }
+export type InventoryReadDto = {
+    state: "known";
+    skuId: string;
+    quantity: number;
+    inventoryVersion: string;
+} | {
+    state: "unknown";
+    skuId: string;
+    reason: string;
+};
 /** A scope's inventory authority is selected by the host, never inferred per SKU. */
 export interface InventoryAuthority {
     kind: InventoryAuthorityKind;
@@ -126,6 +136,7 @@ export interface SkuStore {
         result: T;
     }): Promise<T>;
     read(scopeKey: string, spuId: string): Promise<ProductDocument | null>;
+    ensureInventoryAuthority?(scopeKey: string, authority: InventoryAuthority): Promise<Result<InventoryAuthority>>;
 }
 export interface SavedSku {
     skuId: string;
@@ -167,6 +178,14 @@ export interface PatchSkuConfigurationsInput {
     spuId: string;
     commandId: string;
     patches: readonly SkuConfigurationPatch[];
+}
+export interface CopySkuConfigurationInput {
+    spuId: string;
+    commandId: string;
+    sourceSkuId: string;
+    targetSkuIds: readonly string[];
+    fields: readonly ("suggestedRetailPrice" | "supplyPrice" | "image")[];
+    mode: "empty-only" | "overwrite";
 }
 export interface SkuConfigurationDto {
     currency: "CNY";
@@ -216,8 +235,12 @@ export interface SkuService<RequestContext> {
     previewConfiguration(context: RequestContext, input: Omit<SaveConfigurationInput, "commandId" | "expectedStructureVersion" | "restoreArchivedSkuIds">): Promise<Result<ConfigurationPreview>>;
     saveConfiguration(context: RequestContext, input: SaveConfigurationInput): Promise<Result<SavedConfiguration>>;
     patchSkuConfigurations(context: RequestContext, input: PatchSkuConfigurationsInput): Promise<Result<readonly SkuConfigurationDto[]>>;
+    copySkuConfiguration(context: RequestContext, input: CopySkuConfigurationInput): Promise<Result<readonly SkuConfigurationDto[]>>;
     getManagementConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<ManagementConfiguration>>;
     getHistoricalConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<HistoricalConfiguration>>;
     getConsumerSelection(context: RequestContext, input: ConsumerSelectionInput): Promise<Result<ConsumerSelectionDto>>;
+    getInventory(context: RequestContext, input: SpuRefInput & {
+        skuId: string;
+    }): Promise<Result<InventoryReadDto>>;
     setLocalInventory(context: RequestContext, input: SetLocalInventoryInput): Promise<Result<InventoryDto>>;
 }

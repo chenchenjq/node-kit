@@ -5,6 +5,7 @@ const nullable = (value) => value === null || value === undefined ? null : Strin
 const tableNames = (schemaName) => {
     const schema = quoteSchema(schemaName);
     return {
+        scope: `${schema}.sku_scope_config`,
         product: `${schema}.sku_product_config`, dimension: `${schema}.sku_dimension`, value: `${schema}.sku_value`,
         sku: `${schema}.sku_sku`, selection: `${schema}.sku_selection`, inventory: `${schema}.sku_local_inventory`,
         receipt: `${schema}.sku_command_receipt`,
@@ -65,7 +66,7 @@ const persistDocument = async (client, schemaName, document) => {
     await client.query(`DELETE FROM ${t.selection} WHERE sku_id IN (SELECT id FROM ${t.sku} WHERE scope_key = $1 AND spu_id = $2)`, [document.scopeKey, document.spuId]);
     for (const sku of document.skus)
         for (const pair of sku.pairs)
-            await client.query(`INSERT INTO ${t.selection} (sku_id, dimension_id, value_id) VALUES ($1,$2,$3)`, [sku.id, pair.dimensionId, pair.valueId]);
+            await client.query(`INSERT INTO ${t.selection} (sku_id, scope_key, spu_id, dimension_id, value_id) VALUES ($1,$2,$3,$4,$5)`, [sku.id, document.scopeKey, document.spuId, pair.dimensionId, pair.valueId]);
     for (const [skuId, entry] of Object.entries(document.inventories))
         await client.query(`INSERT INTO ${t.inventory} (sku_id, quantity, version) VALUES ($1,$2,$3) ON CONFLICT (sku_id) DO UPDATE SET quantity = EXCLUDED.quantity, version = EXCLUDED.version, updated_at = now()`, [skuId, entry.quantity, entry.version.toString()]);
     await client.query(`DELETE FROM ${t.receipt} WHERE scope_key = $1 AND spu_id = $2 AND expires_at <= now()`, [document.scopeKey, document.spuId]);
@@ -109,6 +110,19 @@ export const createPostgresSkuStore = (pool, options = {}) => {
                 client.release();
             }
         },
+        async ensureInventoryAuthority(scopeKey, authority) {
+            const client = await pool.connect();
+            const t = tableNames(schemaName);
+            try {
+                const result = await client.query(`INSERT INTO ${t.scope} (scope_key, inventory_authority_kind, authority_key) VALUES ($1,$2,$3) ON CONFLICT (scope_key) DO UPDATE SET version = ${t.scope}.version WHERE ${t.scope}.inventory_authority_kind = EXCLUDED.inventory_authority_kind AND ${t.scope}.authority_key = EXCLUDED.authority_key RETURNING inventory_authority_kind, authority_key`, [scopeKey, authority.kind, authority.authorityKey]);
+                if (result.rows.length === 0)
+                    return { ok: false, problem: { code: "INVENTORY_AUTHORITY_MISMATCH", message: "库存权威已绑定，不能静默修改", retryable: false } };
+                return { ok: true, value: authority };
+            }
+            finally {
+                client.release();
+            }
+        },
     };
 };
 /**
@@ -129,5 +143,10 @@ export const createPostgresSkuStoreForTransaction = (client, options = {}) => {
             return outcome.result;
         },
         async read(scopeKey, spuId) { return readDocument(client, schemaName, scopeKey, spuId); },
+        async ensureInventoryAuthority(scopeKey, authority) {
+            const t = tableNames(schemaName);
+            const result = await client.query(`INSERT INTO ${t.scope} (scope_key, inventory_authority_kind, authority_key) VALUES ($1,$2,$3) ON CONFLICT (scope_key) DO UPDATE SET version = ${t.scope}.version WHERE ${t.scope}.inventory_authority_kind = EXCLUDED.inventory_authority_kind AND ${t.scope}.authority_key = EXCLUDED.authority_key RETURNING inventory_authority_kind`, [scopeKey, authority.kind, authority.authorityKey]);
+            return result.rows.length === 0 ? { ok: false, problem: { code: "INVENTORY_AUTHORITY_MISMATCH", message: "库存权威已绑定，不能静默修改", retryable: false } } : { ok: true, value: authority };
+        },
     };
 };
