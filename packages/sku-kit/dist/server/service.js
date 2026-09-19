@@ -2,6 +2,7 @@ import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX
 const problem = (code, message, retryable = false) => ({ code, message, retryable });
 const fail = (code, message) => ({ ok: false, problem: problem(code, message) });
 const fingerprint = (value) => JSON.stringify(value);
+const validCommandId = (commandId) => commandId.trim().length > 0 && commandId.length <= 128;
 const compareDecimal = (left, right) => {
     const [leftInteger = "", leftFraction = ""] = left.split(".");
     const [rightInteger = "", rightFraction = ""] = right.split(".");
@@ -148,6 +149,8 @@ export const createSkuService = (options) => {
             const authorization = await allowed(context, "structure.write", input.spuId);
             if (!authorization.ok)
                 return authorization;
+            if (!validCommandId(input.commandId))
+                return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
             const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
             if (!inventoryAuthority.ok)
                 return inventoryAuthority;
@@ -259,6 +262,8 @@ export const createSkuService = (options) => {
             const configurationAuthorization = await allowed(context, "configuration.write", input.spuId);
             if (!configurationAuthorization.ok)
                 return configurationAuthorization;
+            if (!validCommandId(input.commandId))
+                return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
             const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
             if (!inventoryAuthority.ok)
                 return inventoryAuthority;
@@ -329,6 +334,8 @@ export const createSkuService = (options) => {
             const configuration = await allowed(context, "configuration.write", input.spuId);
             if (!configuration.ok)
                 return configuration;
+            if (!validCommandId(input.commandId))
+                return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
             if (input.fields.includes("supplyPrice")) {
                 const supply = await allowed(context, "supply-price.write", input.spuId);
                 if (!supply.ok)
@@ -470,6 +477,8 @@ export const createSkuService = (options) => {
             const authorization = await allowed(context, "inventory.write", input.spuId);
             if (!authorization.ok)
                 return authorization;
+            if (!validCommandId(input.commandId))
+                return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
             const resolvedAuthority = await inventoryAuthorityFor(context, scopeKey);
             if (!resolvedAuthority.ok)
                 return resolvedAuthority;
@@ -506,6 +515,8 @@ export const createSkuService = (options) => {
             const authorization = await allowed(context, "inventory.write", input.spuId);
             if (!authorization.ok)
                 return authorization;
+            if (!validCommandId(input.commandId))
+                return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
             if (!Number.isInteger(input.quantity) || input.quantity < 0)
                 return fail("VALIDATION_FAILED", "库存必须是非负整数");
             const resolved = await inventoryAuthorityFor(context, scopeKey);

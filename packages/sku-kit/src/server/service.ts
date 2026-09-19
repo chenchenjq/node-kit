@@ -17,6 +17,7 @@ export interface CreateSkuServiceOptions<RequestContext> {
 const problem = (code: SkuProblem["code"], message: string, retryable = false): SkuProblem => ({ code, message, retryable });
 const fail = <T>(code: SkuProblem["code"], message: string): Result<T> => ({ ok: false, problem: problem(code, message) });
 const fingerprint = (value: unknown): string => JSON.stringify(value);
+const validCommandId = (commandId: string): boolean => commandId.trim().length > 0 && commandId.length <= 128;
 const compareDecimal = (left: string, right: string): number => {
   const [leftInteger = "", leftFraction = ""] = left.split(".");
   const [rightInteger = "", rightFraction = ""] = right.split(".");
@@ -149,6 +150,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail("SCOPE_MISMATCH", "可信作用域不能为空");
       const authorization = await allowed(context, "structure.write", input.spuId);
       if (!authorization.ok) return authorization;
+      if (!validCommandId(input.commandId)) return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
       const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
       if (!inventoryAuthority.ok) return inventoryAuthority;
       const code = validateRegisteredSpuCode(input.spuCode);
@@ -243,6 +245,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail<readonly SkuConfigurationDto[]>("SCOPE_MISMATCH", "可信作用域不能为空");
       const configurationAuthorization = await allowed(context, "configuration.write", input.spuId);
       if (!configurationAuthorization.ok) return configurationAuthorization;
+      if (!validCommandId(input.commandId)) return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
       const inventoryAuthority = await inventoryAuthorityFor(context, scopeKey);
       if (!inventoryAuthority.ok) return inventoryAuthority;
       if (input.patches.some((patch) => patch.supplyPrice !== undefined)) {
@@ -296,6 +299,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail<readonly SkuConfigurationDto[]>("SCOPE_MISMATCH", "可信作用域不能为空");
       const configuration = await allowed(context, "configuration.write", input.spuId);
       if (!configuration.ok) return configuration;
+      if (!validCommandId(input.commandId)) return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
       if (input.fields.includes("supplyPrice")) { const supply = await allowed(context, "supply-price.write", input.spuId); if (!supply.ok) return supply; }
       if (input.fields.length === 0 || input.targetSkuIds.length === 0 || new Set(input.targetSkuIds).size !== input.targetSkuIds.length) return fail("VALIDATION_FAILED", "复制必须指定不重复的字段和目标 SKU");
       const authority = await inventoryAuthorityFor(context, scopeKey); if (!authority.ok) return authority;
@@ -406,6 +410,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail<InventoryDto>("SCOPE_MISMATCH", "可信作用域不能为空");
       const authorization = await allowed(context, "inventory.write", input.spuId);
       if (!authorization.ok) return authorization;
+      if (!validCommandId(input.commandId)) return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
       const resolvedAuthority = await inventoryAuthorityFor(context, scopeKey);
       if (!resolvedAuthority.ok) return resolvedAuthority;
       const authority = resolvedAuthority.value;
@@ -434,6 +439,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (scopeKey === null) return fail<InventoryDto>("SCOPE_MISMATCH", "可信作用域不能为空");
       const authorization = await allowed(context, "inventory.write", input.spuId);
       if (!authorization.ok) return authorization;
+      if (!validCommandId(input.commandId)) return fail("VALIDATION_FAILED", "commandId 必须是 1 至 128 个非空白字符");
       if (!Number.isInteger(input.quantity) || input.quantity < 0) return fail("VALIDATION_FAILED", "库存必须是非负整数");
       const resolved = await inventoryAuthorityFor(context, scopeKey);
       if (!resolved.ok) return resolved;
