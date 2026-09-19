@@ -1,5 +1,5 @@
 import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
-import type { Result, SkuProblem } from "../types.js";
+import type { Result, SkuProblem, SkuWarning } from "../types.js";
 import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, CopySkuConfigurationInput, HistoricalConfiguration, InventoryAuthority, InventoryDto, InventoryReadDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
 
 export interface CreateSkuServiceOptions<RequestContext> {
@@ -22,6 +22,9 @@ const compareDecimal = (left: string, right: string): number => {
   const integer = (leftInteger.length - rightInteger.length) || leftInteger.localeCompare(rightInteger);
   return integer || leftFraction.padEnd(18, "0").localeCompare(rightFraction.padEnd(18, "0"));
 };
+const priceWarnings = (skus: readonly { supplyPrice: string | null; suggestedRetailPrice: string | null }[]): readonly SkuWarning[] =>
+  skus.some((sku) => sku.supplyPrice !== null && sku.suggestedRetailPrice !== null && compareDecimal(sku.supplyPrice, sku.suggestedRetailPrice) > 0)
+    ? [{ code: "SUPPLY_PRICE_ABOVE_RETAIL", message: "供应价高于建议零售价" }] : [];
 
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -252,8 +255,9 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
         const document = clone(existing);
         const receipt = document.commands.find((candidate) => candidate.commandId === input.commandId);
         if (receipt !== undefined) {
+          const replay = clone(receipt.result) as readonly SkuConfigurationDto[];
           return { document, result: receipt.fingerprint === requestFingerprint
-            ? { ok: true, value: clone(receipt.result) as readonly SkuConfigurationDto[] }
+            ? { ok: true, value: replay, ...(priceWarnings(replay).length === 0 ? {} : { warnings: priceWarnings(replay) }) }
             : fail<readonly SkuConfigurationDto[]>("IDEMPOTENCY_CONFLICT", "相同 commandId 使用了不同载荷") };
         }
         const affected: SkuConfigurationDto[] = [];
@@ -280,7 +284,8 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
           affected.push({ currency: "CNY", skuId: sku.id, skuCode: sku.skuCode, status: sku.status, suggestedRetailPrice: sku.suggestedRetailPrice, supplyPrice: sku.supplyPrice, image: sku.image, configVersion: sku.configVersion.toString() });
         }
         document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(affected) });
-        return { document, result: { ok: true, value: affected } };
+        const warnings = priceWarnings(affected);
+        return { document, result: { ok: true, value: affected, ...(warnings.length === 0 ? {} : { warnings }) } };
       });
     },
 
