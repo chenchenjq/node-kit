@@ -353,6 +353,14 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (!authorization.ok) return authorization;
       const document = await options.store.read(scopeKey, input.spuId);
       if (document === null) return fail("NOT_FOUND", "未找到 SKU 配置");
+      const valueOwners = new Map<string, string>();
+      for (const dimension of document.dimensions) if (!dimension.archived) for (const value of dimension.values) if (!value.archived) valueOwners.set(value.id, dimension.id);
+      const chosenDimensions = new Set<string>();
+      for (const valueId of input.selectedValueIds) {
+        const dimensionId = valueOwners.get(valueId);
+        if (dimensionId === undefined || chosenDimensions.has(dimensionId)) return fail<ConsumerSelectionDto>("VALIDATION_FAILED", "每个规格维度只能选择一个有效规格值");
+        chosenDimensions.add(dimensionId);
+      }
       const active = document.skus.filter((sku) => !sku.archived && sku.status === "enabled");
       const projections = new Map((await (options.projectConsumer?.(active) ?? Promise.resolve(active.map((sku) => ({ skuId: sku.id, visible: true, selectable: true, salePrice: null, availability: "unknown" }))))).map((entry) => [entry.skuId, entry]));
       const visible = active.filter((sku) => projections.get(sku.id)?.visible === true);
