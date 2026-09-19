@@ -448,12 +448,14 @@ export const createSkuService = (options) => {
             const authority = await inventoryAuthorityFor(context, scopeKey, false);
             if (!authority.ok)
                 return authority;
+            const document = await options.store.read(scopeKey, input.spuId);
+            if (document === null || !document.skus.some((sku) => sku.id === input.skuId && !sku.archived))
+                return fail("NOT_FOUND", "未找到可读取的 SKU 库存");
             if (authority.value.kind !== "local-read-write") {
                 return options.readExternalInventory === undefined
                     ? { ok: true, value: { state: "unknown", skuId: input.skuId, reason: "外部库存适配器不可用" } }
                     : options.readExternalInventory(context, { scopeKey, spuId: input.spuId, skuId: input.skuId, authority: authority.value });
             }
-            const document = await options.store.read(scopeKey, input.spuId);
             const inventory = document?.inventories[input.skuId];
             if (document === null || inventory === undefined || !document.skus.some((sku) => sku.id === input.skuId && !sku.archived))
                 return fail("NOT_FOUND", "未找到可读取的 SKU 库存");
