@@ -6,14 +6,26 @@ const clone = <T>(value: T): T => structuredClone(value);
 export const createInMemorySkuStore = (): SkuStore & { commandCount(): number } => {
   const documents = new Map<string, ProductDocument>();
   const authorities = new Map<string, InventoryAuthority>();
+  const tails = new Map<string, Promise<void>>();
   const keyFor = (scopeKey: string, spuId: string) => `${scopeKey}\u0000${spuId}`;
   return {
     async transact(scopeKey, spuId, callback) {
       const key = keyFor(scopeKey, spuId);
-      const current = documents.get(key);
-      const outcome = await callback(current === undefined ? null : clone(current));
-      if (outcome.document !== undefined) documents.set(key, clone(outcome.document));
-      return outcome.result;
+      const previous = tails.get(key) ?? Promise.resolve();
+      let release!: () => void;
+      const next = new Promise<void>((resolve) => { release = resolve; });
+      const queued = previous.then(() => next);
+      tails.set(key, queued);
+      await previous;
+      try {
+        const current = documents.get(key);
+        const outcome = await callback(current === undefined ? null : clone(current));
+        if (outcome.document !== undefined) documents.set(key, clone(outcome.document));
+        return outcome.result;
+      } finally {
+        release();
+        if (tails.get(key) === queued) tails.delete(key);
+      }
     },
     async read(scopeKey, spuId) {
       const current = documents.get(keyFor(scopeKey, spuId));
