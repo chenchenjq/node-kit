@@ -334,8 +334,8 @@ export const createSkuService = (options) => {
                 if (!supply.ok)
                     return supply;
             }
-            if (input.fields.length === 0 || input.targetSkuIds.length === 0)
-                return fail("VALIDATION_FAILED", "复制必须指定字段和目标 SKU");
+            if (input.fields.length === 0 || input.targetSkuIds.length === 0 || new Set(input.targetSkuIds).size !== input.targetSkuIds.length)
+                return fail("VALIDATION_FAILED", "复制必须指定不重复的字段和目标 SKU");
             const authority = await inventoryAuthorityFor(context, scopeKey);
             if (!authority.ok)
                 return authority;
