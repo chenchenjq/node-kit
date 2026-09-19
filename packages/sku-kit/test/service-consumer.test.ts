@@ -26,6 +26,7 @@ describe("consumer selection projection", () => {
     await service.patchSkuConfigurations({}, {
       spuId: "shirt", commandId: "enable", patches: created.value.skus.map((sku) => ({ skuId: sku.skuId, expectedConfigVersion: "1", status: "enabled" })),
     });
+    await service.patchSkuConfigurations({}, { spuId: "shirt", commandId: "image", patches: [{ skuId: "sku-red", expectedConfigVersion: "2", image: { adapter: "oss", value: "sku-red" } }] });
 
     const partial = await service.getConsumerSelection({}, { spuId: "shirt", selectedValueIds: [] });
     const complete = await service.getConsumerSelection({}, { spuId: "shirt", selectedValueIds: ["v-red"], spuImage: { adapter: "oss", value: "spu" } });
@@ -35,6 +36,6 @@ describe("consumer selection projection", () => {
       expect.objectContaining({ valueId: "v-red", state: "selectable" }),
       expect.objectContaining({ valueId: "v-blue", state: "out-of-stock" }),
     ]);
-    expect(complete).toMatchObject({ ok: true, value: { selectedSku: { skuId: "sku-red", salePrice: "19.90" }, image: { adapter: "oss", value: "spu" } } });
+    expect(complete).toMatchObject({ ok: true, value: { selectedSku: { skuId: "sku-red", salePrice: "19.90" }, image: { adapter: "oss", value: "sku-red" } } });
   });
 });
