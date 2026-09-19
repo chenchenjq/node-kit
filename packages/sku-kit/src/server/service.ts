@@ -1,6 +1,6 @@
 import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
 import type { Result, SkuProblem } from "../types.js";
-import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, HistoricalConfiguration, InventoryAuthority, InventoryDto, InventoryReadDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
+import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, CopySkuConfigurationInput, HistoricalConfiguration, InventoryAuthority, InventoryDto, InventoryReadDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
 
 export interface CreateSkuServiceOptions<RequestContext> {
   store: SkuStore;
@@ -281,6 +281,38 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
         }
         document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(affected) });
         return { document, result: { ok: true, value: affected } };
+      });
+    },
+
+    async copySkuConfiguration(context, input: CopySkuConfigurationInput) {
+      const scopeKey = await scopeFor(context);
+      if (scopeKey === null) return fail<readonly SkuConfigurationDto[]>("SCOPE_MISMATCH", "可信作用域不能为空");
+      const configuration = await allowed(context, "configuration.write", input.spuId);
+      if (!configuration.ok) return configuration;
+      if (input.fields.includes("supplyPrice")) { const supply = await allowed(context, "supply-price.write", input.spuId); if (!supply.ok) return supply; }
+      if (input.fields.length === 0 || input.targetSkuIds.length === 0) return fail("VALIDATION_FAILED", "复制必须指定字段和目标 SKU");
+      const authority = await inventoryAuthorityFor(context, scopeKey); if (!authority.ok) return authority;
+      const requestFingerprint = fingerprint(input);
+      return options.store.transact(scopeKey, input.spuId, (existing) => {
+        if (existing === null) return { result: fail<readonly SkuConfigurationDto[]>("NOT_FOUND", "未找到 SKU 配置") };
+        const document = clone(existing); const receipt = document.commands.find((item) => item.commandId === input.commandId);
+        if (receipt !== undefined) return { document, result: receipt.fingerprint === requestFingerprint ? { ok: true, value: clone(receipt.result) as readonly SkuConfigurationDto[] } : fail<readonly SkuConfigurationDto[]>("IDEMPOTENCY_CONFLICT", "相同 commandId 使用了不同载荷") };
+        const source = document.skus.find((sku) => sku.id === input.sourceSkuId && !sku.archived);
+        if (source === undefined) return { document, result: fail<readonly SkuConfigurationDto[]>("NOT_FOUND", "未找到来源 SKU") };
+        const targets = input.targetSkuIds.map((id) => document.skus.find((sku) => sku.id === id && !sku.archived));
+        if (targets.some((target) => target === undefined) || input.targetSkuIds.includes(source.id)) return { document, result: fail<readonly SkuConfigurationDto[]>("VALIDATION_FAILED", "复制目标必须是其他有效 SKU") };
+        const copied: SkuConfigurationDto[] = [];
+        for (const target of targets as PersistedSku[]) {
+          for (const field of input.fields) {
+            if (field === "suggestedRetailPrice" && (input.mode === "overwrite" || target.suggestedRetailPrice === null)) target.suggestedRetailPrice = source.suggestedRetailPrice;
+            if (field === "supplyPrice" && (input.mode === "overwrite" || target.supplyPrice === null)) target.supplyPrice = source.supplyPrice;
+            if (field === "image" && (input.mode === "overwrite" || target.image === null)) target.image = source.image;
+          }
+          target.configVersion += 1n;
+          copied.push({ currency: "CNY", skuId: target.id, skuCode: target.skuCode, status: target.status, suggestedRetailPrice: target.suggestedRetailPrice, supplyPrice: target.supplyPrice, image: target.image, configVersion: target.configVersion.toString() });
+        }
+        document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(copied) });
+        return { document, result: { ok: true, value: copied } };
       });
     },
 

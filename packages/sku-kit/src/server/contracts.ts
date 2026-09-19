@@ -191,6 +191,15 @@ export interface PatchSkuConfigurationsInput {
   patches: readonly SkuConfigurationPatch[];
 }
 
+export interface CopySkuConfigurationInput {
+  spuId: string;
+  commandId: string;
+  sourceSkuId: string;
+  targetSkuIds: readonly string[];
+  fields: readonly ("suggestedRetailPrice" | "supplyPrice" | "image")[];
+  mode: "empty-only" | "overwrite";
+}
+
 export interface SkuConfigurationDto {
   currency: "CNY";
   skuId: string;
@@ -231,6 +240,7 @@ export interface SkuService<RequestContext> {
   previewConfiguration(context: RequestContext, input: Omit<SaveConfigurationInput, "commandId" | "expectedStructureVersion" | "restoreArchivedSkuIds">): Promise<Result<ConfigurationPreview>>;
   saveConfiguration(context: RequestContext, input: SaveConfigurationInput): Promise<Result<SavedConfiguration>>;
   patchSkuConfigurations(context: RequestContext, input: PatchSkuConfigurationsInput): Promise<Result<readonly SkuConfigurationDto[]>>;
+  copySkuConfiguration(context: RequestContext, input: CopySkuConfigurationInput): Promise<Result<readonly SkuConfigurationDto[]>>;
   getManagementConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<ManagementConfiguration>>;
   getHistoricalConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<HistoricalConfiguration>>;
   getConsumerSelection(context: RequestContext, input: ConsumerSelectionInput): Promise<Result<ConsumerSelectionDto>>;
