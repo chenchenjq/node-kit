@@ -10,6 +10,7 @@ export interface CreateSkuServiceOptions<RequestContext> {
   resolveInventoryAuthority?(context: RequestContext, scopeKey: string): Promise<InventoryAuthority>;
   approveModeChange?(context: RequestContext, change: { spuId: string; from: "default" | "multi"; to: "default" | "multi"; document: ProductDocument }): Promise<Result<true>>;
   readExternalInventory?(context: RequestContext, request: { scopeKey: string; spuId: string; skuId: string; authority: InventoryAuthority }): Promise<Result<InventoryReadDto>>;
+  setExternalInventory?(context: RequestContext, request: SetLocalInventoryInput & { scopeKey: string; authority: InventoryAuthority }): Promise<Result<InventoryDto>>;
   createId?: () => string;
 }
 
@@ -416,6 +417,20 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
         document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(result) });
         return { document, result: { ok: true, value: result } };
       });
+    },
+
+    async setExternalInventory(context, input: SetLocalInventoryInput) {
+      const scopeKey = await scopeFor(context);
+      if (scopeKey === null) return fail<InventoryDto>("SCOPE_MISMATCH", "可信作用域不能为空");
+      const authorization = await allowed(context, "inventory.write", input.spuId);
+      if (!authorization.ok) return authorization;
+      if (!Number.isInteger(input.quantity) || input.quantity < 0) return fail("VALIDATION_FAILED", "库存必须是非负整数");
+      const resolved = await inventoryAuthorityFor(context, scopeKey);
+      if (!resolved.ok) return resolved;
+      if (resolved.value.kind === "external-read-only") return fail("INVENTORY_READ_ONLY", "外部库存权威为只读");
+      if (resolved.value.kind !== "external-read-write") return fail("VALIDATION_FAILED", "当前作用域不由外部库存权威管理");
+      if (options.setExternalInventory === undefined) return fail("ADAPTER_FAILURE", "外部库存写入适配器不可用");
+      return options.setExternalInventory(context, { ...input, scopeKey, authority: resolved.value });
     },
   };
 };

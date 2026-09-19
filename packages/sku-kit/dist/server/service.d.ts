@@ -1,5 +1,5 @@
 import type { Result } from "../types.js";
-import type { AuthorizationResult, ConsumerProjection, InventoryAuthority, InventoryReadDto, PersistedSku, ProductDocument, SkuAction, SkuService, SkuStore } from "./contracts.js";
+import type { AuthorizationResult, ConsumerProjection, InventoryAuthority, InventoryDto, InventoryReadDto, PersistedSku, ProductDocument, SetLocalInventoryInput, SkuAction, SkuService, SkuStore } from "./contracts.js";
 export interface CreateSkuServiceOptions<RequestContext> {
     store: SkuStore;
     resolveScope(context: RequestContext): Promise<string>;
@@ -20,6 +20,10 @@ export interface CreateSkuServiceOptions<RequestContext> {
         skuId: string;
         authority: InventoryAuthority;
     }): Promise<Result<InventoryReadDto>>;
+    setExternalInventory?(context: RequestContext, request: SetLocalInventoryInput & {
+        scopeKey: string;
+        authority: InventoryAuthority;
+    }): Promise<Result<InventoryDto>>;
     createId?: () => string;
 }
 export declare const createSkuService: <RequestContext>(options: CreateSkuServiceOptions<RequestContext>) => SkuService<RequestContext>;

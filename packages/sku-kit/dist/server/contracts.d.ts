@@ -243,4 +243,5 @@ export interface SkuService<RequestContext> {
         skuId: string;
     }): Promise<Result<InventoryReadDto>>;
     setLocalInventory(context: RequestContext, input: SetLocalInventoryInput): Promise<Result<InventoryDto>>;
+    setExternalInventory(context: RequestContext, input: SetLocalInventoryInput): Promise<Result<InventoryDto>>;
 }

@@ -246,4 +246,5 @@ export interface SkuService<RequestContext> {
   getConsumerSelection(context: RequestContext, input: ConsumerSelectionInput): Promise<Result<ConsumerSelectionDto>>;
   getInventory(context: RequestContext, input: SpuRefInput & { skuId: string }): Promise<Result<InventoryReadDto>>;
   setLocalInventory(context: RequestContext, input: SetLocalInventoryInput): Promise<Result<InventoryDto>>;
+  setExternalInventory(context: RequestContext, input: SetLocalInventoryInput): Promise<Result<InventoryDto>>;
 }
