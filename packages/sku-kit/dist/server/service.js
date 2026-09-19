@@ -8,6 +8,8 @@ const compareDecimal = (left, right) => {
     const integer = (leftInteger.length - rightInteger.length) || leftInteger.localeCompare(rightInteger);
     return integer || leftFraction.padEnd(18, "0").localeCompare(rightFraction.padEnd(18, "0"));
 };
+const priceWarnings = (skus) => skus.some((sku) => sku.supplyPrice !== null && sku.suggestedRetailPrice !== null && compareDecimal(sku.supplyPrice, sku.suggestedRetailPrice) > 0)
+    ? [{ code: "SUPPLY_PRICE_ABOVE_RETAIL", message: "供应价高于建议零售价" }] : [];
 const clone = (value) => structuredClone(value);
 const createDocument = (scopeKey, input) => ({
     scopeKey,
@@ -274,8 +276,9 @@ export const createSkuService = (options) => {
                 const document = clone(existing);
                 const receipt = document.commands.find((candidate) => candidate.commandId === input.commandId);
                 if (receipt !== undefined) {
+                    const replay = clone(receipt.result);
                     return { document, result: receipt.fingerprint === requestFingerprint
-                            ? { ok: true, value: clone(receipt.result) }
+                            ? { ok: true, value: replay, ...(priceWarnings(replay).length === 0 ? {} : { warnings: priceWarnings(replay) }) }
                             : fail("IDEMPOTENCY_CONFLICT", "相同 commandId 使用了不同载荷") };
                 }
                 const affected = [];
@@ -313,7 +316,8 @@ export const createSkuService = (options) => {
                     affected.push({ currency: "CNY", skuId: sku.id, skuCode: sku.skuCode, status: sku.status, suggestedRetailPrice: sku.suggestedRetailPrice, supplyPrice: sku.supplyPrice, image: sku.image, configVersion: sku.configVersion.toString() });
                 }
                 document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(affected) });
-                return { document, result: { ok: true, value: affected } };
+                const warnings = priceWarnings(affected);
+                return { document, result: { ok: true, value: affected, ...(warnings.length === 0 ? {} : { warnings }) } };
             });
         },
         async copySkuConfiguration(context, input) {

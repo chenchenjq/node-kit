@@ -2,15 +2,29 @@ const clone = (value) => structuredClone(value);
 export const createInMemorySkuStore = () => {
     const documents = new Map();
     const authorities = new Map();
+    const tails = new Map();
     const keyFor = (scopeKey, spuId) => `${scopeKey}\u0000${spuId}`;
     return {
         async transact(scopeKey, spuId, callback) {
             const key = keyFor(scopeKey, spuId);
-            const current = documents.get(key);
-            const outcome = await callback(current === undefined ? null : clone(current));
-            if (outcome.document !== undefined)
-                documents.set(key, clone(outcome.document));
-            return outcome.result;
+            const previous = tails.get(key) ?? Promise.resolve();
+            let release;
+            const next = new Promise((resolve) => { release = resolve; });
+            const queued = previous.then(() => next);
+            tails.set(key, queued);
+            await previous;
+            try {
+                const current = documents.get(key);
+                const outcome = await callback(current === undefined ? null : clone(current));
+                if (outcome.document !== undefined)
+                    documents.set(key, clone(outcome.document));
+                return outcome.result;
+            }
+            finally {
+                release();
+                if (tails.get(key) === queued)
+                    tails.delete(key);
+            }
         },
         async read(scopeKey, spuId) {
             const current = documents.get(keyFor(scopeKey, spuId));
