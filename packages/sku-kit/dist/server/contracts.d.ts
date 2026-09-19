@@ -136,6 +136,7 @@ export interface SkuStore {
         result: T;
     }): Promise<T>;
     read(scopeKey: string, spuId: string): Promise<ProductDocument | null>;
+    findByRegisteredSpuCode?(scopeKey: string, registeredSpuCode: string): Promise<ProductDocument | null>;
     ensureInventoryAuthority?(scopeKey: string, authority: InventoryAuthority): Promise<Result<InventoryAuthority>>;
 }
 export interface SavedSku {

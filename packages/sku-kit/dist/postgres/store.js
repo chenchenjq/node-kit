@@ -110,6 +110,16 @@ export const createPostgresSkuStore = (pool, options = {}) => {
                 client.release();
             }
         },
+        async findByRegisteredSpuCode(scopeKey, registeredSpuCode) {
+            const client = await pool.connect();
+            try {
+                const row = await client.query(`SELECT scope_key, spu_id FROM ${tableNames(schemaName).product} WHERE scope_key = $1 AND registered_spu_code = $2`, [scopeKey, registeredSpuCode]);
+                return row.rows[0] === undefined ? null : readDocument(client, schemaName, scopeKey, row.rows[0].spu_id);
+            }
+            finally {
+                client.release();
+            }
+        },
         async ensureInventoryAuthority(scopeKey, authority) {
             const client = await pool.connect();
             const t = tableNames(schemaName);
@@ -143,6 +153,10 @@ export const createPostgresSkuStoreForTransaction = (client, options = {}) => {
             return outcome.result;
         },
         async read(scopeKey, spuId) { return readDocument(client, schemaName, scopeKey, spuId); },
+        async findByRegisteredSpuCode(scopeKey, registeredSpuCode) {
+            const row = await client.query(`SELECT scope_key, spu_id FROM ${tableNames(schemaName).product} WHERE scope_key = $1 AND registered_spu_code = $2`, [scopeKey, registeredSpuCode]);
+            return row.rows[0] === undefined ? null : readDocument(client, schemaName, scopeKey, row.rows[0].spu_id);
+        },
         async ensureInventoryAuthority(scopeKey, authority) {
             const t = tableNames(schemaName);
             const result = await client.query(`INSERT INTO ${t.scope} (scope_key, inventory_authority_kind, authority_key) VALUES ($1,$2,$3) ON CONFLICT (scope_key) DO UPDATE SET version = ${t.scope}.version WHERE ${t.scope}.inventory_authority_kind = EXCLUDED.inventory_authority_kind AND ${t.scope}.authority_key = EXCLUDED.authority_key RETURNING inventory_authority_kind`, [scopeKey, authority.kind, authority.authorityKey]);

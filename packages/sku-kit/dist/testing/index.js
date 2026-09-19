@@ -30,6 +30,10 @@ export const createInMemorySkuStore = () => {
             const current = documents.get(keyFor(scopeKey, spuId));
             return current === undefined ? null : clone(current);
         },
+        async findByRegisteredSpuCode(scopeKey, registeredSpuCode) {
+            const document = [...documents.values()].find((candidate) => candidate.scopeKey === scopeKey && candidate.registeredSpuCode === registeredSpuCode);
+            return document === undefined ? null : clone(document);
+        },
         async ensureInventoryAuthority(scopeKey, authority) {
             const existing = authorities.get(scopeKey);
             if (existing !== undefined && (existing.kind !== authority.kind || existing.authorityKey !== authority.authorityKey))

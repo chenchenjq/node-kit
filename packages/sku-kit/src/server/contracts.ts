@@ -143,6 +143,7 @@ export interface ConfigurationPreview {
 export interface SkuStore {
   transact<T>(scopeKey: string, spuId: string, callback: (current: ProductDocument | null) => Promise<{ document?: ProductDocument; result: T }> | { document?: ProductDocument; result: T }): Promise<T>;
   read(scopeKey: string, spuId: string): Promise<ProductDocument | null>;
+  findByRegisteredSpuCode?(scopeKey: string, registeredSpuCode: string): Promise<ProductDocument | null>;
   ensureInventoryAuthority?(scopeKey: string, authority: InventoryAuthority): Promise<Result<InventoryAuthority>>;
 }
 

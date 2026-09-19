@@ -157,6 +157,9 @@ export const createSkuService = (options) => {
             const code = validateRegisteredSpuCode(input.spuCode);
             if (!code.ok)
                 return code;
+            const existingCode = await options.store.findByRegisteredSpuCode?.(scopeKey, code.value);
+            if (existingCode !== undefined && existingCode !== null && existingCode.spuId !== input.spuId)
+                return fail("SPU_CODE_CONFLICT", "同一作用域内 SPU 编码必须唯一");
             const invalid = validateStructure(input);
             if (invalid !== null)
                 return { ok: false, problem: invalid };
