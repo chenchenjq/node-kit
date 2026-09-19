@@ -1,6 +1,6 @@
 import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
 import type { Result, SkuProblem } from "../types.js";
-import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, InventoryAuthority, InventoryDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
+import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, HistoricalConfiguration, InventoryAuthority, InventoryDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
 
 export interface CreateSkuServiceOptions<RequestContext> {
   store: SkuStore;
@@ -264,7 +264,21 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (!authorization.ok) return authorization;
       const document = await options.store.read(scopeKey, input.spuId);
       if (document === null) return fail("NOT_FOUND", "未找到 SKU 配置");
-      return { ok: true, value: { currency: "CNY", spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, structureVersion: document.structureVersion.toString(), dimensions: clone(document.dimensions), skus: clone(document.skus) } };
+      const supply = await allowed(context, "supply-price.read", input.spuId);
+      const skus = supply.ok ? clone(document.skus) : document.skus.map(({ supplyPrice: _supplyPrice, ...sku }) => clone(sku));
+      return { ok: true, value: { currency: "CNY", spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, structureVersion: document.structureVersion.toString(), dimensions: clone(document.dimensions), skus } };
+    },
+
+    async getHistoricalConfiguration(context, input: SpuRefInput) {
+      const scopeKey = await scopeFor(context);
+      if (scopeKey === null) return fail<HistoricalConfiguration>("SCOPE_MISMATCH", "可信作用域不能为空");
+      const authorization = await allowed(context, "history.read", input.spuId);
+      if (!authorization.ok) return authorization;
+      const document = await options.store.read(scopeKey, input.spuId);
+      if (document === null) return fail("NOT_FOUND", "未找到 SKU 配置");
+      const supply = await allowed(context, "supply-price.read", input.spuId);
+      const archivedSkus = supply.ok ? clone(document.skus.filter((sku) => sku.archived)) : document.skus.filter((sku) => sku.archived).map(({ supplyPrice: _supplyPrice, ...sku }) => clone({ ...sku, supplyPrice: null }));
+      return { ok: true, value: { currency: "CNY", spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, archivedSkus } };
     },
 
     async getConsumerSelection(context, input: ConsumerSelectionInput) {

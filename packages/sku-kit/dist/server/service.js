@@ -1,4 +1,4 @@
-import { buildCombinationKey, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
+import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
 const problem = (code, message, retryable = false) => ({ code, message, retryable });
 const fail = (code, message) => ({ ok: false, problem: problem(code, message) });
 const fingerprint = (value) => JSON.stringify(value);
@@ -33,6 +33,8 @@ const validateStructure = (input) => {
             values.add(normalizedValue);
         }
     }
+    if (!calculatePotentialCombinations(input.dimensions.map((dimension) => dimension.values.length)).ok)
+        return problem("VALIDATION_FAILED", "规格值的潜在组合不能超过一百个");
     if (input.selectedCombinations.length > MAX_COMBINATIONS)
         return problem("VALIDATION_FAILED", "实际销售组合不能超过一百个");
     if (input.dimensions.length === 0 && input.selectedCombinations.length !== 0)
@@ -279,7 +281,7 @@ export const createSkuService = (options) => {
                     if (patch.status !== undefined)
                         sku.status = patch.status;
                     sku.configVersion += 1n;
-                    affected.push({ skuId: sku.id, skuCode: sku.skuCode, status: sku.status, suggestedRetailPrice: sku.suggestedRetailPrice, supplyPrice: sku.supplyPrice, image: sku.image, configVersion: sku.configVersion.toString() });
+                    affected.push({ currency: "CNY", skuId: sku.id, skuCode: sku.skuCode, status: sku.status, suggestedRetailPrice: sku.suggestedRetailPrice, supplyPrice: sku.supplyPrice, image: sku.image, configVersion: sku.configVersion.toString() });
                 }
                 document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(affected) });
                 return { document, result: { ok: true, value: affected } };
@@ -295,7 +297,23 @@ export const createSkuService = (options) => {
             const document = await options.store.read(scopeKey, input.spuId);
             if (document === null)
                 return fail("NOT_FOUND", "未找到 SKU 配置");
-            return { ok: true, value: { spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, structureVersion: document.structureVersion.toString(), dimensions: clone(document.dimensions), skus: clone(document.skus) } };
+            const supply = await allowed(context, "supply-price.read", input.spuId);
+            const skus = supply.ok ? clone(document.skus) : document.skus.map(({ supplyPrice: _supplyPrice, ...sku }) => clone(sku));
+            return { ok: true, value: { currency: "CNY", spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, structureVersion: document.structureVersion.toString(), dimensions: clone(document.dimensions), skus } };
+        },
+        async getHistoricalConfiguration(context, input) {
+            const scopeKey = await scopeFor(context);
+            if (scopeKey === null)
+                return fail("SCOPE_MISMATCH", "可信作用域不能为空");
+            const authorization = await allowed(context, "history.read", input.spuId);
+            if (!authorization.ok)
+                return authorization;
+            const document = await options.store.read(scopeKey, input.spuId);
+            if (document === null)
+                return fail("NOT_FOUND", "未找到 SKU 配置");
+            const supply = await allowed(context, "supply-price.read", input.spuId);
+            const archivedSkus = supply.ok ? clone(document.skus.filter((sku) => sku.archived)) : document.skus.filter((sku) => sku.archived).map(({ supplyPrice: _supplyPrice, ...sku }) => clone({ ...sku, supplyPrice: null }));
+            return { ok: true, value: { currency: "CNY", spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, archivedSkus } };
         },
         async getConsumerSelection(context, input) {
             const scopeKey = await scopeFor(context);
@@ -323,7 +341,7 @@ export const createSkuService = (options) => {
                 }) }));
             const resolved = exact.length === 1 ? exact[0] : undefined;
             const selectedProjection = resolved === undefined ? undefined : projections.get(resolved.id);
-            return { ok: true, value: { dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, priceRange: range } };
+            return { ok: true, value: { currency: "CNY", dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, priceRange: range } };
         },
         async setLocalInventory(context, input) {
             const scopeKey = await scopeFor(context);

@@ -139,11 +139,21 @@ export interface SavedConfiguration {
     draftKeyMappings: Readonly<Record<string, string>>;
 }
 export interface ManagementConfiguration {
+    currency: "CNY";
     spuId: string;
     registeredSpuCode: string;
     structureVersion: string;
     dimensions: readonly PersistedDimension[];
-    skus: readonly PersistedSku[];
+    /** Supply price is omitted unless the caller has supply-price.read. */
+    skus: readonly (Omit<PersistedSku, "supplyPrice"> & {
+        supplyPrice?: string | null;
+    })[];
+}
+export interface HistoricalConfiguration {
+    currency: "CNY";
+    spuId: string;
+    registeredSpuCode: string;
+    archivedSkus: readonly PersistedSku[];
 }
 export interface SkuConfigurationPatch {
     skuId: string;
@@ -159,6 +169,7 @@ export interface PatchSkuConfigurationsInput {
     patches: readonly SkuConfigurationPatch[];
 }
 export interface SkuConfigurationDto {
+    currency: "CNY";
     skuId: string;
     skuCode: string;
     status: "disabled" | "enabled" | "archived";
@@ -183,6 +194,7 @@ export interface ConsumerOption {
     state: "selected" | "selectable" | "out-of-stock" | "unavailable" | "impossible";
 }
 export interface ConsumerSelectionDto {
+    currency: "CNY";
     dimensions: readonly {
         dimensionId: string;
         label: string;
@@ -205,6 +217,7 @@ export interface SkuService<RequestContext> {
     saveConfiguration(context: RequestContext, input: SaveConfigurationInput): Promise<Result<SavedConfiguration>>;
     patchSkuConfigurations(context: RequestContext, input: PatchSkuConfigurationsInput): Promise<Result<readonly SkuConfigurationDto[]>>;
     getManagementConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<ManagementConfiguration>>;
+    getHistoricalConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<HistoricalConfiguration>>;
     getConsumerSelection(context: RequestContext, input: ConsumerSelectionInput): Promise<Result<ConsumerSelectionDto>>;
     setLocalInventory(context: RequestContext, input: SetLocalInventoryInput): Promise<Result<InventoryDto>>;
 }
