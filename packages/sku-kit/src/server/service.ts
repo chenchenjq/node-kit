@@ -16,6 +16,12 @@ export interface CreateSkuServiceOptions<RequestContext> {
 const problem = (code: SkuProblem["code"], message: string, retryable = false): SkuProblem => ({ code, message, retryable });
 const fail = <T>(code: SkuProblem["code"], message: string): Result<T> => ({ ok: false, problem: problem(code, message) });
 const fingerprint = (value: unknown): string => JSON.stringify(value);
+const compareDecimal = (left: string, right: string): number => {
+  const [leftInteger = "", leftFraction = ""] = left.split(".");
+  const [rightInteger = "", rightFraction = ""] = right.split(".");
+  const integer = (leftInteger.length - rightInteger.length) || leftInteger.localeCompare(rightInteger);
+  return integer || leftFraction.padEnd(18, "0").localeCompare(rightFraction.padEnd(18, "0"));
+};
 
 const clone = <T>(value: T): T => structuredClone(value);
 
@@ -315,8 +321,9 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       const selected = new Set(input.selectedValueIds);
       const candidates = visible.filter((sku) => sku.pairs.filter((pair) => selected.has(pair.valueId)).length === selected.size);
       const exact = candidates.filter((sku) => sku.pairs.length === selected.size && projections.get(sku.id)?.selectable === true);
-      const known = visible.map((sku) => projections.get(sku.id)?.salePrice).filter((price): price is string => price !== null && price !== undefined).sort((a, b) => Number(a) - Number(b));
-      const range = known.length === 0 ? { status: "unknown" as const, min: null, max: null } : { status: known.length === visible.length ? "complete" as const : "partial" as const, min: known[0] ?? null, max: known.at(-1) ?? null };
+      const priceCandidates = selected.size === 0 ? visible : candidates;
+      const known = priceCandidates.map((sku) => projections.get(sku.id)?.salePrice).filter((price): price is string => price !== null && price !== undefined).sort(compareDecimal);
+      const range = known.length === 0 ? { status: "unknown" as const, min: null, max: null } : { status: known.length === priceCandidates.length ? "complete" as const : "partial" as const, min: known[0] ?? null, max: known.at(-1) ?? null };
       const dimensions = document.dimensions.filter((dimension) => !dimension.archived).map((dimension) => ({ dimensionId: dimension.id, label: dimension.label, options: dimension.values.filter((value) => !value.archived).map((value) => {
         const valueCandidates = candidates.filter((sku) => sku.pairs.some((pair) => pair.valueId === value.id));
         const projection = valueCandidates.map((sku) => projections.get(sku.id)).find((entry) => entry?.selectable === true);
