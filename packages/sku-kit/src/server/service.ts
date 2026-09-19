@@ -1,4 +1,4 @@
-import { buildCombinationKey, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
+import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
 import type { Result, SkuProblem } from "../types.js";
 import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, InventoryAuthority, InventoryDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
 
@@ -44,6 +44,7 @@ const validateStructure = (input: SaveConfigurationInput): SkuProblem | null => 
       values.add(normalizedValue);
     }
   }
+  if (!calculatePotentialCombinations(input.dimensions.map((dimension) => dimension.values.length)).ok) return problem("VALIDATION_FAILED", "规格值的潜在组合不能超过一百个");
   if (input.selectedCombinations.length > MAX_COMBINATIONS) return problem("VALIDATION_FAILED", "实际销售组合不能超过一百个");
   if (input.dimensions.length === 0 && input.selectedCombinations.length !== 0) return problem("VALIDATION_FAILED", "无规格商品不能提交自定义组合");
   if (input.dimensions.length > 0 && input.selectedCombinations.length === 0) return problem("VALIDATION_FAILED", "多规格商品至少需要一个销售组合");
@@ -249,7 +250,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
           if (patch.image !== undefined) sku.image = patch.image;
           if (patch.status !== undefined) sku.status = patch.status;
           sku.configVersion += 1n;
-          affected.push({ skuId: sku.id, skuCode: sku.skuCode, status: sku.status, suggestedRetailPrice: sku.suggestedRetailPrice, supplyPrice: sku.supplyPrice, image: sku.image, configVersion: sku.configVersion.toString() });
+          affected.push({ currency: "CNY", skuId: sku.id, skuCode: sku.skuCode, status: sku.status, suggestedRetailPrice: sku.suggestedRetailPrice, supplyPrice: sku.supplyPrice, image: sku.image, configVersion: sku.configVersion.toString() });
         }
         document.commands.push({ commandId: input.commandId, fingerprint: requestFingerprint, result: clone(affected) });
         return { document, result: { ok: true, value: affected } };
@@ -263,7 +264,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       if (!authorization.ok) return authorization;
       const document = await options.store.read(scopeKey, input.spuId);
       if (document === null) return fail("NOT_FOUND", "未找到 SKU 配置");
-      return { ok: true, value: { spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, structureVersion: document.structureVersion.toString(), dimensions: clone(document.dimensions), skus: clone(document.skus) } };
+      return { ok: true, value: { currency: "CNY", spuId: document.spuId, registeredSpuCode: document.registeredSpuCode, structureVersion: document.structureVersion.toString(), dimensions: clone(document.dimensions), skus: clone(document.skus) } };
     },
 
     async getConsumerSelection(context, input: ConsumerSelectionInput) {
@@ -289,7 +290,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       }) }));
       const resolved = exact.length === 1 ? exact[0] : undefined;
       const selectedProjection = resolved === undefined ? undefined : projections.get(resolved.id);
-      return { ok: true, value: { dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, priceRange: range } };
+      return { ok: true, value: { currency: "CNY", dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, priceRange: range } };
     },
 
     async setLocalInventory(context, input: SetLocalInventoryInput) {

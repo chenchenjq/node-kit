@@ -155,6 +155,7 @@ export interface SavedConfiguration {
 }
 
 export interface ManagementConfiguration {
+  currency: "CNY";
   spuId: string;
   registeredSpuCode: string;
   structureVersion: string;
@@ -178,6 +179,7 @@ export interface PatchSkuConfigurationsInput {
 }
 
 export interface SkuConfigurationDto {
+  currency: "CNY";
   skuId: string;
   skuCode: string;
   status: "disabled" | "enabled" | "archived";
@@ -206,6 +208,7 @@ export interface ConsumerOption {
 }
 
 export interface ConsumerSelectionDto {
+  currency: "CNY";
   dimensions: readonly { dimensionId: string; label: string; options: readonly ConsumerOption[] }[];
   selectedSku: { skuId: string; skuCode: string; salePrice: string | null; availability: string } | null;
   priceRange: { status: "complete" | "partial" | "unknown"; min: string | null; max: string | null };
