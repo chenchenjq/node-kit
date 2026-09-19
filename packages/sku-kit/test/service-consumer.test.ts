@@ -28,13 +28,13 @@ describe("consumer selection projection", () => {
     });
 
     const partial = await service.getConsumerSelection({}, { spuId: "shirt", selectedValueIds: [] });
-    const complete = await service.getConsumerSelection({}, { spuId: "shirt", selectedValueIds: ["v-red"] });
+    const complete = await service.getConsumerSelection({}, { spuId: "shirt", selectedValueIds: ["v-red"], spuImage: { adapter: "oss", value: "spu" } });
 
     expect(partial).toMatchObject({ ok: true, value: { selectedSku: null, priceRange: { status: "partial", min: "19.90", max: "19.90" } } });
     expect(partial.ok && partial.value.dimensions[0]?.options).toEqual([
       expect.objectContaining({ valueId: "v-red", state: "selectable" }),
       expect.objectContaining({ valueId: "v-blue", state: "out-of-stock" }),
     ]);
-    expect(complete).toMatchObject({ ok: true, value: { selectedSku: { skuId: "sku-red", salePrice: "19.90" } } });
+    expect(complete).toMatchObject({ ok: true, value: { selectedSku: { skuId: "sku-red", salePrice: "19.90" }, image: { adapter: "oss", value: "spu" } } });
   });
 });

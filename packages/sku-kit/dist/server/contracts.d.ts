@@ -206,6 +206,7 @@ export interface ConsumerProjection {
 }
 export interface ConsumerSelectionInput extends SpuRefInput {
     selectedValueIds: readonly string[];
+    spuImage?: SkuImageReference | null;
 }
 export interface ConsumerOption {
     valueId: string;
@@ -225,6 +226,7 @@ export interface ConsumerSelectionDto {
         salePrice: string | null;
         availability: string;
     } | null;
+    image: SkuImageReference | null;
     priceRange: {
         status: "complete" | "partial" | "unknown";
         min: string | null;

@@ -221,6 +221,7 @@ export interface ConsumerProjection {
 
 export interface ConsumerSelectionInput extends SpuRefInput {
   selectedValueIds: readonly string[];
+  spuImage?: SkuImageReference | null;
 }
 
 export interface ConsumerOption {
@@ -233,6 +234,7 @@ export interface ConsumerSelectionDto {
   currency: "CNY";
   dimensions: readonly { dimensionId: string; label: string; options: readonly ConsumerOption[] }[];
   selectedSku: { skuId: string; skuCode: string; salePrice: string | null; availability: string } | null;
+  image: SkuImageReference | null;
   priceRange: { status: "complete" | "partial" | "unknown"; min: string | null; max: string | null };
 }
 

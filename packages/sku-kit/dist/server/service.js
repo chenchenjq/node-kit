@@ -436,7 +436,7 @@ export const createSkuService = (options) => {
                 }) }));
             const resolved = exact.length === 1 ? exact[0] : undefined;
             const selectedProjection = resolved === undefined ? undefined : projections.get(resolved.id);
-            return { ok: true, value: { currency: "CNY", dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, priceRange: range } };
+            return { ok: true, value: { currency: "CNY", dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, image: resolved?.image ?? input.spuImage ?? null, priceRange: range } };
         },
         async getInventory(context, input) {
             const scopeKey = await scopeFor(context);
