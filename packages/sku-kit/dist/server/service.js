@@ -281,6 +281,8 @@ export const createSkuService = (options) => {
                             ? { ok: true, value: replay, ...(priceWarnings(replay).length === 0 ? {} : { warnings: priceWarnings(replay) }) }
                             : fail("IDEMPOTENCY_CONFLICT", "相同 commandId 使用了不同载荷") };
                 }
+                if (input.expectedStructureVersion !== undefined && input.expectedStructureVersion !== document.structureVersion.toString())
+                    return { document, result: fail("VERSION_CONFLICT", "规格结构已被其他编辑修改") };
                 const affected = [];
                 const ids = new Set();
                 for (const patch of input.patches) {

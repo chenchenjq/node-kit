@@ -261,6 +261,7 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
             ? { ok: true, value: replay, ...(priceWarnings(replay).length === 0 ? {} : { warnings: priceWarnings(replay) }) }
             : fail<readonly SkuConfigurationDto[]>("IDEMPOTENCY_CONFLICT", "相同 commandId 使用了不同载荷") };
         }
+        if (input.expectedStructureVersion !== undefined && input.expectedStructureVersion !== document.structureVersion.toString()) return { document, result: fail<readonly SkuConfigurationDto[]>("VERSION_CONFLICT", "规格结构已被其他编辑修改") };
         const affected: SkuConfigurationDto[] = [];
         const ids = new Set<string>();
         for (const patch of input.patches) {

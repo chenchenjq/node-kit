@@ -188,6 +188,7 @@ export interface SkuConfigurationPatch {
 export interface PatchSkuConfigurationsInput {
   spuId: string;
   commandId: string;
+  expectedStructureVersion?: string;
   patches: readonly SkuConfigurationPatch[];
 }
 
