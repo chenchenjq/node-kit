@@ -1,6 +1,6 @@
 import { buildCombinationKey, calculatePotentialCombinations, formatSkuCode, MAX_COMBINATIONS, MAX_DIMENSIONS, MAX_VALUES_PER_DIMENSION, normalizeSpecificationLabel, validateCnyAmount, validateRegisteredSpuCode } from "../core.js";
 import type { Result, SkuProblem } from "../types.js";
-import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, HistoricalConfiguration, InventoryAuthority, InventoryDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
+import type { AuthorizationResult, CombinationPairInput, ConfigurationPreview, ConsumerProjection, ConsumerSelectionDto, ConsumerSelectionInput, HistoricalConfiguration, InventoryAuthority, InventoryDto, InventoryReadDto, ManagementConfiguration, PatchSkuConfigurationsInput, PersistedDimension, PersistedSku, PersistedValue, ProductDocument, SaveConfigurationInput, SetLocalInventoryInput, SkuAction, SkuConfigurationDto, SkuService, SkuStore, SpuRefInput } from "./contracts.js";
 
 export interface CreateSkuServiceOptions<RequestContext> {
   store: SkuStore;
@@ -9,6 +9,7 @@ export interface CreateSkuServiceOptions<RequestContext> {
   projectConsumer?(skus: readonly PersistedSku[]): Promise<readonly ConsumerProjection[]>;
   resolveInventoryAuthority?(context: RequestContext, scopeKey: string): Promise<InventoryAuthority>;
   approveModeChange?(context: RequestContext, change: { spuId: string; from: "default" | "multi"; to: "default" | "multi"; document: ProductDocument }): Promise<Result<true>>;
+  readExternalInventory?(context: RequestContext, request: { scopeKey: string; spuId: string; skuId: string; authority: InventoryAuthority }): Promise<Result<InventoryReadDto>>;
   createId?: () => string;
 }
 
@@ -83,10 +84,10 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
     const authorization = await options.authorize(context, action, { spuId });
     return authorization.ok ? { ok: true, value: true } : { ok: false, problem: authorization.problem ?? problem("FORBIDDEN", "没有执行该操作的权限") };
   };
-  const inventoryAuthorityFor = async (context: RequestContext, scopeKey: string): Promise<Result<InventoryAuthority>> => {
+  const inventoryAuthorityFor = async (context: RequestContext, scopeKey: string, bind = true): Promise<Result<InventoryAuthority>> => {
     const authority = await (options.resolveInventoryAuthority?.(context, scopeKey) ?? Promise.resolve({ kind: "local-read-write" as const, authorityKey: "sku-kit-local" }));
     if (authority.authorityKey.trim() === "") return fail("VALIDATION_FAILED", "库存权威键不能为空");
-    return options.store.ensureInventoryAuthority === undefined ? { ok: true, value: authority } : options.store.ensureInventoryAuthority(scopeKey, authority);
+    return !bind || options.store.ensureInventoryAuthority === undefined ? { ok: true, value: authority } : options.store.ensureInventoryAuthority(scopeKey, authority);
   };
 
   const preview = (existing: ProductDocument | null, input: Omit<SaveConfigurationInput, "commandId" | "expectedStructureVersion" | "restoreArchivedSkuIds">): Result<ConfigurationPreview> => {
@@ -325,6 +326,24 @@ export const createSkuService = <RequestContext>(options: CreateSkuServiceOption
       const resolved = exact.length === 1 ? exact[0] : undefined;
       const selectedProjection = resolved === undefined ? undefined : projections.get(resolved.id);
       return { ok: true, value: { currency: "CNY", dimensions, selectedSku: resolved === undefined || selectedProjection === undefined ? null : { skuId: resolved.id, skuCode: resolved.skuCode, salePrice: selectedProjection.salePrice, availability: selectedProjection.availability }, priceRange: range } };
+    },
+
+    async getInventory(context, input) {
+      const scopeKey = await scopeFor(context);
+      if (scopeKey === null) return fail<InventoryReadDto>("SCOPE_MISMATCH", "可信作用域不能为空");
+      const authorization = await allowed(context, "inventory.read", input.spuId);
+      if (!authorization.ok) return authorization;
+      const authority = await inventoryAuthorityFor(context, scopeKey, false);
+      if (!authority.ok) return authority;
+      if (authority.value.kind !== "local-read-write") {
+        return options.readExternalInventory === undefined
+          ? { ok: true, value: { state: "unknown", skuId: input.skuId, reason: "外部库存适配器不可用" } }
+          : options.readExternalInventory(context, { scopeKey, spuId: input.spuId, skuId: input.skuId, authority: authority.value });
+      }
+      const document = await options.store.read(scopeKey, input.spuId);
+      const inventory = document?.inventories[input.skuId];
+      if (document === null || inventory === undefined || !document.skus.some((sku) => sku.id === input.skuId && !sku.archived)) return fail("NOT_FOUND", "未找到可读取的 SKU 库存");
+      return { ok: true, value: { state: "known", skuId: input.skuId, quantity: inventory.quantity, inventoryVersion: inventory.version.toString() } };
     },
 
     async setLocalInventory(context, input: SetLocalInventoryInput) {

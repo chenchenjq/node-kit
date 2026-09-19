@@ -118,6 +118,10 @@ export interface InventoryDto {
   inventoryVersion: string;
 }
 
+export type InventoryReadDto =
+  | { state: "known"; skuId: string; quantity: number; inventoryVersion: string }
+  | { state: "unknown"; skuId: string; reason: string };
+
 /** A scope's inventory authority is selected by the host, never inferred per SKU. */
 export interface InventoryAuthority {
   kind: InventoryAuthorityKind;
@@ -230,5 +234,6 @@ export interface SkuService<RequestContext> {
   getManagementConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<ManagementConfiguration>>;
   getHistoricalConfiguration(context: RequestContext, input: SpuRefInput): Promise<Result<HistoricalConfiguration>>;
   getConsumerSelection(context: RequestContext, input: ConsumerSelectionInput): Promise<Result<ConsumerSelectionDto>>;
+  getInventory(context: RequestContext, input: SpuRefInput & { skuId: string }): Promise<Result<InventoryReadDto>>;
   setLocalInventory(context: RequestContext, input: SetLocalInventoryInput): Promise<Result<InventoryDto>>;
 }
