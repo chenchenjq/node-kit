@@ -1,0 +1,13 @@
+{
+  "consumer": "/tmp/oss-kit-consumer-IFaike",
+  "verifiedAt": "2026-09-17T06:44:50.047Z",
+  "checks": [
+    "real tgz install",
+    "public types and documentation fences",
+    "Next production build",
+    "browser SDK isolation",
+    "packed minimal Mock OSS flow",
+    "real isolated PostgreSQL concurrency and file ownership"
+  ],
+  "ossCloud": "未实测：OSS 网络为 Mock；SDK V4 签名为真实 SDK 的本地计算；未验证真实上传、匿名访问或自定义域名绑定。"
+}

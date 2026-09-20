@@ -1,0 +1,374 @@
+{
+  "dataset": "addr-parse-kit-annotated-v1",
+  "annotatedBy": "本包实现方（Qoder agent）逐条人工编写，非独立第三方标注",
+  "annotatedAt": "2026-09-18",
+  "snapshot": "test/fixtures.ts FIXTURE_NODES（fixture-ds/fixture-v1，仅 60 节点，覆盖范围见 ANNOTATION-RULES.md）",
+  "privacy": "姓名、电话、楼宇名、订单号全部虚构，不含任何真实收件信息",
+  "cases": [
+    {
+      "id": "A01",
+      "category": "标准四级 + 门牌 + 楼号房号",
+      "input": "广东省深圳市南山区粤海街道科苑南路 2888 号 腾讯大厦 B1 12 楼 1208 张伟 13800001111",
+      "gold": { "deepestCode": "440305007" },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "candidateCount": 1,
+        "recipient": { "name": "张伟", "phone": "13800001111" },
+        "preserve": ["科苑南路", "2888", "腾讯大厦", "B1", "12 楼", "1208"]
+      }
+    },
+    {
+      "id": "A02",
+      "category": "只到区县（缺街道）",
+      "input": "广东省深圳市南山区科技园 12 栋 305 室 李娜 13900002222",
+      "gold": { "deepestCode": "440305", "written": ["province", "city", "district"] },
+      "expect": {
+        "status": "matched",
+        "candidateCount": 1,
+        "recipient": { "name": "李娜", "phone": "13900002222" },
+        "preserve": ["科技园", "12 栋", "305 室"]
+      }
+    },
+    {
+      "id": "A03",
+      "category": "只到市（缺区县街道）",
+      "input": "广东省深圳市 科技园南区 12 栋 501 李娜 13900002223",
+      "gold": { "deepestCode": "4403", "written": ["province", "city"] },
+      "expect": {
+        "status": "partial",
+        "candidateCount": 1,
+        "preserve": ["科技园南区", "12 栋", "501"]
+      }
+    },
+    {
+      "id": "A04",
+      "category": "直辖市：二级分组节点不占市槽",
+      "input": "北京市朝阳区建外街道 3 号院 5 号楼 2 单元 601 刘强 13600004444",
+      "gold": { "deepestCode": "110105001", "written": ["province", "district", "street"] },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "candidateCount": 1,
+        "recipient": { "name": "刘强", "phone": "13600004444" },
+        "preserve": ["3 号院", "5 号楼", "2 单元", "601"]
+      }
+    },
+    {
+      "id": "A05",
+      "category": "直辖市 + 路名门牌",
+      "input": "重庆市渝中区七星岗街道 民权路 88 号 附 2 号 陈静 13500005555",
+      "gold": { "deepestCode": "500103001", "written": ["province", "district", "street"] },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "candidateCount": 1,
+        "recipient": { "name": "陈静", "phone": "13500005555" },
+        "preserve": ["民权路", "88 号", "附 2 号"]
+      }
+    },
+    {
+      "id": "A06",
+      "category": "省直辖县级市（跳层，市槽为空）",
+      "input": "湖北省仙桃市干河街道 宏达路 12 号 杨磊 13400006666",
+      "gold": { "deepestCode": "429004002", "written": ["province", "district", "street"] },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "candidateCount": 1,
+        "recipient": { "name": "杨磊", "phone": "13400006666" },
+        "preserve": ["宏达路", "12 号"]
+      }
+    },
+    {
+      "id": "A07",
+      "category": "自治州全称",
+      "input": "云南省红河哈尼族彝族自治州蒙自市文澜街道 红河大道 66 号 黄敏 13300007777",
+      "gold": { "deepestCode": "532503001" },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "candidateCount": 1,
+        "recipient": { "name": "黄敏", "phone": "13300007777" },
+        "preserve": ["红河大道", "66 号"]
+      }
+    },
+    {
+      "id": "A08",
+      "category": "未收录简称：不得臆造层级，未匹配文本必须保留",
+      "input": "云南省红河州蒙自市文澜街道 12 号 黄敏 13300007778",
+      "gold": { "deepestCode": "532503001", "written": ["province", "district", "street"] },
+      "expect": {
+        "requiresReview": true,
+        "warnings": ["LEVELS_STRIPPED", "RESIDUAL_TEXT"],
+        "preserve": ["红河州", "12 号"]
+      }
+    },
+    {
+      "id": "A09",
+      "category": "重名区县裸名：必须多候选且不预选",
+      "input": "鼓楼区 中山北路 100 号 徐明 13200008888",
+      "gold": { "deepestCode": null },
+      "expect": {
+        "status": "ambiguous",
+        "requiresReview": true,
+        "candidateCount": 3,
+        "warnings": ["AMBIGUOUS"],
+        "skipPath": true
+      }
+    },
+    {
+      "id": "A10",
+      "category": "重名区县 + 宿主区域提示：只收窄不覆盖",
+      "input": "鼓楼区 中山北路 100 号 徐明 13200008889",
+      "options": { "regionHint": { "districtCode": "410204" } },
+      "gold": { "deepestCode": "410204", "written": ["district"] },
+      "expect": {
+        "requiresReview": true,
+        "candidateCount": 1,
+        "preserve": ["中山北路", "100 号"]
+      }
+    },
+    {
+      "id": "A11",
+      "category": "带省市消除重名（街道写成简称）",
+      "input": "江苏省徐州市鼓楼区夹河街 12 号 孙丽 13100009999",
+      "gold": { "deepestCode": "320302001" },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "candidateCount": 1,
+        "recipient": { "name": "孙丽", "phone": "13100009999" },
+        "preserve": ["12 号"]
+      }
+    },
+    {
+      "id": "A12",
+      "category": "省级别名 + 区县街同名前缀",
+      "input": "内蒙古通辽市科尔沁区科尔沁街道 永清大街 9 号 马涛 13000001234",
+      "gold": { "deepestCode": "150502001" },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "candidateCount": 1,
+        "recipient": { "name": "马涛", "phone": "13000001234" },
+        "preserve": ["永清大街", "9 号"]
+      }
+    },
+    {
+      "id": "A13",
+      "category": "标签式收件人 + 分机号 + 两级同名（市/区都叫东莞市）",
+      "input": "收件人：林杰 联系电话：13800001234 转 802 广东省东莞市南城街道 科技路 18 号",
+      "gold": { "deepestCode": "441900004", "written": ["province", "city", "street"] },
+      "expect": {
+        "candidateCount": 1,
+        "recipient": { "name": "林杰", "phone": "13800001234", "phoneExtension": "802" },
+        "preserve": ["科技路", "18 号"]
+      }
+    },
+    {
+      "id": "A14",
+      "category": "掩码手机号：原样保留且不猜数字",
+      "input": "浙江省杭州市西湖区西湖街道 灵隐路 5 号 周敏 138****8888",
+      "gold": { "deepestCode": "330106008" },
+      "expect": {
+        "requiresReview": true,
+        "recipient": { "name": "周敏", "maskedPhone": "138****8888", "incompletePhone": true },
+        "warnings": ["PHONE_MASKED"],
+        "preserve": ["灵隐路", "5 号"]
+      }
+    },
+    {
+      "id": "A15",
+      "category": "多个电话：除主号外全部保留",
+      "input": "浙江省宁波市鄞州区首南街道 四明中路 99 号 吴杰 13700001111 0574-88889999",
+      "gold": { "deepestCode": "330212006" },
+      "expect": {
+        "requiresReview": true,
+        "recipient": { "name": "吴杰", "phone": "13700001111", "extraPhones": ["057488889999"] },
+        "warnings": ["MULTIPLE_PHONES"]
+      }
+    },
+    {
+      "id": "A16",
+      "category": "19 位订单号不得被当成电话",
+      "input": "贵州省毕节市大方县顺德街道 长征路 7 号 1380000123456789012 郑爽 13600002222",
+      "gold": { "deepestCode": "520521002" },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "recipient": { "name": "郑爽", "phone": "13600002222" },
+        "preserve": ["1380000123456789012"]
+      }
+    },
+    {
+      "id": "A17",
+      "category": "栋/单元/房号一个都不能丢",
+      "input": "陕西省西安市雁塔区小寨路街道 长安北路 101 号 2 号楼 3 单元 405 室 冯磊 13500003333",
+      "gold": { "deepestCode": "610113001" },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "recipient": { "name": "冯磊", "phone": "13500003333" },
+        "preserve": ["长安北路", "101 号", "2 号楼", "3 单元", "405 室"]
+      }
+    },
+    {
+      "id": "A18",
+      "category": "社区（第 5 级）不进索引，必须留在详细地址",
+      "input": "广东省深圳市南山区粤海街道 科技园社区 麻雀岭工业区 M3 栋 何平 13400004444",
+      "gold": { "deepestCode": "440305007" },
+      "expect": {
+        "candidateCount": 1,
+        "recipient": { "name": "何平", "phone": "13400004444" },
+        "preserve": ["科技园社区", "麻雀岭工业区", "M3 栋"]
+      }
+    },
+    {
+      "id": "A19",
+      "category": "备注信息不得被吞",
+      "input": "上海市浦东新区张江镇 祖冲之路 1000 号 8 号楼 501 施静 13300005555 备注：放驿站，周末勿送",
+      "gold": { "deepestCode": "310115125", "written": ["province", "district", "street"] },
+      "expect": {
+        "requiresReview": true,
+        "recipient": { "name": "施静", "phone": "13300005555" },
+        "warnings": ["RECIPIENTS_AMBIGUOUS"],
+        "preserve": ["祖冲之路", "1000 号", "8 号楼", "501", "放驿站", "周末勿送", "备注"]
+      }
+    },
+    {
+      "id": "A20",
+      "category": "地名在正文中重复出现：不得吞字",
+      "input": "云南省昆明市五华区华山街道 华山 收 高燕 13200006666",
+      "gold": { "deepestCode": "530102004" },
+      "expect": {
+        "recipient": { "name": "高燕", "phone": "13200006666" },
+        "preserve": ["华山", "收"]
+      }
+    },
+    {
+      "id": "A21",
+      "category": "疑似道路名被当成行政区：退回详细地址",
+      "input": "广东省深圳市南山区 粤海 路 88 号 蔡波 13100007777",
+      "gold": { "deepestCode": "440305", "written": ["province", "city", "district"] },
+      "expect": {
+        "status": "partial",
+        "requiresReview": true,
+        "warnings": ["STREET_MATCH_SUSPECT"],
+        "preserve": ["粤海", "88 号"]
+      }
+    },
+    {
+      "id": "A22",
+      "category": "制表符、换行与全角数字混排",
+      "input": "广东省\t深圳市南山区粤海街道\n科苑南路１号　赵敏　１３８００００８８８８",
+      "gold": { "deepestCode": "440305007" },
+      "expect": {
+        "requiresReview": true,
+        "preserve": ["科苑南路", "１３８００００８８８８"]
+      }
+    },
+    {
+      "id": "A23",
+      "category": "邮政编码与未收录区划：不产出邮编字段，且不得吞掉原文",
+      "input": "广东省深圳市福田区 518000 深南大道 6001 号 傅强 13000009999",
+      "gold": { "deepestCode": "4403", "written": ["province", "city"] },
+      "expect": {
+        "status": "partial",
+        "preserve": ["福田区", "518000", "深南大道", "6001 号"]
+      }
+    },
+    {
+      "id": "A24",
+      "category": "身份证号：不识别、不输出，也不误当电话或姓名",
+      "input": "广东省深圳市南山区粤海街道 科技园 1 号 邓超 13800001111 身份证 440301199001011234",
+      "gold": { "deepestCode": "440305007" },
+      "expect": {
+        "requiresReview": true,
+        "recipient": { "phone": "13800001111" },
+        "preserve": ["440301199001011234", "邓超"]
+      }
+    },
+    {
+      "id": "A25",
+      "category": "关闭收件人提取",
+      "input": "广东省深圳市南山区粤海街道 科苑南路 2 号 张伟 13800001112",
+      "options": { "extractRecipient": false },
+      "gold": { "deepestCode": "440305007" },
+      "expect": {
+        "recipientNull": true,
+        "requiresReview": true,
+        "warnings": ["RECIPIENT_SUPPRESSED"]
+      }
+    },
+    {
+      "id": "A26",
+      "category": "纯地址无人名电话",
+      "input": "河南省开封市鼓楼区相国寺街道 自由路 20 号",
+      "gold": { "deepestCode": "410204001" },
+      "expect": {
+        "status": "matched",
+        "requiresReview": false,
+        "recipientNull": true,
+        "preserve": ["自由路", "20 号"]
+      }
+    },
+    {
+      "id": "A27",
+      "category": "完全无法匹配的文本",
+      "input": "abc123 !!! ???",
+      "gold": { "deepestCode": null },
+      "expect": {
+        "status": "unmatched",
+        "requiresReview": true,
+        "candidateCount": 1,
+        "skipPath": true
+      }
+    },
+    {
+      "id": "A28",
+      "category": "空白输入属于调用错误，不是「未匹配」",
+      "input": "   ",
+      "gold": { "deepestCode": null },
+      "expect": { "error": "E_INPUT_EMPTY", "skipPath": true }
+    },
+    {
+      "id": "A29",
+      "category": "候选被上限截断：不得按当前结果直接确认",
+      "input": "鼓楼区 中山北路 100 号 徐明 13200008890",
+      "options": { "maxCandidates": 2 },
+      "gold": { "deepestCode": null },
+      "expect": {
+        "status": "ambiguous",
+        "requiresReview": true,
+        "candidateCount": 2,
+        "warnings": ["CANDIDATES_TRUNCATED"],
+        "skipPath": true
+      }
+    },
+    {
+      "id": "A30",
+      "category": "默认剥离推断层级（allowInferred=false 不静默给推断值）",
+      "input": "首南街道 四明中路 99 号 余涛 13900001111",
+      "options": { "allowInferred": false },
+      "gold": { "deepestCode": "330212006", "written": ["street"] },
+      "expect": {
+        "requiresReview": true,
+        "warnings": ["LEVELS_STRIPPED"],
+        "preserve": ["四明中路", "99 号"]
+      }
+    },
+    {
+      "id": "A31",
+      "category": "显式开启 allowInferred：推断层级必须标 inferred 并要复核",
+      "input": "首南街道 四明中路 99 号 余涛 13900001112",
+      "options": { "allowInferred": true },
+      "gold": { "deepestCode": "330212006" },
+      "expect": {
+        "requiresReview": true,
+        "warnings": ["LEVELS_INFERRED"],
+        "preserve": ["四明中路", "99 号"]
+      }
+    }
+  ]
+}

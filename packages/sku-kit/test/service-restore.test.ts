@@ -5,15 +5,18 @@ import { createInMemorySkuStore } from "../src/testing/index.js";
 
 describe("archived combination restoration", () => {
   it("requires explicit restoration and reuses the original SKU code", async () => {
-    const ids = ["sku-red", "sku-blue"];
+    const ids = ["dimension", "value-red", "value-blue", "sku-red", "sku-blue"];
     const service = createSkuService({ store: createInMemorySkuStore(), resolveScope: async () => "scope", authorize: async () => ({ ok: true }), createId: () => ids.shift() ?? "id" });
-    const save = (commandId: string, values: readonly string[], restoreArchivedSkuIds?: readonly string[]) => service.saveConfiguration({}, {
+    const save = (commandId: string, values: readonly string[], restoreArchivedSkuIds?: readonly string[]) => {
+      const creating = commandId === "first";
+      return service.saveConfiguration({}, {
       spuId: "p", spuCode: "P", commandId,
       ...(commandId === "first" ? {} : { expectedStructureVersion: commandId === "remove" ? "1" : "2" }),
-      dimensions: [{ id: "d", label: "颜色", sort: 0, values: values.map((id, sort) => ({ id, label: id, sort })) }],
-      selectedCombinations: values.map((id) => ({ pairs: [{ dimensionId: "d", valueId: id }] })),
+      dimensions: [{ ...(creating ? { draftKey: "dimension" } : { id: "dimension" }), label: "颜色", sort: 0, values: values.map((id, sort) => creating ? ({ draftKey: id, label: id, sort }) : ({ id: `value-${id}`, label: id, sort })) }],
+      selectedCombinations: values.map((id) => ({ pairs: [creating ? { dimensionDraftKey: "dimension", valueDraftKey: id } : { dimensionId: "dimension", valueId: `value-${id}` }] })),
       ...(restoreArchivedSkuIds === undefined ? {} : { restoreArchivedSkuIds }),
-    });
+      });
+    };
     const first = await save("first", ["red", "blue"]);
     if (!first.ok) throw new Error("fixture failed");
     await save("remove", ["red"]);

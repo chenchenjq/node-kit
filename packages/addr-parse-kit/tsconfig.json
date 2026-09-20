@@ -1,0 +1,40 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "types": [
+      "node",
+      "vitest/globals"
+    ],
+    "paths": {
+      "addr-parse-kit": [
+        "./src/index.ts"
+      ],
+      "addr-parse-kit/server": [
+        "./src/server/index.ts"
+      ],
+      "area-kit": [
+        "../area-kit/src/index.ts"
+      ],
+      "area-kit/postgres": [
+        "../area-kit/src/postgres/index.ts"
+      ],
+      "area-kit/server": [
+        "../area-kit/src/server/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "examples/area-kit-provider.ts",
+    "scripts/**/*.ts",
+    "vitest.config.ts",
+    "vitest.postgres.config.ts"
+  ],
+  "exclude": [
+    "test/example-edit.test.ts"
+  ]
+}

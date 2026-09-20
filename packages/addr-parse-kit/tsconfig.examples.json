@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "resolveJsonModule": true,
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "addr-parse-kit": [
+        "./src/index.ts"
+      ],
+      "addr-parse-kit/server": [
+        "./src/server/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "examples/next/**/*.ts",
+    "examples/next/**/*.tsx",
+    "test/example-edit.test.ts"
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "name": "ai-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "AI-USAGE.md",
+    "examples"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./catalog": {
+      "types": "./dist/catalog.d.ts",
+      "import": "./dist/catalog.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "browser": "./dist/browser-forbidden.js",
+      "react-server": "./dist/server/next.js",
+      "import": "./dist/server/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:postgres": "node scripts/verify-postgres.mjs",
+    "test:pack": "node scripts/verify-pack.mjs",
+    "test:live": "tsx scripts/verify-live.ts",
+    "test:browser": "node scripts/verify-browser.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "4.0.56",
+    "@ai-sdk/openai": "4.0.69",
+    "@ai-sdk/openai-compatible": "3.0.51",
+    "ai": "7.0.105",
+    "ipaddr.js": "2.5.0",
+    "server-only": "0.0.1",
+    "undici": "8.10.2",
+    "zod": "4.6.4"
+  },
+  "peerDependencies": {
+    "react": ">=18 <20"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.7",
+    "@types/node": "22.19.0",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "drizzle-orm": "0.45.2",
+    "esbuild": "0.25.12",
+    "jsdom": "26.1.0",
+    "next": "16.3.5",
+    "pg": "8.23.0",
+    "playwright-core": "1.51.1",
+    "prettier": "3.6.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "testcontainers": "12.1.0",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vitest": "4.0.18"
+  },
+  "description": "私有 AI 能力包：模型与供应商目录、内容生成、服务端管理及 React 集成。"
+}
