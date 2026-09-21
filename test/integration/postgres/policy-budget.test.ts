@@ -116,7 +116,7 @@ describe("PostgreSQL policy budgets", () => {
       ipWindowSeconds: 60, ipWindowLimit: 100, systemDailyBudget: null, circuitOpen: false,
     };
     const enforce = (phoneHash: string, now: string, policy = basePolicy) => store.transaction((tx) => enforcePhoneSendPolicy({
-      policy, rateLimits: store.rateLimits, tenantId: "tenant-sliding" as TenantId,
+      policy, rateLimits: store.rateLimits, ownership: { scopeType: "TENANT", tenantId: "tenant-sliding" as TenantId },
       phoneHash, purpose: "verification", now: new Date(now), tx,
     }));
 
@@ -144,7 +144,7 @@ describe("PostgreSQL policy budgets", () => {
     const phoneHash = `concurrent:${randomUUID()}`;
     const purpose = "verification";
     const results = await Promise.allSettled([1, 2].map(() => store.transaction((tx) => enforcePhoneSendPolicy({
-      policy, rateLimits: store.rateLimits, tenantId: "tenant-sliding" as TenantId,
+      policy, rateLimits: store.rateLimits, ownership: { scopeType: "TENANT", tenantId: "tenant-sliding" as TenantId },
       phoneHash, purpose, now, tx,
     }))));
 
@@ -172,7 +172,7 @@ describe("PostgreSQL policy budgets", () => {
     const firstAt = new Date("2026-09-17T00:00:00.000Z");
     const laterAt = new Date("2026-09-17T00:00:02.000Z");
     const enforce = (policy: VerificationPolicy, now: Date) => store.transaction((tx) => enforcePhoneSendPolicy({
-      policy, rateLimits: store.rateLimits, tenantId, phoneHash, purpose: "verification", now, tx,
+      policy, rateLimits: store.rateLimits, ownership: { scopeType: "TENANT", tenantId }, phoneHash, purpose: "verification", now, tx,
     }));
 
     await enforce(basePolicy, firstAt);

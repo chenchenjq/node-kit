@@ -78,9 +78,9 @@ export class PgMessageRepository implements MessageRepository {
     }
     return transaction(this.pool, tx, async (db) => {
       const inserted = await db.query<MessageRow>(
-        `insert into sms_kit.send_message (id, tenant_id, idempotency_key, template_id, template_key_snapshot, external_template_code_snapshot, signature_name_snapshot, purpose, phone_ciphertext, phone_key_id, phone_hash, phone_last4, phone_masked, variable_names, render_params_ciphertext, render_params_key_id, metadata, acceptance_status, delivery_status, provider_biz_id, provider_request_id, final_error_code, submitted_at, accepted_at, delivered_at, finalized_at, version, created_at, updated_at)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17::jsonb,'pending','not_applicable',null,null,null,$18,null,null,null,1,now(),now())
-         on conflict (tenant_id, idempotency_key) do nothing returning ${selectMessage}`,
+        `insert into sms_kit.send_message (id, scope_type, tenant_id, idempotency_key, template_id, template_key_snapshot, external_template_code_snapshot, signature_name_snapshot, purpose, phone_ciphertext, phone_key_id, phone_hash, phone_last4, phone_masked, variable_names, render_params_ciphertext, render_params_key_id, metadata, acceptance_status, delivery_status, provider_biz_id, provider_request_id, final_error_code, submitted_at, accepted_at, delivered_at, finalized_at, version, created_at, updated_at)
+         values ($1,'TENANT',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17::jsonb,'pending','not_applicable',null,null,null,$18,null,null,null,1,now(),now())
+         on conflict (scope_type, (coalesce(tenant_id, '')), idempotency_key) do nothing returning ${selectMessage}`,
         [input.id, input.tenantId, input.idempotencyKey, input.templateId, input.templateKeySnapshot, input.externalTemplateCodeSnapshot,
           input.signatureNameSnapshot, input.purpose, input.phoneCiphertext, input.phoneKeyId, input.phoneHash, input.phoneLast4, input.phoneMasked,
           JSON.stringify(input.variableNames), input.renderParamsCiphertext ?? null, input.renderParamsKeyId ?? null, JSON.stringify(projectSafeEventMetadata(input.metadata)), input.submittedAt],
@@ -92,9 +92,9 @@ export class PgMessageRepository implements MessageRepository {
       }
       if (input.sendJob !== undefined) {
         const job = await db.query<{ id: string; message_id: string | null }>(
-          `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, origin_action, payload, created_at, updated_at)
-           values ($1, $2, $3, 'send', $4, 'pending', $5, 0, $6, $7, '{"kind":"none"}'::jsonb, now(), now())
-           on conflict (tenant_id, job_type, dedupe_key) do nothing
+          `insert into sms_kit.send_job (id, scope_type, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, origin_action, payload, created_at, updated_at)
+           values ($1, 'TENANT', $2, $3, 'send', $4, 'pending', $5, 0, $6, $7, '{"kind":"none"}'::jsonb, now(), now())
+           on conflict (scope_type, (coalesce(tenant_id, '')), job_type, dedupe_key) do nothing
            returning id, message_id`,
           [input.sendJob.id, input.tenantId, input.sendJob.dedupeKey, input.id, input.sendJob.availableAt, input.sendJob.maxAttempts, input.sendJob.originAction ?? null],
         );

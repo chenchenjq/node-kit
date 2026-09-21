@@ -1,7 +1,7 @@
 import { SmsKitError, type SmsErrorCode } from "../core/errors.js";
 import type { AcceptanceStatus, DeliveryStatus } from "../core/status.js";
 import { validateTemplateKey } from "../core/template.js";
-import type { ChallengeId, MessageId, TemplateId, TenantId } from "../core/types.js";
+import type { ChallengeId, MessageId, SmsScope, TemplateId, TenantId } from "../core/types.js";
 import type { PolicyStore } from "./policy.js";
 import type { SafeEventMetadata, SafeReceiptPayload } from "./runtime.js";
 
@@ -38,19 +38,19 @@ export type AdminOperationClaim =
 /** Durable idempotency records are always claimed and completed inside one store transaction. */
 export interface AdminOperationRepository {
   find(input: Readonly<{
-    tenantId: TenantId;
+    scope: SmsScope;
     operation: AdminOperationName;
     idempotencyKey: string;
     requestChecksum: string;
   }>, tx?: SmsTransaction): Promise<Readonly<Record<string, unknown>> | undefined>;
   claim(input: Readonly<{
-    tenantId: TenantId;
+    scope: SmsScope;
     operation: AdminOperationName;
     idempotencyKey: string;
     requestChecksum: string;
   }>, tx: SmsTransaction): Promise<AdminOperationClaim>;
   complete(input: Readonly<{
-    tenantId: TenantId;
+    scope: SmsScope;
     operation: AdminOperationName;
     idempotencyKey: string;
     requestChecksum: string;
@@ -615,7 +615,7 @@ export type Challenge = Readonly<{
   idempotencyKey: string;
   subjectId: string;
   action: string;
-  purpose: "password_change" | "step_up";
+  purpose: "password_change" | "step_up" | "login_otp" | "password_reset";
   policyVersion: number;
   otpLength: number;
   otpTtlSeconds: number;
@@ -642,7 +642,7 @@ export interface ChallengeRepository {
     idempotencyKey: string;
     subjectId: string;
     action: string;
-    purpose: "password_change" | "step_up";
+    purpose: "password_change" | "step_up" | "login_otp" | "password_reset";
     policyVersion: number;
     otpLength: number;
     otpTtlSeconds: number;
@@ -654,6 +654,13 @@ export interface ChallengeRepository {
   }>, tx?: SmsTransaction): Promise<Challenge>;
   get(input: Readonly<{ tenantId: TenantId; id: ChallengeId }>, tx?: SmsTransaction): Promise<Challenge | undefined>;
   getByIdempotency(input: Readonly<{ tenantId: TenantId; idempotencyKey: string }>, tx?: SmsTransaction): Promise<Challenge | undefined>;
+  /** A freshly issued code invalidates every unused older code for this trusted subject/action stream. */
+  invalidateActiveForSubjectAction(input: Readonly<{
+    tenantId: TenantId;
+    subjectId: string;
+    action: string;
+    invalidatedAt: Date;
+  }>, tx: SmsTransaction): Promise<number>;
   getForUpdate(input: Readonly<{ tenantId: TenantId; id: ChallengeId }>, tx: SmsTransaction): Promise<Challenge | undefined>;
   incrementAttempts(input: Readonly<{ tenantId: TenantId; id: ChallengeId }>, tx: SmsTransaction): Promise<Challenge>;
   verify(input: Readonly<{
@@ -687,10 +694,10 @@ export interface ChallengeRepository {
 }
 
 export interface RateLimitRepository {
-  /** Acquires a transaction-scoped stable lock for one tenant/phone/purpose policy stream. */
-  lock(input: Readonly<{ tenantId: TenantId; scopeHash: string }>, tx: SmsTransaction): Promise<void>;
+  /** Acquires a transaction-scoped stable lock for one owner/phone/purpose policy stream. */
+  lock(input: Readonly<{ ownership: SmsScope; scopeHash: string }>, tx: SmsTransaction): Promise<void>;
   increment(input: Readonly<{
-    tenantId: TenantId;
+    ownership: SmsScope;
     scope: "phone_purpose" | "ip_purpose" | "global";
     scopeHash: string;
     windowStart: Date;
@@ -699,16 +706,15 @@ export interface RateLimitRepository {
   }>, tx?: SmsTransaction): Promise<number>;
   /** Counts recorded events after a boundary for transactional trailing windows. */
   countSince(input: Readonly<{
-    tenantId: TenantId;
+    ownership: SmsScope;
     scope: "phone_purpose" | "ip_purpose" | "global";
     scopeHash: string;
     since: Date;
   }>, tx?: SmsTransaction): Promise<number>;
 }
 
-export type AuditEvent = Readonly<{
+export type AuditEvent = SmsScope & Readonly<{
   id: string;
-  tenantId: TenantId;
   actorId: string;
   action: string;
   targetType: string;
@@ -720,7 +726,7 @@ export type AuditEvent = Readonly<{
 }>;
 export interface AuditRepository {
   append(input: AuditEvent, tx?: SmsTransaction): Promise<AuditEvent>;
-  list(input: Readonly<{ tenantId: TenantId; page: number; pageSize: number }>, tx?: SmsTransaction): Promise<{
+  list(input: Readonly<{ scope: SmsScope; page: number; pageSize: number }>, tx?: SmsTransaction): Promise<{
     items: readonly AuditEvent[];
     total: number;
   }>;

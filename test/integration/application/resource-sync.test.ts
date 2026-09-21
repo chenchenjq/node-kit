@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import { ResourceSyncService } from "../../../src/application/resource-sync-service.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 import { SmsKitError } from "../../../src/core/errors.js";
+import { SYSTEM_SCOPE } from "../../../src/core/types.js";
 import { createResourceSyncCandidate, hasTemplateResourceSelection } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
@@ -209,7 +210,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
 
     expect(committed.status).toBe("succeeded");
     expect((await store.resources.listSignatures({ page: 1, pageSize: 10 })).items).toHaveLength(1);
-    expect((await store.audits.list({ tenantId: "__system__" as AuthorizationActor["tenantId"], page: 1, pageSize: 10 })).items).toEqual(expect.arrayContaining([
+    expect((await store.audits.list({ scope: SYSTEM_SCOPE, page: 1, pageSize: 10 })).items).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "resource.sync.commit", targetId: preview.id, result: "succeeded" }),
     ]));
   });

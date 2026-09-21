@@ -155,9 +155,9 @@ export class PgJobRepository implements JobRepository {
     if (existing.rows[0] !== undefined) return job(existing.rows[0]);
 
     const inserted = await database.query<Row>(
-      `insert into sms_kit.send_job (id, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, origin_action, payload, created_at, updated_at)
-       values ($1, $2, $3, 'reconcile', $4, 'pending', $5, 0, 1, $6, '{"kind":"reconcile"}'::jsonb, now(), now())
-       on conflict (tenant_id, job_type, dedupe_key)
+      `insert into sms_kit.send_job (id, scope_type, tenant_id, dedupe_key, job_type, message_id, state, available_at, attempt_count, max_attempts, origin_action, payload, created_at, updated_at)
+       values ($1, 'TENANT', $2, $3, 'reconcile', $4, 'pending', $5, 0, 1, $6, '{"kind":"reconcile"}'::jsonb, now(), now())
+       on conflict (scope_type, (coalesce(tenant_id, '')), job_type, dedupe_key)
        -- The first creator establishes the action provenance. A later manual
        -- request may observe the existing job but must not relabel a worker job
        -- or grant a different future read permission.

@@ -40,11 +40,11 @@ function stats(row: StatRow): DailyStats {
 /** Marks the submitted UTC date of a tenant-owned message for absolute recomputation. */
 export async function markMessageStatsDirty(client: Queryable, tenantId: string, messageId: string): Promise<void> {
   await client.query(
-    `insert into sms_kit.stat_dirty_date (tenant_id, stat_date, version, updated_at)
-     select tenant_id, (submitted_at at time zone 'UTC')::date, 1, now()
+    `insert into sms_kit.stat_dirty_date (scope_type, tenant_id, stat_date, version, updated_at)
+     select 'TENANT', tenant_id, (submitted_at at time zone 'UTC')::date, 1, now()
        from sms_kit.send_message
-      where tenant_id = $1 and id = $2
-     on conflict (tenant_id, stat_date)
+      where scope_type = 'TENANT' and tenant_id = $1 and id = $2
+     on conflict (scope_type, (coalesce(tenant_id, '')), stat_date)
      do update set version = sms_kit.stat_dirty_date.version + 1, updated_at = now()`,
     [tenantId, messageId],
   );

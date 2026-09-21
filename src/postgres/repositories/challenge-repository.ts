@@ -58,6 +58,22 @@ export class PgChallengeRepository implements ChallengeRepository {
     return rows[0] === undefined ? undefined : challenge(rows[0]);
   }
 
+  async invalidateActiveForSubjectAction(input: Parameters<ChallengeRepository["invalidateActiveForSubjectAction"]>[0], tx: SmsTransaction): Promise<number> {
+    const result = await db(this.pool, tx).query(
+      `update sms_kit.otp_challenge
+          set invalidated_at = $4,
+              terminal_error_code = 'CHALLENGE_SUPERSEDED',
+              delivery_acceptance_status = 'rejected'
+        where tenant_id = $1
+          and subject_id = $2
+          and action = $3
+          and invalidated_at is null
+          and consumed_at is null`,
+      [input.tenantId, input.subjectId, input.action, input.invalidatedAt],
+    );
+    return result.rowCount ?? 0;
+  }
+
   async getForUpdate(input: Parameters<ChallengeRepository["getForUpdate"]>[0], tx: SmsTransaction): Promise<Challenge | undefined> {
     const { rows } = await db(this.pool, tx).query<ChallengeRow>(`select ${fields} from sms_kit.otp_challenge where tenant_id = $1 and id = $2 for update`, [input.tenantId, input.id]);
     return rows[0] === undefined ? undefined : challenge(rows[0]);

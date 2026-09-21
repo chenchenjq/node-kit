@@ -81,6 +81,15 @@ describe("AES-GCM protectors", () => {
     });
   });
 
+  it("binds a SYSTEM payload to null tenant identity without accepting a tenant context", async () => {
+    const protector = new AesGcmMessagePayloadProtector(keyring());
+    const systemContext: ProtectionContext = { ...payloadContext, tenantId: null };
+    const sealed = await protector.seal({ code: "123456" }, systemContext);
+
+    await expect(protector.open(sealed, systemContext)).resolves.toEqual({ code: "123456" });
+    await expect(protector.open(sealed, payloadContext)).rejects.toMatchObject({ code: "STORAGE_FAILURE" });
+  });
+
   it("rejects altered ciphertext, unknown keys, and tenant or field swaps", async () => {
     const protector = new AesGcmMessagePayloadProtector(keyring());
     const sealed = await protector.seal({ order: "A-100" }, payloadContext);

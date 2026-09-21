@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { SmsKitError } from "../../../src/core/errors.js";
-import type { TenantId } from "../../../src/core/types.js";
+import { tenantScope, type TenantId } from "../../../src/core/types.js";
 import { createResourceSyncCandidate } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
@@ -58,7 +58,7 @@ describe("PostgreSQL configuration and resources", () => {
     expect(result.lastTestSummary).toEqual({ redactedFields: ["secret"], counts: [{ name: "resource", value: 2 }] });
   });
 
-  it("claims and replays admin operations only inside the trusted tenant namespace", async () => {
+  it("claims and replays admin operations only inside the trusted ownership scope", async () => {
     const tenantA = "tenant-admin-a" as TenantId;
     const tenantB = "tenant-admin-b" as TenantId;
     const operation = "signature.update";
@@ -67,28 +67,28 @@ describe("PostgreSQL configuration and resources", () => {
 
     await store.transaction(async (tx) => {
       await expect(store.adminOperations.claim({
-        tenantId: tenantA, operation, idempotencyKey, requestChecksum: "request-a",
+        scope: tenantScope(tenantA), operation, idempotencyKey, requestChecksum: "request-a",
       }, tx)).resolves.toEqual({ kind: "claimed" });
       await store.adminOperations.complete({
-        tenantId: tenantA, operation, idempotencyKey, requestChecksum: "request-a", resultSnapshot,
+        scope: tenantScope(tenantA), operation, idempotencyKey, requestChecksum: "request-a", resultSnapshot,
       }, tx);
     });
 
     await store.transaction(async (tx) => {
       await expect(store.adminOperations.claim({
-        tenantId: tenantA, operation, idempotencyKey, requestChecksum: "request-a",
+        scope: tenantScope(tenantA), operation, idempotencyKey, requestChecksum: "request-a",
       }, tx)).resolves.toEqual({ kind: "replay", resultSnapshot });
     });
     await expect(store.transaction((tx) => store.adminOperations.claim({
-      tenantId: tenantA, operation, idempotencyKey, requestChecksum: "different-request",
+      scope: tenantScope(tenantA), operation, idempotencyKey, requestChecksum: "different-request",
     }, tx))).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" } satisfies Partial<SmsKitError>);
 
     await store.transaction(async (tx) => {
       await expect(store.adminOperations.claim({
-        tenantId: tenantB, operation, idempotencyKey, requestChecksum: "request-b",
+        scope: tenantScope(tenantB), operation, idempotencyKey, requestChecksum: "request-b",
       }, tx)).resolves.toEqual({ kind: "claimed" });
       await store.adminOperations.complete({
-        tenantId: tenantB, operation, idempotencyKey, requestChecksum: "request-b",
+        scope: tenantScope(tenantB), operation, idempotencyKey, requestChecksum: "request-b",
         resultSnapshot: { ...resultSnapshot, version: 3 },
       }, tx);
     });

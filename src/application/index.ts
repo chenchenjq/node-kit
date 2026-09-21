@@ -27,6 +27,14 @@ export type {
 } from "./send-service.js";
 export { ChallengeService } from "./challenge-service.js";
 export type { ChallengeServiceDependencies, IssueChallengeInput, IssueChallengeResult, VerifyChallengeInput, VerifyChallengeResult } from "./challenge-service.js";
+export { SystemAuthSmsService } from "./system-auth-service.js";
+export type {
+  IssueSystemAuthChallengeInput,
+  IssueSystemAuthChallengeResult,
+  SystemAuthSmsServiceDependencies,
+  VerifySystemAuthChallengeInput,
+  VerifySystemAuthChallengeResult,
+} from "./system-auth-service.js";
 export { ProofService } from "./proof-service.js";
 export type { ConsumeProofInput, ProofServiceDependencies } from "./proof-service.js";
 export { SendWorker } from "./send-worker.js";

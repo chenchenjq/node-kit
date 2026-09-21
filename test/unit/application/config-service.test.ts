@@ -83,6 +83,39 @@ describe("ConfigService", () => {
     expect(saved).toMatchObject({ accessKeySecretRef: "env://NEW_SECRET", enabled: false });
   });
 
+  it("claims and completes a global patch in SYSTEM scope", async () => {
+    const operationScopes: unknown[] = [];
+    const service = new ConfigService({
+      store: {
+        adminOperations: {
+          find: async (input: unknown) => { operationScopes.push(input); return undefined; },
+          claim: async (input: unknown) => { operationScopes.push(input); return { kind: "claimed" as const }; },
+          complete: async (input: unknown) => { operationScopes.push(input); },
+        },
+        config: { get: async () => readyConfig, update: async () => readyConfig },
+        audits: { append: async () => undefined },
+        transaction: async (work: (tx: never) => Promise<unknown>) => work(undefined as never),
+      } as never,
+      provider: {} as never,
+      secretResolver: {} as never,
+      authorizer: { assert: () => undefined },
+      clock: { now: () => new Date("2026-09-13T00:00:00.000Z") },
+      ids: { next: () => "audit-system-scope" },
+      events: { emit: () => undefined },
+    });
+
+    await service.patch(actor, {
+      provider: "aliyun", region: readyConfig.region,
+      accessKeyIdRef: readyConfig.accessKeyIdRef, accessKeySecretRef: readyConfig.accessKeySecretRef,
+      expectedVersion: readyConfig.version, idempotencyKey: "config:system-scope",
+    });
+
+    expect(operationScopes).toEqual([
+      expect.objectContaining({ scope: { scopeType: "SYSTEM" } }),
+      expect.objectContaining({ scope: { scopeType: "SYSTEM" } }),
+    ]);
+  });
+
   it("marks a successfully tested configuration ready without persisting resolved credentials", async () => {
     const resolved: string[] = [];
     let connectionInput: unknown;
@@ -156,7 +189,7 @@ describe("ConfigService", () => {
     });
   });
 
-  it("audits global configuration changes under the system tenant and normalizes secret failures", async () => {
+  it("audits global configuration changes in SYSTEM scope and normalizes secret failures", async () => {
     const audits: unknown[] = [];
     const service = new ConfigService({
       store: {
@@ -179,8 +212,8 @@ describe("ConfigService", () => {
     });
 
     expect(audits).toEqual([
-      expect.objectContaining({ tenantId: "__system__", actorId: "operator", action: "config.save" }),
-      expect.objectContaining({ tenantId: "__system__", actorId: "operator", action: "config.test_connection", errorCode: "PROVIDER_UNAVAILABLE" }),
+      expect.objectContaining({ scopeType: "SYSTEM", actorId: "operator", action: "config.save" }),
+      expect.objectContaining({ scopeType: "SYSTEM", actorId: "operator", action: "config.test_connection", errorCode: "PROVIDER_UNAVAILABLE" }),
     ]);
     expect(JSON.stringify(audits)).not.toContain("resolved-secret-value");
   });

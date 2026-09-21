@@ -174,7 +174,7 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const tenant = factory.tenantId(`tenant-rate-${factory.ids.next()}`);
       const now = factory.clock.now();
       const values = await Promise.all(Array.from({ length: 8 }, () => store.rateLimits.increment({
-        tenantId: tenant, scope: "phone_purpose", scopeHash: "hash:scope", windowStart: now, windowSeconds: 60,
+        ownership: { scopeType: "TENANT", tenantId: tenant }, scope: "phone_purpose", scopeHash: "hash:scope", windowStart: now, windowSeconds: 60,
         expiresAt: new Date(now.getTime() + 60_000),
       })));
       expect(values.sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -185,7 +185,7 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
       const tenantA = factory.tenantId(`tenant-audit-a-${factory.ids.next()}`);
       const tenantB = factory.tenantId(`tenant-audit-b-${factory.ids.next()}`);
       const event = await store.audits.append({
-        id: randomUUID(), tenantId: tenantA, actorId: "admin", action: "message.read", targetType: "message", result: "succeeded",
+        id: randomUUID(), scopeType: "TENANT", tenantId: tenantA, actorId: "admin", action: "message.read", targetType: "message", result: "succeeded",
         metadata: {
           redactedFields: ["phone", "not-allowed"],
           counts: [{ name: "message", value: 1 }, { name: "not-allowed", value: 1 }, { name: "receipt", value: Number.POSITIVE_INFINITY }],
@@ -194,9 +194,9 @@ export function runSmsStoreContract(factory: SmsStoreContractFactory): void {
         occurredAt: factory.clock.now(),
       });
       expect(event.metadata).toEqual({ redactedFields: ["phone"], counts: [{ name: "message", value: 1 }] });
-      expect((await store.audits.list({ tenantId: tenantA, page: 1, pageSize: 10 })).items[0]?.metadata)
+      expect((await store.audits.list({ scope: { scopeType: "TENANT", tenantId: tenantA }, page: 1, pageSize: 10 })).items[0]?.metadata)
         .toEqual({ redactedFields: ["phone"], counts: [{ name: "message", value: 1 }] });
-      const tenantBEvents = await store.audits.list({ tenantId: tenantB, page: 1, pageSize: 10 });
+      const tenantBEvents = await store.audits.list({ scope: { scopeType: "TENANT", tenantId: tenantB }, page: 1, pageSize: 10 });
       if (factory.tenantMode === "fixed") {
         expect(tenantBEvents).toMatchObject({ items: [{ id: event.id }], total: 1 });
       } else {

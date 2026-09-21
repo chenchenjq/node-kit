@@ -57,16 +57,24 @@ export async function allRequiredConstraintsExist(pool: Pool): Promise<boolean> 
   );
   const constraints = new Set(rows.map((row) => row.constraint_name));
   return [
-    "send_message_tenant_id_idempotency_key_key",
     "send_attempt_message_id_attempt_no_key",
     "send_attempt_dispatch_token_key",
     "delivery_receipt_dedupe_key_key",
-    "send_job_tenant_id_job_type_dedupe_key_key",
-    "daily_stat_pkey",
     "daily_send_budget_pkey",
     "send_budget_reservation_message_id_key",
   ].every((name) => constraints.has(name)) && (await pool.query<{ indexname: string }>(
     `select indexname from pg_indexes
-      where schemaname = 'sms_kit' and indexname = 'otp_challenge_proof_hash_key'`,
-  )).rows.length === 1;
+      where schemaname = 'sms_kit' and indexname = any($1::text[])`,
+    [
+      "otp_challenge_proof_hash_key",
+      "otp_challenge_scope_idempotency_key_key",
+      "send_message_scope_idempotency_key_key",
+      "send_job_scope_type_dedupe_key_key",
+      "rate_limit_bucket_scope_key",
+      "daily_stat_scope_key",
+      "stat_dirty_date_scope_key",
+      "admin_operation_scope_key",
+      "admin_job_authorization_scope_key",
+    ],
+  )).rows.length === 9;
 }

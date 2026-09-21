@@ -1,5 +1,5 @@
 import { SmsKitError } from "../core/errors.js";
-import type { MessageId, TenantId } from "../core/types.js";
+import { tenantScope, type MessageId, type TenantId } from "../core/types.js";
 import type { Clock, IdGenerator } from "../ports/runtime.js";
 import type { AuthorizationActor, Authorizer } from "../ports/security.js";
 import type { Job, JobOriginAction, Message, SmsStore, SmsTransaction } from "../ports/store.js";
@@ -201,7 +201,7 @@ export class ReconcileAdminService<Actor extends AuthorizationActor = Authorizat
     const operationRequest = request(input);
     const replay = await findAdminOperationReplay({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: tenantScope(actor.tenantId),
       operation: "receipt.reconcile",
       idempotencyKey: input.idempotencyKey,
       request: operationRequest,
@@ -220,7 +220,7 @@ export class ReconcileAdminService<Actor extends AuthorizationActor = Authorizat
 
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: tenantScope(actor.tenantId),
       operation: "receipt.reconcile",
       idempotencyKey: input.idempotencyKey,
       request: operationRequest,
@@ -235,7 +235,7 @@ export class ReconcileAdminService<Actor extends AuthorizationActor = Authorizat
         }
         eligible(message, input.expectedVersion);
         const job = await this.dependencies.store.jobs.ensureReconcile({
-          tenantId: actor.tenantId,
+          ...tenantScope(actor.tenantId),
           messageId: message.id,
           availableAt: this.dependencies.clock.now(),
           originAction: "receipt.reconcile",
@@ -253,7 +253,7 @@ export class ReconcileAdminService<Actor extends AuthorizationActor = Authorizat
         }
         await this.dependencies.store.audits.append({
           id: this.dependencies.ids.next(),
-          tenantId: actor.tenantId,
+          ...tenantScope(actor.tenantId),
           actorId: actor.id,
           action: "receipt.reconcile",
           targetType: "send_message",

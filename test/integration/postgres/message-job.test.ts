@@ -346,6 +346,7 @@ describe("PostgreSQL messages, attempts, receipts and jobs", () => {
     const transaction = store.transaction(async (tx) => {
       await store.audits.append({
         id: eventId,
+        scopeType: "TENANT",
         tenantId: tenantA,
         actorId: "receipt-deadline",
         action: "receipt.abort-test",

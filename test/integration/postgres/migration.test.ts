@@ -65,8 +65,25 @@ describe("sms-kit PostgreSQL migration", () => {
       "send_attempt", "send_budget_reservation", "send_job", "send_message",
       "signature", "stat_dirty_date", "template",
     ]);
-    await expect(columnIsNotNull(pool, "send_message", "tenant_id")).resolves.toBe(true);
-    await expect(columnIsNotNull(pool, "otp_challenge", "tenant_id")).resolves.toBe(true);
+    for (const table of [
+      "send_message",
+      "send_job",
+      "otp_challenge",
+      "rate_limit_bucket",
+      "audit_event",
+      "daily_stat",
+      "stat_dirty_date",
+      "delivery_receipt",
+      "admin_operation",
+      "admin_job_authorization",
+    ]) {
+      await expect(columnIsNotNull(pool, table, "tenant_id")).resolves.toBe(false);
+      await expect(pool.query<{ column_name: string }>(
+        `select column_name from information_schema.columns
+          where table_schema = 'sms_kit' and table_name = $1 and column_name = 'scope_type'`,
+        [table],
+      )).resolves.toMatchObject({ rows: [{ column_name: "scope_type" }] });
+    }
     await expect(pool.query<{ indexname: string }>(
       `select indexname from pg_indexes
         where schemaname = 'sms_kit' and indexname = 'signature_active_name_type_key'`,
@@ -89,14 +106,63 @@ describe("sms-kit PostgreSQL migration", () => {
          0, 1, 'receipt.reconcile', '{"kind":"none"}'::jsonb, now(), now()
        )`,
     )).rejects.toMatchObject({ code: "23514" });
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(10);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(12);
+  }, 60_000);
+
+  it("accepts system challenges without a synthetic tenant and rejects invalid scope pairs", async () => {
+    const { pool } = postgres;
+    await migrateSmsKit(pool);
+
+    await expect(pool.query(
+      `insert into sms_kit.otp_challenge (
+         id, scope_type, tenant_id, idempotency_key, subject_id, action, purpose,
+         policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds,
+         phone_hash, code_hash, max_attempts, expires_at, created_at
+       ) values (
+         '00000000-0000-4000-8000-000000000101', 'SYSTEM', null, 'system-challenge', 'user-1', 'login.authenticate', 'login_otp',
+         1, 6, 300, 300, 'phone-hash', 'code-hash', 5, now() + interval '5 minutes', now()
+       )`,
+    )).resolves.toBeDefined();
+
+    await expect(pool.query(
+      `insert into sms_kit.otp_challenge (
+         id, scope_type, tenant_id, idempotency_key, subject_id, action, purpose,
+         policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds,
+         phone_hash, code_hash, max_attempts, expires_at, created_at
+       ) values (
+         '00000000-0000-4000-8000-000000000104', 'SYSTEM', null, 'system-challenge', 'user-1', 'login.authenticate', 'login_otp',
+         1, 6, 300, 300, 'phone-hash', 'code-hash', 5, now() + interval '5 minutes', now()
+       )`,
+    )).rejects.toMatchObject({ code: "23505" });
+
+    await expect(pool.query(
+      `insert into sms_kit.otp_challenge (
+         id, scope_type, tenant_id, idempotency_key, subject_id, action, purpose,
+         policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds,
+         phone_hash, code_hash, max_attempts, expires_at, created_at
+       ) values (
+         '00000000-0000-4000-8000-000000000102', 'SYSTEM', 'must-not-exist', 'invalid-system-challenge', 'user-2', 'login.authenticate', 'login_otp',
+         1, 6, 300, 300, 'phone-hash', 'code-hash', 5, now() + interval '5 minutes', now()
+       )`,
+    )).rejects.toMatchObject({ code: "23514" });
+
+    await expect(pool.query(
+      `insert into sms_kit.otp_challenge (
+         id, scope_type, tenant_id, idempotency_key, subject_id, action, purpose,
+         policy_version, otp_length, otp_ttl_seconds, proof_ttl_seconds,
+         phone_hash, code_hash, max_attempts, expires_at, created_at
+       ) values (
+         '00000000-0000-4000-8000-000000000103', 'TENANT', null, 'invalid-tenant-challenge', 'user-3', 'login.authenticate', 'login_otp',
+         1, 6, 300, 300, 'phone-hash', 'code-hash', 5, now() + interval '5 minutes', now()
+       )`,
+    )).rejects.toMatchObject({ code: "23514" });
   }, 60_000);
 
   it("upgrades the fixed previous-version fixture", async () => {
     const { pool } = postgres;
     await pool.query(await readFile(previousV2SchemaFixture, "utf8"));
     await migrateSmsKit(pool);
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(10);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(12);
     await migrateSmsKit(pool);
     await expect(allRequiredConstraintsExist(pool)).resolves.toBe(true);
   }, 60_000);
@@ -108,7 +174,7 @@ describe("sms-kit PostgreSQL migration", () => {
 
     await migrateSmsKit(pool);
 
-    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(10);
+    await expect(getSmsKitSchemaVersion(pool)).resolves.toBe(12);
     await expect(pool.query<{ state: string; lease_token: string | null; last_error_code: string | null }>("select state, lease_token, last_error_code from sms_kit.send_job where dedupe_key = 'v1-leased'"))
       .resolves.toMatchObject({ rows: [{ state: "dead", lease_token: null, last_error_code: "ACCEPTANCE_UNKNOWN" }] });
     await expect(pool.query<{ acceptance_status: string; delivery_status: string }>("select acceptance_status, delivery_status from sms_kit.send_message where id = '00000000-0000-4000-8000-000000000012'"))
