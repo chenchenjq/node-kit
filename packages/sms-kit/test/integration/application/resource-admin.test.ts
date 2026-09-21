@@ -7,7 +7,7 @@ import { ResourceAdminService } from "../../../src/application/resource-admin-se
 import { SendService } from "../../../src/application/send-service.js";
 import { SmsKitError } from "../../../src/core/errors.js";
 import { normalizeMainlandPhone } from "../../../src/core/phone.js";
-import type { MessageId, TenantId } from "../../../src/core/types.js";
+import { SYSTEM_SCOPE, type MessageId, type TenantId } from "../../../src/core/types.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 import {
   createResourceSyncCandidate,
@@ -20,7 +20,6 @@ import { PgSmsStore } from "../../../src/postgres/store.js";
 import { asSmsTransaction, type PgSmsTransaction } from "../../../src/postgres/transaction.js";
 import { startPostgres } from "../postgres/helpers.js";
 
-const systemTenant = "__system__" as TenantId;
 const actorA = { id: "resource-admin-a", tenantId: "tenant-resource-a" as TenantId } as AuthorizationActor;
 const actorB = { id: "resource-admin-b", tenantId: "tenant-resource-b" as TenantId } as AuthorizationActor;
 const now = new Date("2026-09-14T00:00:00.000Z");
@@ -187,7 +186,7 @@ describe("ResourceAdminService with PostgreSQL", () => {
     await expect(service.updateSignature(actorB, input)).rejects.toMatchObject({
       code: "CONCURRENT_MODIFICATION",
     } satisfies Partial<SmsKitError>);
-    await expect(store.audits.list({ tenantId: systemTenant, page: 1, pageSize: 10 })).resolves.toMatchObject({
+    await expect(store.audits.list({ scope: SYSTEM_SCOPE, page: 1, pageSize: 10 })).resolves.toMatchObject({
       total: 1,
       items: [expect.objectContaining({ action: "signature.update", targetId: signature.id })],
     });

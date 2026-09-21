@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { SmsKitError, type SmsErrorCode } from "../core/errors.js";
 import type { VerificationPolicy } from "../ports/policy.js";
 import { normalizeMainlandPhone } from "../core/phone.js";
-import type { ChallengeId, TenantId } from "../core/types.js";
+import { tenantScope, type ChallengeId, type TenantId } from "../core/types.js";
 import type { Clock, IdGenerator } from "../ports/runtime.js";
 import type { OtpHasher, PhoneNumberProtector } from "../ports/security.js";
 import type { Challenge, SmsStore, SmsTransaction } from "../ports/store.js";
@@ -14,7 +14,7 @@ import { enforcePhoneSendPolicy } from "./send-policy.js";
 export type IssueChallengeInput = Readonly<{
   tenantId: TenantId;
   subjectId: string;
-  action: "password.change" | "step.up";
+  action: "password.change" | "step.up" | "login.authenticate" | "password.reset";
   phone: string;
   ipAddress?: string;
   idempotencyKey: string;
@@ -41,7 +41,10 @@ export type ChallengeServiceDependencies = Readonly<{
   pendingReplayWaitMs?: number;
 }>;
 
-type ChallengePurpose = Readonly<{ challenge: "password_change" | "step_up"; send: "auth.password_change" | "auth.step_up" }>;
+type ChallengePurpose = Readonly<{
+  challenge: "password_change" | "step_up" | "login_otp" | "password_reset";
+  send: "auth.password_change" | "auth.step_up" | "auth.login_otp" | "auth.password_reset";
+}>;
 
 function requireTrustedTenant(tenantId: TenantId): void {
   if (typeof tenantId !== "string" || tenantId.trim().length === 0) throw new SmsKitError("PERMISSION_DENIED", "trusted tenant is required");
@@ -50,6 +53,8 @@ function requireTrustedTenant(tenantId: TenantId): void {
 function purposeFor(action: IssueChallengeInput["action"]): ChallengePurpose {
   if (action === "password.change") return { challenge: "password_change", send: "auth.password_change" };
   if (action === "step.up") return { challenge: "step_up", send: "auth.step_up" };
+  if (action === "login.authenticate") return { challenge: "login_otp", send: "auth.login_otp" };
+  if (action === "password.reset") return { challenge: "password_reset", send: "auth.password_reset" };
   throw new SmsKitError("CONFIG_INVALID", "challenge action is invalid");
 }
 
@@ -98,7 +103,7 @@ export class ChallengeService {
       envelopeVersion: 1, purpose: "phone", tenantId: input.tenantId, recordId: id as never, fieldName: "phone_ciphertext",
     });
     const created = await this.dependencies.store.transaction(async (tx) => {
-      await this.dependencies.store.rateLimits.lock({ tenantId: input.tenantId, scopeHash: `challenge:issue:${input.idempotencyKey}` }, tx);
+      await this.dependencies.store.rateLimits.lock({ ownership: tenantScope(input.tenantId), scopeHash: `challenge:issue:${input.idempotencyKey}` }, tx);
       const existing = await this.dependencies.store.challenges.getByIdempotency({ tenantId: input.tenantId, idempotencyKey: input.idempotencyKey }, tx);
       if (existing !== undefined) return { challenge: existing, created: false, code: undefined as string | undefined, sendPurpose: purpose.send };
       const policy = await this.dependencies.store.policy.get(tx);
@@ -120,6 +125,12 @@ export class ChallengeService {
         }, tx);
         return { challenge: terminal, created: false, code: undefined as string | undefined, sendPurpose: purpose.send };
       }
+      await this.dependencies.store.challenges.invalidateActiveForSubjectAction({
+        tenantId: input.tenantId,
+        subjectId: input.subjectId,
+        action: input.action,
+        invalidatedAt: now,
+      }, tx);
       const code = this.otpGenerator.generate(policy.otpLength);
       const challenge = await this.dependencies.store.challenges.create({
         id, tenantId: input.tenantId, idempotencyKey: input.idempotencyKey, subjectId: input.subjectId, action: input.action,
@@ -228,19 +239,19 @@ export class ChallengeService {
     tx: SmsTransaction;
   }>): Promise<void> {
     await enforcePhoneSendPolicy({
-      policy: input.policy, rateLimits: this.dependencies.store.rateLimits, tenantId: input.input.tenantId, phoneHash: input.phoneHash,
+      policy: input.policy, rateLimits: this.dependencies.store.rateLimits, ownership: tenantScope(input.input.tenantId), phoneHash: input.phoneHash,
       purpose: `challenge:${input.purpose}`, now: input.now, tx: input.tx,
     });
     const windowStart = new Date(Math.floor(input.now.getTime() / (input.policy.ipWindowSeconds * 1_000)) * input.policy.ipWindowSeconds * 1_000);
     const expiresAt = new Date(windowStart.getTime() + input.policy.ipWindowSeconds * 1_000);
-    const tenantScope = `challenge:tenant:${input.purpose}`;
-    await this.dependencies.store.rateLimits.lock({ tenantId: input.input.tenantId, scopeHash: tenantScope }, input.tx);
-    if (await this.dependencies.store.rateLimits.increment({ tenantId: input.input.tenantId, scope: "global", scopeHash: tenantScope, windowStart, windowSeconds: input.policy.ipWindowSeconds, expiresAt }, input.tx) > input.policy.ipWindowLimit) {
+    const tenantLimitScope = `challenge:tenant:${input.purpose}`;
+    await this.dependencies.store.rateLimits.lock({ ownership: tenantScope(input.input.tenantId), scopeHash: tenantLimitScope }, input.tx);
+    if (await this.dependencies.store.rateLimits.increment({ ownership: tenantScope(input.input.tenantId), scope: "global", scopeHash: tenantLimitScope, windowStart, windowSeconds: input.policy.ipWindowSeconds, expiresAt }, input.tx) > input.policy.ipWindowLimit) {
       throw new SmsKitError("RATE_LIMITED", "tenant challenge limit is exceeded");
     }
     if (input.input.ipAddress !== undefined) {
       const ipScope = await this.dependencies.hasher.hash(`challenge:ip:${input.purpose}:${input.input.ipAddress}`);
-      if (await this.dependencies.store.rateLimits.increment({ tenantId: input.input.tenantId, scope: "ip_purpose", scopeHash: ipScope, windowStart, windowSeconds: input.policy.ipWindowSeconds, expiresAt }, input.tx) > input.policy.ipWindowLimit) {
+      if (await this.dependencies.store.rateLimits.increment({ ownership: tenantScope(input.input.tenantId), scope: "ip_purpose", scopeHash: ipScope, windowStart, windowSeconds: input.policy.ipWindowSeconds, expiresAt }, input.tx) > input.policy.ipWindowLimit) {
         throw new SmsKitError("RATE_LIMITED", "IP challenge limit is exceeded");
       }
     }

@@ -1,12 +1,11 @@
 import { SmsKitError } from "../core/errors.js";
 import { validateTemplateKey } from "../core/template.js";
-import type { TemplateId, TenantId } from "../core/types.js";
+import { SYSTEM_SCOPE, type TemplateId } from "../core/types.js";
 import type { Clock, EventSink, IdGenerator } from "../ports/runtime.js";
 import type { Authorizer, AuthorizationActor } from "../ports/security.js";
 import type { Signature, SmsStore, Template } from "../ports/store.js";
 import { executeAdminOperation } from "./admin-operation.js";
 
-const SYSTEM_TENANT_ID = "__system__" as TenantId;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type ResourceAdminServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
@@ -170,7 +169,7 @@ export class ResourceAdminService<Actor extends AuthorizationActor = Authorizati
     if (!uuid(input.id) || typeof input.enabled !== "boolean") throw new SmsKitError("CONFIG_INVALID", "invalid signature update");
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "signature.update",
       idempotencyKey: input.idempotencyKey,
       request: { id: input.id, version: input.version, enabled: input.enabled },
@@ -207,7 +206,7 @@ export class ResourceAdminService<Actor extends AuthorizationActor = Authorizati
     };
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "template.import",
       idempotencyKey: input.idempotencyKey,
       request,
@@ -248,7 +247,7 @@ export class ResourceAdminService<Actor extends AuthorizationActor = Authorizati
     };
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "template.update",
       idempotencyKey: input.idempotencyKey,
       request,
@@ -272,7 +271,7 @@ export class ResourceAdminService<Actor extends AuthorizationActor = Authorizati
 
   private async audit(actor: Actor, action: string, targetType: string, targetId: string, tx: Parameters<SmsStore["audits"]["append"]>[1]) {
     await this.dependencies.store.audits.append({
-      id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
+      id: this.dependencies.ids.next(), ...SYSTEM_SCOPE, actorId: actor.id,
       action, targetType, targetId, result: "succeeded", occurredAt: this.dependencies.clock.now(),
     }, tx);
   }

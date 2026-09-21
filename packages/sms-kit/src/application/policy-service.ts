@@ -3,10 +3,9 @@ import type { VerificationPolicy, VerificationPolicyUpdate } from "../ports/poli
 import type { Authorizer, AuthorizationActor } from "../ports/security.js";
 import type { SmsStore, SmsTransaction } from "../ports/store.js";
 import type { Clock, IdGenerator } from "../ports/runtime.js";
-import type { TenantId } from "../core/types.js";
+import { SYSTEM_SCOPE } from "../core/types.js";
 import { executeAdminOperation } from "./admin-operation.js";
 
-const SYSTEM_TENANT_ID = "__system__" as TenantId;
 
 export type PolicyServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
   store: SmsStore;
@@ -150,7 +149,7 @@ export class PolicyService<Actor extends AuthorizationActor = AuthorizationActor
     validateVerificationPolicy(update);
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "policy.update",
       idempotencyKey: input.idempotencyKey,
       request: update,
@@ -167,7 +166,7 @@ export class PolicyService<Actor extends AuthorizationActor = AuthorizationActor
     await this.dependencies.store.policy.get(tx);
     const updated = await this.dependencies.store.policy.update(input, tx);
     await this.dependencies.store.audits.append({
-      id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
+      id: this.dependencies.ids.next(), ...SYSTEM_SCOPE, actorId: actor.id,
       action: "policy.update", targetType: "verification_policy", result: "succeeded", occurredAt: this.dependencies.clock.now(),
     }, tx);
     return updated;

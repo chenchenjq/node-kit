@@ -51,6 +51,7 @@ function safeMessageFor(code: SmsErrorCode): string {
     case "CONCURRENT_MODIFICATION": return "concurrent modification";
     case "CHALLENGE_EXPIRED": return "challenge expired";
     case "CHALLENGE_ATTEMPTS_EXCEEDED": return "challenge attempts exceeded";
+    case "CHALLENGE_SUPERSEDED": return "challenge has been superseded";
     case "PROOF_INVALID": return "proof is invalid";
     case "ACCEPTANCE_UNKNOWN": return "acceptance is unknown";
     case "DELIVERY_UNKNOWN": return "delivery is unknown";
