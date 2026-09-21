@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "sku-kit": ["./src/index.ts"],
+      "sku-kit/server": ["./src/server/index.ts"],
+      "sku-kit/postgres": ["./src/postgres/index.ts"],
+      "sku-kit/client": ["./src/client/index.ts"],
+      "sku-kit/react": ["./src/react/index.ts"],
+      "sku-kit/testing": ["./src/testing/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx", "scripts/**/*.mjs", "scripts/**/*.ts", "examples/**/*.ts", "examples/**/*.tsx", "vitest.config.ts"]
+}

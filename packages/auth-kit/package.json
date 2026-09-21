@@ -1,0 +1,74 @@
+{
+  "name": "auth-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "AI-USAGE.md",
+    "examples"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "browser": "./dist/browser-forbidden.js",
+      "import": "./dist/server/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    },
+    "./schema": {
+      "types": "./dist/server/schema.d.ts",
+      "browser": "./dist/browser-forbidden.js",
+      "import": "./dist/server/schema.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:pack": "node scripts/verify-pack.mjs"
+  },
+  "dependencies": {
+    "better-auth": "1.7.4",
+    "@better-auth/drizzle-adapter": "1.7.4",
+    "drizzle-orm": "0.45.2",
+    "argon2": "0.45.1",
+    "svg-captcha": "1.4.0",
+    "server-only": "0.0.1",
+    "zod": "4.6.4",
+    "@better-auth/core": "1.7.4"
+  },
+  "peerDependencies": {
+    "sms-kit": "0.0.0",
+    "pg": "8.23.0",
+    "react": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "ioredis": "6.0.0",
+    "next": "16.3.5",
+    "react-dom": "19.3.0",
+    "typescript": "7.0.2",
+    "vitest": "4.0.18",
+    "tsx": "4.23.13",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.7",
+    "jsdom": "26.1.0",
+    "testcontainers": "12.1.0",
+    "@testing-library/dom": "10.4.1"
+  },
+  "description": "私有认证能力包：基于 Better Auth 的认证、密码、验证码及 Next.js/React 集成。"
+}

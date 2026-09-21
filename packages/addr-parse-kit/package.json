@@ -1,0 +1,56 @@
+{
+  "name": "addr-parse-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "中文收件地址解析：复用宿主区域包数据，输出可确认的结构化结果，支持层级输出与反向拼接。",
+  "engines": {
+    "node": ">=22.22.1 <23"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "scripts/export-snapshot.mjs",
+    "README.md",
+    "DATABASE.md",
+    "AI-USAGE.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "browser": "./dist/browser-forbidden.js",
+      "import": "./dist/server/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.examples.json",
+    "test": "vitest run --config vitest.config.ts",
+    "test:integration": "node scripts/verify-postgres.mjs",
+    "test:pack": "node scripts/verify-pack.mjs",
+    "bench": "node scripts/bench.mjs"
+  },
+  "dependencies": {
+    "address-smart-parse": "4.0.3",
+    "server-only": "0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "area-kit": "0.0.0",
+    "drizzle-orm": "0.45.2",
+    "next": "16.3.5",
+    "pg": "8.23.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "testcontainers": "12.1.0",
+    "typescript": "7.0.2",
+    "vitest": "4.0.18"
+  }
+}

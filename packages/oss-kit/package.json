@@ -1,0 +1,78 @@
+{
+  "name": "oss-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "AI-USAGE.md",
+    "examples"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "browser": "./dist/browser-forbidden.js",
+      "import": "./dist/server/index.js"
+    },
+    "./rules": {
+      "types": "./dist/rules/index.d.ts",
+      "import": "./dist/rules/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "pretypecheck": "npm run build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "test:postgres": "node scripts/verify-postgres.mjs",
+    "test:live": "node scripts/verify-live.mjs",
+    "test:pack": "node scripts/verify-pack.mjs"
+  },
+  "dependencies": {
+    "ali-oss": "6.23.0",
+    "@types/ali-oss": "6.23.3",
+    "file-type": "21.3.0",
+    "server-only": "0.0.1"
+  },
+  "peerDependencies": {
+    "react": ">=18 <20"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "7.0.2",
+    "vitest": "4.0.18",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "next": "16.3.5",
+    "drizzle-orm": "0.45.2",
+    "pg": "8.23.0",
+    "@types/pg": "8.23.1",
+    "tsx": "4.23.13",
+    "testcontainers": "12.1.0",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.7",
+    "jsdom": "26.1.0",
+    "esbuild": "0.25.12"
+  },
+  "description": "私有对象存储能力包：阿里云 OSS、内容校验、凭据管理及 React 集成。"
+}

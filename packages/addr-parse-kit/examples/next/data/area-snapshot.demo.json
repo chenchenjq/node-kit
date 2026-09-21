@@ -1,0 +1,81 @@
+{
+  "datasetId": "addr-parse-demo",
+  "version": "demo-2026-09",
+  "codeScheme": "statistics-source-short-codes",
+  "source": "demo-json-snapshot",
+  "notice": "演示用最小区域快照，与包内测试夹具一致，只含公开的行政区划代码与名称，不含任何收件人信息。生产宿主必须用 scripts/export-snapshot.mjs 从宿主自己的区域数据导出快照并用 ADDR_PARSE_SNAPSHOT 注入，同时删除本文件。",
+  "nodes": [
+    { "code": "11", "name": "北京市", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "1101", "name": "市辖区", "level": 2, "parentCode": "11", "kind": "group" },
+    { "code": "110105", "name": "朝阳区", "level": 3, "parentCode": "1101", "kind": "region" },
+    { "code": "110105001", "name": "建外街道", "level": 4, "parentCode": "110105", "kind": "region" },
+
+    { "code": "31", "name": "上海市", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "3101", "name": "市辖区", "level": 2, "parentCode": "31", "kind": "group" },
+    { "code": "310115", "name": "浦东新区", "level": 3, "parentCode": "3101", "kind": "region" },
+    { "code": "310115125", "name": "张江镇", "level": 4, "parentCode": "310115", "kind": "region" },
+
+    { "code": "44", "name": "广东省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "4403", "name": "深圳市", "level": 2, "parentCode": "44", "kind": "region" },
+    { "code": "440305", "name": "南山区", "level": 3, "parentCode": "4403", "kind": "region" },
+    { "code": "440305007", "name": "粤海街道", "level": 4, "parentCode": "440305", "kind": "region" },
+    { "code": "440305007001", "name": "科技园社区", "level": 5, "parentCode": "440305007", "kind": "statisticalUnit" },
+    { "code": "4419", "name": "东莞市", "level": 2, "parentCode": "44", "kind": "region" },
+    { "code": "441900", "name": "东莞市", "level": 3, "parentCode": "4419", "kind": "region" },
+    { "code": "441900004", "name": "南城街道", "level": 4, "parentCode": "441900", "kind": "region" },
+
+    { "code": "52", "name": "贵州省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "5205", "name": "毕节市", "level": 2, "parentCode": "52", "kind": "region" },
+    { "code": "520521", "name": "大方县", "level": 3, "parentCode": "5205", "kind": "region" },
+    { "code": "520521002", "name": "顺德街道", "level": 4, "parentCode": "520521", "kind": "region" },
+
+    { "code": "53", "name": "云南省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "5301", "name": "昆明市", "level": 2, "parentCode": "53", "kind": "region" },
+    { "code": "530102", "name": "五华区", "level": 3, "parentCode": "5301", "kind": "region" },
+    { "code": "530102004", "name": "华山街道", "level": 4, "parentCode": "530102", "kind": "region" },
+    { "code": "5325", "name": "红河哈尼族彝族自治州", "level": 2, "parentCode": "53", "kind": "region" },
+    { "code": "532503", "name": "蒙自市", "level": 3, "parentCode": "5325", "kind": "region" },
+    { "code": "532503001", "name": "文澜街道", "level": 4, "parentCode": "532503", "kind": "region" },
+
+    { "code": "15", "name": "内蒙古自治区", "level": 1, "parentCode": null, "kind": "region", "aliases": ["内蒙古"] },
+    { "code": "1505", "name": "通辽市", "level": 2, "parentCode": "15", "kind": "region" },
+    { "code": "150502", "name": "科尔沁区", "level": 3, "parentCode": "1505", "kind": "region" },
+    { "code": "150502001", "name": "科尔沁街道", "level": 4, "parentCode": "150502", "kind": "region" },
+
+    { "code": "42", "name": "湖北省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "4290", "name": "省直辖县级行政区划", "level": 2, "parentCode": "42", "kind": "group" },
+    { "code": "429004", "name": "仙桃市", "level": 3, "parentCode": "4290", "kind": "region" },
+    { "code": "429004002", "name": "干河街道", "level": 4, "parentCode": "429004", "kind": "region" },
+
+    { "code": "41", "name": "河南省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "4102", "name": "开封市", "level": 2, "parentCode": "41", "kind": "region" },
+    { "code": "410204", "name": "鼓楼区", "level": 3, "parentCode": "4102", "kind": "region" },
+    { "code": "410204001", "name": "相国寺街道", "level": 4, "parentCode": "410204", "kind": "region" },
+
+    { "code": "32", "name": "江苏省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "3201", "name": "南京市", "level": 2, "parentCode": "32", "kind": "region" },
+    { "code": "320106", "name": "鼓楼区", "level": 3, "parentCode": "3201", "kind": "region" },
+    { "code": "320106001", "name": "华侨路街道", "level": 4, "parentCode": "320106", "kind": "region" },
+    { "code": "3203", "name": "徐州市", "level": 2, "parentCode": "32", "kind": "region" },
+    { "code": "320302", "name": "鼓楼区", "level": 3, "parentCode": "3203", "kind": "region" },
+    { "code": "320302001", "name": "夹河街街道", "level": 4, "parentCode": "320302", "kind": "region" },
+
+    { "code": "61", "name": "陕西省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "6101", "name": "西安市", "level": 2, "parentCode": "61", "kind": "region" },
+    { "code": "610113", "name": "雁塔区", "level": 3, "parentCode": "6101", "kind": "region" },
+    { "code": "610113001", "name": "小寨路街道", "level": 4, "parentCode": "610113", "kind": "region" },
+
+    { "code": "33", "name": "浙江省", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "3301", "name": "杭州市", "level": 2, "parentCode": "33", "kind": "region" },
+    { "code": "330106", "name": "西湖区", "level": 3, "parentCode": "3301", "kind": "region" },
+    { "code": "330106008", "name": "西湖街道", "level": 4, "parentCode": "330106", "kind": "region" },
+    { "code": "3302", "name": "宁波市", "level": 2, "parentCode": "33", "kind": "region" },
+    { "code": "330212", "name": "鄞州区", "level": 3, "parentCode": "3302", "kind": "region" },
+    { "code": "330212006", "name": "首南街道", "level": 4, "parentCode": "330212", "kind": "region" },
+
+    { "code": "50", "name": "重庆市", "level": 1, "parentCode": null, "kind": "region" },
+    { "code": "5001", "name": "市辖区", "level": 2, "parentCode": "50", "kind": "group" },
+    { "code": "500103", "name": "渝中区", "level": 3, "parentCode": "5001", "kind": "region" },
+    { "code": "500103001", "name": "七星岗街道", "level": 4, "parentCode": "500103", "kind": "region" }
+  ]
+}

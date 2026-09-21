@@ -1,0 +1,58 @@
+{
+  "name": "sms-kit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "files": ["dist", "README.md", "AI_USAGE.md"],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./core": { "types": "./dist/core/index.d.ts", "import": "./dist/core/index.js" },
+    "./application": { "types": "./dist/application/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/application/index.js" },
+    "./ports": { "types": "./dist/ports/index.d.ts", "import": "./dist/ports/index.js" },
+    "./security": { "types": "./dist/security/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/security/index.js" },
+    "./postgres": { "types": "./dist/postgres/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/postgres/index.js" },
+    "./aliyun": { "types": "./dist/aliyun/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/aliyun/index.js" },
+    "./better-auth": { "types": "./dist/better-auth/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/better-auth/index.js" },
+    "./next": { "types": "./dist/next/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/next/index.js" },
+    "./next/types": { "types": "./dist/next/types/index.d.ts", "import": "./dist/next/types/index.js" },
+    "./testing": { "types": "./dist/testing/index.d.ts", "browser": "./dist/browser-forbidden.js", "import": "./dist/testing/index.js" }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --exclude 'test/integration/**' --exclude 'test/live/**'",
+    "test:unit": "vitest run --exclude 'test/contract/**' --exclude 'test/e2e/**' --exclude 'test/integration/**' --exclude 'test/live/**'",
+    "test:contract": "vitest run test/contract",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "test:live": "vitest run test/live",
+    "test:live:connection": "vitest run test/live/aliyun.connection.live.test.ts"
+  },
+  "dependencies": {
+    "@alicloud/dysmsapi20170525": "4.6.0",
+    "@alicloud/openapi-client": "0.4.15",
+    "@alicloud/tea-util": "1.4.11",
+    "libphonenumber-js": "1.13.13",
+    "pg": "8.23.0",
+    "server-only": "0.0.1",
+    "zod": "4.6.4"
+  },
+  "peerDependencies": { "better-auth": ">=1.7.0 <2" },
+  "peerDependenciesMeta": { "better-auth": { "optional": true } },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "better-auth": "1.7.4",
+    "next": "16.3.5",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "rollup": "4.52.5",
+    "testcontainers": "12.1.0",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vite": "6.4.1",
+    "vitest": "4.0.18"
+  }
+}

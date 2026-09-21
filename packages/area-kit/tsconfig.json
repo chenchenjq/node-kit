@@ -1,0 +1,29 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "area-kit": ["./src/index.ts"],
+      "area-kit/server": ["./src/server/index.ts"],
+      "area-kit/postgres": ["./src/postgres/index.ts"],
+      "area-kit/client": ["./src/client/index.ts"],
+      "area-kit/react": ["./src/react/index.ts"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    "test/**/*.tsx",
+    "scripts/**/*.mjs",
+    "scripts/**/*.ts",
+    "examples/**/*.ts",
+    "examples/**/*.tsx",
+    "vitest.config.ts",
+    "vitest.postgres.config.ts"
+  ]
+}

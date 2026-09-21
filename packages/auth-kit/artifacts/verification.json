@@ -1,0 +1,12 @@
+{
+  "consumer": "/tmp/auth-kit-consumer-uYhs9y",
+  "verifiedAt": "2026-09-14T17:02:27.685Z",
+  "sms": "Real sms-kit service, encryption and migration assets; Mock provider network only; no live SMS",
+  "checks": [
+    "tgz install",
+    "public declarations",
+    "documentation examples",
+    "Next production webpack build",
+    "real PostgreSQL/Redis/Better Auth/sms-kit packed smoke"
+  ]
+}
