@@ -201,6 +201,8 @@ export function bulk(texts: readonly string[], ids: readonly string[]): BatchIte
   `next build`/`next start` 端到端 HTTP，以及初始化后断网仍可运行。证据写入 `artifacts/pack-verification.json`。
 - `npm test`（单元 + 样例评测）、`npm run test:integration`（Testcontainers PostgreSQL + 真实 area-kit 链路）、
   `npm run bench`（性能档位压测）。
+- 三条页面规则除纯函数单测外，也在真实无头 Chrome 里点击验证过一轮（17 项断言，见 `examples/next/README.md` 的验收覆盖）；
+  该脚本是仓库内的一次性工具，不属于包内容、不进 tgz。
 
 ## 边界与合规红线
 
@@ -211,12 +213,24 @@ export function bulk(texts: readonly string[], ids: readonly string[]): BatchIte
 - 手机号不得作为收件记录的全局唯一键（一个号码对应多人多地址是常态）。
 - 宿主的对外接口必须自行实施认证、限流与输入校验；本包的输入校验只防误用，不防攻击。
 
+## 许可证与第三方声明
+
+本包运行时依赖 `address-smart-parse@4.0.3`（底层区划匹配与候选打分；span 定位、槽位映射、收件人抽取与警告由本包实现，ISC 许可证），许可原文逐字保留在
+`licenses/address-smart-parse.LICENSE.txt`，并随 `npm pack` 一起分发。
+
+上游 README 提示：V4 npm 包声明为 ISC，但涉及历史版本、品牌展示、私有部署支持或单独服务协议的商业项目仍需与作者确认。
+该确认（Q7a）**尚未完成**——在收到作者书面答复前，不得宣称本包已取得商用授权。
+
+`server-only` 是 `/server` 入口在浏览器侧的护栏依赖（`package.json` 声明为 MIT，代码只有一个 `throw`）；两者都按 npm 常规方式随依赖分发。
+除以上两项外本包无其他直接依赖；区域数据不内置，来自宿主 Provider。
+
 ## 未验证（不得当作已实现能力）
 
 - 真实权威快照（约 66.5 万行含村级）下的冷启动耗时与内存占用。
 - 10 万条/批与更高并发下的吞吐、延迟与 GC 表现。
 - 多进程/工作进程共享索引的收益。
 - 真实业务数据上的字段识别准确率（现有 100% 指标只是本包的行为回归基线）。
+- `address-smart-parse` 作者的商用授权确认函（Q7a）：未发出、未获答复。
 
 ## 文档
 

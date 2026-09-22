@@ -10,6 +10,7 @@
   "files": [
     "dist",
     "examples",
+    "licenses",
     "scripts/export-snapshot.mjs",
     "README.md",
     "DATABASE.md",

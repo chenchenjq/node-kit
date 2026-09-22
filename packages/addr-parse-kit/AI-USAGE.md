@@ -138,11 +138,11 @@ export async function readyToSave(
 | `parseBatch` 10000 条（按 100 条分片） | 11111 ms，10000/10000 成功，RSS +18 MiB |
 | 峰值 RSS | 约 184–186 MiB |
 | 每百条事件循环停顿 | p50 约 100–128 ms，max 214 ms（这是在线接口必须分片的直接原因） |
-| 端到端集成冷启动（宿主 Provider 参考实现，真实 area-kit 链路 + PostgreSQL） | `nodes=60 requests=39 coldStartMs=626`（测试用小快照，两次实测 360–626 ms，**不代表生产规模**） |
+| 端到端集成冷启动（宿主 Provider 参考实现，真实 area-kit 链路 + PostgreSQL） | `nodes=60 requests=39 coldStartMs=626`（测试用小快照，三次实测 327–626 ms，**不代表生产规模**） |
 
 质量基线（同一测试集，非线上准确率）：31 条标注样例在 `matched/partial/ambiguous/unmatched` 上的字段级指标均为 100%，
 500 条合成地址的结构性不变量（无吞字、span 可复原、模式往返）全部通过。单元测试 77 项（含 11 项 playground 行为断言，见 `test/example-edit.test.ts`）+ 集成测试 9 项。
-打包验收 `node scripts/verify-pack.mjs` 在仓库外干净宿主（未安装 area-kit）跑通 14 项：tgz 清单、双入口、文档示例编译、宿主 `tsc`、
+打包验收 `node scripts/verify-pack.mjs` 在仓库外干净宿主（未安装 area-kit）跑通 14 项：tgz 清单（含第三方许可声明随包分发，且与上游 LICENSE 逐字一致）、双入口、文档示例编译、宿主 `tsc`、
 客户端越界导入被 `next build` 拒绝、注入快照的解析/错误码断言（进程级断网守卫下零外部连接）、示例站点构建、
 `next start` 端到端 HTTP（401 / 解析 / 跨区域拒绝 / 陈旧名称拒绝 / 伪造版本拒绝 / 超长 413 / 限流 429）、断网重启后同样通过、
 以及 `export-snapshot` 由宿主 Provider 驱动。
@@ -155,5 +155,7 @@ export async function readyToSave(
 - 线上真实业务数据的字段识别准确率：现有 100% 只是本包行为回归基线，样本为构造数据。
 - 身份证、邮编、OCR、大模型纠错、经纬度、地图 API、地址真实性验证、供应商编码映射、地址簿 CRUD、包内任务队列：**包内没有**。
 - 数据库迁移、认证/授权、限流、审计留存：全部归宿主，本包只提供示例代码路径。
-- playground 的交互未在真实浏览器里点击验证：三条行为规则由 `test/example-edit.test.ts` 断言纯函数，页面渲染与四个接口由打包验收覆盖。
+- playground 的交互已在真实无头 Chrome（17 项点击断言，2026-09-21）下验证过一轮：三条规则、逐级重选复原、模式切换不丢字、路径校验、确认按钮门控与返回记录；
+  但未覆盖宿主真实表单组件、触摸屏与主流浏览器矩阵，宿主改版后需重跑。
 - `examples/` 下的示例文件（含 playground）不是公开 API，不承诺向后兼容。
+- `address-smart-parse@4.0.3`（ISC，许可原文见 `licenses/address-smart-parse.LICENSE.txt`）的商用授权确认函（Q7a）：未发出、未获作者答复；涉及品牌展示、私有部署支持或单独服务协议前必须先取得书面确认。
