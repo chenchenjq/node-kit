@@ -66,6 +66,7 @@ UI 由宿主实现，可复制 `examples/next/app/page.tsx` 与 `examples/next/l
 - 层级留空就返回 `null`：不开 `allowInferred` 就不要自己补“省”，也不要为了填满表单猜代码。
 - `regionHint`/用户手工修改都不能覆盖原文里明写的区域；冲突时保留原文结果并记 `HINT_CONFLICT`。
 - 门牌、房号、楼层、备注必须留在 `detailedAddress`；隐藏街道时用 `toWithoutStreet` 把原文出现过的街道文本并回详细地址，不要静默删除。
+- 并回会插入一个空格分隔符，两种模式的 `formatAddress` 输出可能只差这个空格；判断“地址是否变了”要比对结构或去空白后比较，不要拿字符串逐字比。
 - 换上级区域必须清空更深层级代码，禁止“新名称 + 旧代码”混排提交；提交前用 `validateSelection` + `provider.validatePath` 复核。
 - 已有非空地址被解析结果覆盖前需要用户确认；`confidence` 高不代表可配送或地址真实存在。
 - 不把收件原文写进 URL 查询参数、日志、埋点或任何外部服务请求；本包运行期无网络调用。

@@ -21,8 +21,8 @@ Status: done
 - 2026-09-21 补第三方许可声明后的复跑（详见 issue 01）：同一套断言 14 步全绿（63 s），tgz 内容变化后 SHA-256 为
   `7539f6cbdcbcb9a09f04c7059f1c14f628bdcb5f211fffa89248e0f49716a72d`；断网日志仍为 0 字节，工作区已回收。
   文档定稿后再跑：14 步全绿（45 s）→ 措辞与集成统计微调后又跑一次（57 s，14 步全绿）。
-  当前字节集的 tgz SHA-256 为 `6abbc9647363a82957ad60b25dfc592f23d6d0459a6ff8de1e3a043a71383de7`，
-  在此之前记录的 sha（含 `9c3eca47…`）均已被后续文档改动取代；同一字节集下 `npm run typecheck` 两套配置 0 error、`npm test` 77/77、
+  当前字节集的 tgz SHA-256 为 `bd2f66371685bd7c9c2d857cf599cd89894cf5e18572a230baff047d3ea67cad`（补并回分隔空格文档后），
+  在此之前记录的 sha（`6abbc964…`、`9c3eca47…`）均已被后续文档改动取代；同一字节集下 `npm run typecheck` 两套配置 0 error、`npm test` 77/77、
   `npm run test:integration` 9/9（`coldStartMs=327`）。每次跑都需 `TMPDIR` 指向 `/home/meteor/tmp`（先 `mkdir -p`，脚本不会自建）：
   默认 `os.tmpdir()` 是 2 GiB 的 `/run/user/1000` tmpfs，装 next/react 会 `ENOSPC`。
 - 2026-09-21 补做浏览器点击验证（原“未验证”项）：仓库外干净宿主装 tgz → 复制 `examples/next` → `next build` + `next start`（127.0.0.1:3317）→

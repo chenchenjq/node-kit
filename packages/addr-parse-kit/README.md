@@ -147,6 +147,8 @@ export function preview(candidate: AddressCandidate, withStreet: boolean): strin
 
 `withStreet → withoutStreet` 不丢弃街道：原文里出现过的街道文本按 `matchedText` 并回 `detailedAddress` 前部，
 并在 `streetFolded` 里记录原文与复原入口；两个转换都幂等、返回新对象。
+并回会在街道原文与原明细之间留一个空格分隔符，所以 `formatAddress(..., { mode: "withoutStreet" })` 的字符串可能与 `withStreet` 差一个空格；
+复原走 `streetFolded.restoredDetail`（不重新解析），因此不要用拼接结果做逐字比对判断“地址没变”，要比对结构或去掉空白后比较。
 `formatAddress` 只使用明确字段，跳过 `null` 与 `match: "none"`，不虚构缺失层级，也不重复相邻段。
 
 ## 校验与批量

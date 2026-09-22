@@ -210,6 +210,9 @@ describe("输出模式与反向拼接", () => {
     expect(v.detailedAddress).toContain("粤海街道");
     expect(v.detailedAddress).toContain("1207 室");
     expect(c.street?.name).toBe("粤海街道");
+    // 并回只多插一个分隔空格：两种模式的拼接去掉空白后必须逐字一致（文档以此为准）。
+    expect(v.detailedAddress).toBe(`粤海街道 ${c.detailedAddress}`);
+    expect(formatAddress(v, { mode: "withoutStreet" }).replace(/\s+/g, "")).toBe(formatAddress(c, { mode: "withStreet" }).replace(/\s+/g, ""));
   });
 
   it("重复转换幂等，不多次追加街道", async () => {
