@@ -1,0 +1,32 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "types": [
+      "node",
+      "vitest/globals"
+    ],
+    "paths": {
+      "auth-kit": ["./src/types.ts"],
+      "auth-kit/server": ["./src/server/index.ts"],
+      "auth-kit/react": ["./src/react/index.ts"],
+      "auth-kit/schema": ["./src/server/schema.ts"],
+      "sms-kit": ["../sms-kit/src/index.ts"],
+      "sms-kit/core": ["../sms-kit/src/core/index.ts"],
+      "sms-kit/application": ["../sms-kit/src/application/index.ts"],
+      "sms-kit/ports": ["../sms-kit/src/ports/index.ts"],
+      "sms-kit/postgres": ["../sms-kit/src/postgres/index.ts"],
+      "sms-kit/security": ["../sms-kit/src/security/index.ts"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    "test/**/*.tsx",
+    "scripts/**/*.mjs"
+  ]
+}
+

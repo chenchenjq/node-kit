@@ -35,7 +35,7 @@ function backoff(attemptCount: number): number {
 }
 
 /**
- * Executes notification jobs only after a durable attempt marker has fenced the
+ * Executes notification and authorized test jobs after a durable attempt marker has fenced the
  * current job lease. The marker is deliberately committed before any secret is
  * opened or provider request begins, so a process loss is conservative.
  */
@@ -76,8 +76,10 @@ export class SendWorker {
       if (message === undefined || message.acceptanceStatus !== "pending") throw new SmsKitError("CONCURRENT_MODIFICATION", "message is not pending");
       const template = await this.dependencies.store.resources.findTemplateByKey({ templateKey: message.templateKeySnapshot }, tx);
       const signature = template === undefined ? undefined : await this.dependencies.store.resources.findSignatureById({ id: template.signatureId }, tx);
+      const templateTypeUsable = template?.templateType === "notification" ||
+        (job.originAction === "sms.test" && template?.templateType === "verification");
       const templateUsable = template !== undefined && template.id === message.templateId && template.enabled && isCloudApproved(template.externalStatus) &&
-        template.templateType === "notification" && template.purpose === message.purpose && template.externalCode === message.externalTemplateCodeSnapshot &&
+        templateTypeUsable && template.purpose === message.purpose && template.externalCode === message.externalTemplateCodeSnapshot &&
         template.variables.length === message.variableNames.length && template.variables.every(({ name }) => message.variableNames.includes(name));
       const signatureUsable = signature !== undefined && signature.enabled && isCloudApproved(signature.externalStatus) && signature.externalName === message.signatureNameSnapshot;
       if (!templateUsable || !signatureUsable) {

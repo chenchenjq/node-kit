@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import { SmsKitError } from "../core/errors.js";
 import { normalizeMainlandPhone } from "../core/phone.js";
-import type { TenantId } from "../core/types.js";
+import { tenantScope, type TenantId } from "../core/types.js";
 import { enforcePhoneSendPolicy } from "../application/send-policy.js";
 import type { VerificationPolicy } from "../ports/policy.js";
 import type { SmsTransaction } from "../ports/store.js";
@@ -83,15 +83,15 @@ async function applyIpAndTenantLimits(input: Readonly<{
 
   if (trustedIp !== undefined) {
     const ipScope = await options.hasher.hash(`better-auth:ip:${purpose}:${trustedIp}`);
-    await options.rateLimits.lock({ tenantId, scopeHash: `ip:${ipScope}` }, tx);
-    if (await options.rateLimits.increment({ tenantId, scope: "ip_purpose", scopeHash: ipScope, windowStart: start, windowSeconds: policy.ipWindowSeconds, expiresAt }, tx) > policy.ipWindowLimit) {
+    await options.rateLimits.lock({ ownership: tenantScope(tenantId), scopeHash: `ip:${ipScope}` }, tx);
+    if (await options.rateLimits.increment({ ownership: tenantScope(tenantId), scope: "ip_purpose", scopeHash: ipScope, windowStart: start, windowSeconds: policy.ipWindowSeconds, expiresAt }, tx) > policy.ipWindowLimit) {
       throw new SmsKitError("RATE_LIMITED", "SMS request is temporarily limited");
     }
   }
 
-  const tenantScope = await options.hasher.hash(`better-auth:tenant:${purpose}`);
-  await options.rateLimits.lock({ tenantId, scopeHash: `tenant:${tenantScope}` }, tx);
-  if (await options.rateLimits.increment({ tenantId, scope: "global", scopeHash: tenantScope, windowStart: start, windowSeconds: policy.ipWindowSeconds, expiresAt }, tx) > policy.ipWindowLimit) {
+  const tenantLimitScope = await options.hasher.hash(`better-auth:tenant:${purpose}`);
+  await options.rateLimits.lock({ ownership: tenantScope(tenantId), scopeHash: `tenant:${tenantLimitScope}` }, tx);
+  if (await options.rateLimits.increment({ ownership: tenantScope(tenantId), scope: "global", scopeHash: tenantLimitScope, windowStart: start, windowSeconds: policy.ipWindowSeconds, expiresAt }, tx) > policy.ipWindowLimit) {
     throw new SmsKitError("RATE_LIMITED", "SMS request is temporarily limited");
   }
 }
@@ -144,7 +144,7 @@ async function preflightKnownPhone(
     await enforcePhoneSendPolicy({
       policy,
       rateLimits: options.rateLimits,
-      tenantId,
+      ownership: tenantScope(tenantId),
       phoneHash,
       purpose: `better-auth:${purpose}`,
       now: options.clock.now(),

@@ -1,0 +1,52 @@
+# Verdaccio 5 configuration for node-kit private registry
+
+storage: /verdaccio/storage/data
+plugins: /verdaccio/plugins
+
+web:
+  title: node-kit Private Registry
+  primary_color: "#1e293b"
+  scope: "@node-kit"
+
+auth:
+  htpasswd:
+    file: /verdaccio/storage/htpasswd
+    max_users: 1000
+
+uplinks:
+  npmmirror:
+    url: https://registry.npmmirror.com/
+    cache: true
+    timeout: 30s
+
+packages:
+  '@node-kit/*':
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+    proxy: npmmirror
+
+  '*-kit':
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+    proxy: npmmirror
+
+  '**':
+    access: $all
+    publish: $authenticated
+    unpublish: $authenticated
+    proxy: npmmirror
+
+server:
+  keepAliveTimeout: 60
+
+middlewares:
+  audit:
+    enabled: true
+
+max_body_size: 50mb
+
+logs:
+  - { type: stdout, format: pretty, level: http }
+

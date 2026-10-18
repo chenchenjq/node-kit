@@ -9,7 +9,8 @@ export interface SecretResolver {
 export type ProtectionContext = Readonly<{
   envelopeVersion: 1;
   purpose: "phone" | "render-params";
-  tenantId: TenantId;
+  /** SYSTEM scope is intentionally represented as null, never a sentinel tenant. */
+  tenantId: TenantId | null;
   recordId: MessageId;
   fieldName: "phone_ciphertext" | "render_params_ciphertext";
 }>;

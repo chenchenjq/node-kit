@@ -2,7 +2,7 @@ import { SmsKitError } from "../core/errors.js";
 import type { ProviderAuthInput, ProviderPage, ProviderSignature, ProviderTemplate, SmsProvider } from "../ports/provider.js";
 import type { Clock, EventSink, IdGenerator } from "../ports/runtime.js";
 import type { Authorizer, AuthorizationActor } from "../ports/security.js";
-import type { TenantId } from "../core/types.js";
+import { SYSTEM_SCOPE } from "../core/types.js";
 import {
   createResourceSyncCandidate,
   hasTemplateResourceSelection,
@@ -37,7 +37,7 @@ export type ResourceSyncCommitInput = Readonly<{
   idempotencyKey?: string;
 }>;
 
-export type ResourceSyncServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+export type ResourceSyncServiceDependencies<Actor extends Readonly<{ id: string }> = AuthorizationActor> = Readonly<{
   store: SmsStore;
   provider: SmsProvider;
   authorizer: Authorizer<Actor>;
@@ -48,12 +48,14 @@ export type ResourceSyncServiceDependencies<Actor extends AuthorizationActor = A
 
 const PREVIEW_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_PAGE_SIZE = 50;
-const SYSTEM_TENANT_ID = "__system__" as TenantId;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function providerConfig(config: Awaited<ReturnType<SmsStore["config"]["get"]>>): ConfiguredProviderConfig {
-  if (config.status === "unconfigured" || config.status !== "ready" || !config.enabled) {
-    throw new SmsKitError("CONFIG_INVALID", "provider configuration is not ready");
+  // Resource discovery establishes the signature/template prerequisites for
+  // enabling delivery. Requiring enabled=true here would make first setup
+  // impossible; actual delivery paths still require the enabled readiness gate.
+  if (config.status === "unconfigured" || config.status !== "ready") {
+    throw new SmsKitError("CONFIG_INVALID", "provider configuration has not passed its connection test");
   }
   return config;
 }
@@ -231,7 +233,7 @@ function syncFromSnapshot(value: Readonly<Record<string, unknown>>): ResourceSyn
 }
 
 /** Discovers complete provider snapshots, then commits only persisted, checksummed selections. */
-export class ResourceSyncService<Actor extends AuthorizationActor = AuthorizationActor> {
+export class ResourceSyncService<Actor extends Readonly<{ id: string }> = AuthorizationActor> {
   constructor(private readonly dependencies: ResourceSyncServiceDependencies<Actor>) {}
 
   async preview(actor: Actor, input: ResourceSyncPreviewInput = {}): Promise<ResourceSyncPreview> {
@@ -248,7 +250,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     if (metadata !== undefined) {
       const replay = await findAdminOperationReplay({
         store: this.dependencies.store,
-        tenantId: actor.tenantId,
+        scope: SYSTEM_SCOPE,
         operation: "resource.sync.preview",
         idempotencyKey: metadata.idempotencyKey,
         request,
@@ -366,7 +368,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
         id: this.dependencies.ids.next(), actorId: actor.id, expiresAt: new Date(now.getTime() + PREVIEW_TTL_MS), resources,
       }, tx);
       await this.dependencies.store.audits.append({
-        id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
+        id: this.dependencies.ids.next(), ...SYSTEM_SCOPE, actorId: actor.id,
         action: "resource.sync.preview", targetType: "resource_sync", targetId: created.id,
         result: "succeeded", metadata: { counts: [{ name: "resource", value: resources.length }] }, occurredAt: this.dependencies.clock.now(),
       }, tx);
@@ -376,7 +378,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       ? { value: await this.dependencies.store.transaction(persist), replay: false }
       : await executeAdminOperation({
         store: this.dependencies.store,
-        tenantId: actor.tenantId,
+        scope: SYSTEM_SCOPE,
         operation: "resource.sync.preview",
         idempotencyKey: metadata.idempotencyKey,
         request,
@@ -404,7 +406,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
     if (metadata !== undefined) {
       const replay = await findAdminOperationReplay({
         store: this.dependencies.store,
-        tenantId: actor.tenantId,
+        scope: SYSTEM_SCOPE,
         operation: "resource.sync.commit",
         idempotencyKey: metadata.idempotencyKey,
         request,
@@ -424,7 +426,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
         now: this.dependencies.clock.now(),
       }, tx);
       await this.dependencies.store.audits.append({
-        id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
+        id: this.dependencies.ids.next(), ...SYSTEM_SCOPE, actorId: actor.id,
         action: "resource.sync.commit", targetType: "resource_sync", targetId: input.syncId,
         result: "succeeded", metadata: { counts: [{ name: "resource", value: result.candidates.length }] }, occurredAt: this.dependencies.clock.now(),
       }, tx);
@@ -434,7 +436,7 @@ export class ResourceSyncService<Actor extends AuthorizationActor = Authorizatio
       ? { value: await this.dependencies.store.transaction(persist), replay: false }
       : await executeAdminOperation({
         store: this.dependencies.store,
-        tenantId: actor.tenantId,
+        scope: SYSTEM_SCOPE,
         operation: "resource.sync.commit",
         idempotencyKey: metadata.idempotencyKey,
         request,

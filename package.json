@@ -6,6 +6,11 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "registry:up": "docker compose -f deploy/registry/docker-compose.yml up -d",
+    "registry:down": "docker compose -f deploy/registry/docker-compose.yml down",
+    "registry:status": "docker compose -f deploy/registry/docker-compose.yml ps",
+    "registry:logs": "docker compose -f deploy/registry/docker-compose.yml logs",
+    "registry:publish": "node deploy/registry/publish.mjs"
   }
 }

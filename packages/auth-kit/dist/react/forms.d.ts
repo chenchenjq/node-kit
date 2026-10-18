@@ -1,3 +1,4 @@
+import { type JSX } from "react";
 import { type AuthClient } from "./client.js";
 export type AuthFormView = "login" | "reset-password" | "change-password";
 export type AuthFormSuccess = "sign-in" | "password-reset" | "password-change";
@@ -9,4 +10,4 @@ export type AuthFormsProps = {
     className?: string;
     onSuccess?: (action: AuthFormSuccess) => void;
 };
-export declare function AuthForms({ client: providedClient, basePath, fetch: requestFetch, initialView, className, onSuccess, }: AuthFormsProps): import("react").JSX.Element;
+export declare function AuthForms({ client: providedClient, basePath, fetch: requestFetch, initialView, className, onSuccess, }: AuthFormsProps): JSX.Element;

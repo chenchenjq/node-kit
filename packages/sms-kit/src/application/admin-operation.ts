@@ -1,11 +1,11 @@
 import { SmsKitError } from "../core/errors.js";
-import type { TenantId } from "../core/types.js";
+import type { SmsScope } from "../core/types.js";
 import type { AdminOperationName, SmsStore, SmsTransaction } from "../ports/store.js";
 import { canonicalChecksum } from "./checksum.js";
 
 type OperationInput<T> = Readonly<{
   store: SmsStore;
-  tenantId: TenantId;
+  scope: SmsScope;
   operation: AdminOperationName;
   idempotencyKey: string;
   request: unknown;
@@ -34,7 +34,7 @@ function decoded<T>(
 
 export async function findAdminOperationReplay<T>(input: OperationInput<T>): Promise<T | undefined> {
   const result = await input.store.adminOperations.find({
-    tenantId: input.tenantId,
+    scope: input.scope,
     operation: input.operation,
     idempotencyKey: input.idempotencyKey,
     requestChecksum: checksum(input.request),
@@ -49,7 +49,7 @@ export async function executeAdminOperation<T>(input: OperationInput<T> & Readon
   const requestChecksum = checksum(input.request);
   return input.store.transaction(async (tx) => {
     const claim = await input.store.adminOperations.claim({
-      tenantId: input.tenantId,
+      scope: input.scope,
       operation: input.operation,
       idempotencyKey: input.idempotencyKey,
       requestChecksum,
@@ -57,7 +57,7 @@ export async function executeAdminOperation<T>(input: OperationInput<T> & Readon
     if (claim.kind === "replay") return { value: decoded(input.decode, claim.resultSnapshot), replay: true };
     const result = await input.work(tx);
     await input.store.adminOperations.complete({
-      tenantId: input.tenantId,
+      scope: input.scope,
       operation: input.operation,
       idempotencyKey: input.idempotencyKey,
       requestChecksum,

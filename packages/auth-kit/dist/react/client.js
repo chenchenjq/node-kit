@@ -9,8 +9,9 @@ export class AuthClientError extends Error {
         this.code = failure.error.code;
         this.serverTime = failure.serverTime;
         this.failure = failure;
-        if (failure.retryAt !== undefined)
+        if (failure.retryAt !== undefined) {
             this.retryAt = failure.retryAt;
+        }
     }
 }
 const errorCodes = new Set([

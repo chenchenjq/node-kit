@@ -86,7 +86,7 @@ const runtimeDependencies = [
   ["@alicloud", repositoryRoot],
   ["libphonenumber-js", repositoryRoot],
   ["server-only", repositoryRoot],
-  ["vitest", packageRoot],
+  ["vitest", repositoryRoot],
   ["zod", repositoryRoot],
 ] as const;
 

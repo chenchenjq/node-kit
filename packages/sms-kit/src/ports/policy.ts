@@ -1,4 +1,4 @@
-import type { MessageId, TenantId } from "../core/types.js";
+import type { MessageId, SmsScope, TenantId } from "../core/types.js";
 import type { SmsTransaction } from "./store.js";
 
 export type VerificationPolicy = {
@@ -27,9 +27,17 @@ export type BudgetReservation = {
   state: "held" | "released";
 };
 
+/** Existing tenant callers remain compatible; SYSTEM requires an explicit scope. */
+export type BudgetOwnership = Readonly<
+  | { tenantId: TenantId; ownership?: never }
+  | { ownership: SmsScope; tenantId?: never }
+>;
+export type HoldBudgetInput = BudgetOwnership & Readonly<{ messageId: MessageId; now: Date }>;
+export type ReleaseBudgetInput = BudgetOwnership & Readonly<{ messageId: MessageId }>;
+
 export interface PolicyStore {
   get(tx?: SmsTransaction): Promise<VerificationPolicy>;
   update(input: VerificationPolicyUpdate, tx?: SmsTransaction): Promise<VerificationPolicy>;
-  holdBudget(input: Readonly<{ tenantId: TenantId; messageId: MessageId; now: Date }>, tx: SmsTransaction): Promise<BudgetReservation>;
-  releaseBudget(input: Readonly<{ tenantId: TenantId; messageId: MessageId }>, tx: SmsTransaction): Promise<boolean>;
+  holdBudget(input: HoldBudgetInput, tx: SmsTransaction): Promise<BudgetReservation>;
+  releaseBudget(input: ReleaseBudgetInput, tx: SmsTransaction): Promise<boolean>;
 }

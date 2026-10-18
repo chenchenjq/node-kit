@@ -2,7 +2,7 @@ import { SmsKitError } from "../core/errors.js";
 import { normalizeMainlandPhone } from "../core/phone.js";
 import { isCloudApproved } from "../core/resource-usability.js";
 import { validateTemplateVariables } from "../core/template.js";
-import type { TenantId } from "../core/types.js";
+import { SYSTEM_SCOPE, tenantScope, type TenantId } from "../core/types.js";
 import type { PolicyStore } from "../ports/policy.js";
 import { positiveTimeoutMs, type SmsProvider } from "../ports/provider.js";
 import type { Clock, EventSink, IdGenerator, TestRecipientAllowlist } from "../ports/runtime.js";
@@ -253,7 +253,7 @@ export class SendService {
     const request = { expectedVersion: input.expectedVersion, requestFingerprint };
     const replay = await findAdminOperationReplay({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "sms.test.send",
       idempotencyKey: input.idempotencyKey,
       request,
@@ -262,7 +262,7 @@ export class SendService {
     if (replay !== undefined) return replay;
 
     // The allowlist guards only a new external-effecting request. A completed
-    // operation is tenant-scoped and must replay its committed safe snapshot
+    // operation is bound to its trusted tenant fingerprint and must replay its safe snapshot
     // even if a host policy later changes or is temporarily unavailable.
     const allowlist = this.dependencies.testRecipientAllowlist;
     if (allowlist === undefined) {
@@ -287,7 +287,7 @@ export class SendService {
     const messageIdempotencyKey = `admin-test:${canonicalChecksum({ tenantId: actor.tenantId, requestFingerprint })}`;
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "sms.test.send",
       idempotencyKey: input.idempotencyKey,
       request,
@@ -298,10 +298,10 @@ export class SendService {
         requireTestConfigVersion(lockedConfig, input.expectedVersion);
         // This lookup obtains the template and then parent signature shared
         // locks, held through the message insert just like ordinary sends.
-        const target = await this.requireUsableTemplate(sendInput, "notification", tx);
+        const target = await this.requireUsableTemplate(sendInput, "test", tx);
         const created = await this.dependencies.store.messages.createWithSendJob({
           id,
-          tenantId: actor.tenantId,
+          ...tenantScope(actor.tenantId),
           idempotencyKey: messageIdempotencyKey,
           templateId: target.template.id,
           templateKeySnapshot: target.template.templateKey,
@@ -334,7 +334,7 @@ export class SendService {
         }
         await this.dependencies.store.audits.append({
           id: this.dependencies.ids.next(),
-          tenantId: actor.tenantId,
+          ...tenantScope(actor.tenantId),
           actorId: actor.id,
           action: "sms.test.send",
           targetType: "send_message",
@@ -380,7 +380,7 @@ export class SendService {
       }, tx);
       // An existing direct message is authoritative: OTPs are never automatically resent.
       if (!created.created) return { message: created.message, dispatchToken: undefined, target };
-      await enforcePhoneSendPolicy({ policy, rateLimits: this.dependencies.store.rateLimits, tenantId: input.tenantId, phoneHash: protectedPhone.lookupHash, purpose: input.purpose, now, tx });
+      await enforcePhoneSendPolicy({ policy, rateLimits: this.dependencies.store.rateLimits, ownership: tenantScope(input.tenantId), phoneHash: protectedPhone.lookupHash, purpose: input.purpose, now, tx });
       await policyStore.holdBudget({ tenantId: input.tenantId, messageId: created.message.id, now }, tx);
       const attempt = await attempts.createStarted({ tenantId: input.tenantId, messageId: created.message.id, dispatchMode: "direct", dispatchMarkedAt: now }, tx);
       return { message: created.message, dispatchToken: attempt.dispatchToken, target };
@@ -411,11 +411,14 @@ export class SendService {
 
   private async requireUsableTemplate(
     input: SendInput,
-    templateType: Template["templateType"],
+    templateType: Template["templateType"] | "test",
     tx: SmsTransaction,
   ): Promise<SendTarget> {
     const template = await this.dependencies.store.resources.findTemplateByKey({ templateKey: input.templateKey }, tx);
-    if (template === undefined || template.templateType !== templateType || !template.enabled || !isCloudApproved(template.externalStatus) || template.purpose !== input.purpose) {
+    const typeMatches = template !== undefined && (templateType === "test"
+      ? template.templateType === "notification" || template.templateType === "verification"
+      : template.templateType === templateType);
+    if (template === undefined || !typeMatches || !template.enabled || !isCloudApproved(template.externalStatus) || template.purpose !== input.purpose) {
       throw new SmsKitError("TEMPLATE_UNAVAILABLE", "template is not usable");
     }
     validateTemplateVariables(template.variables.map((variable) => variable.name), input.variables);

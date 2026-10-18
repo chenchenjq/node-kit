@@ -11,8 +11,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import net from "node:net";
 
@@ -145,8 +146,15 @@ try {
     for (const required of [
       "dist/index.js", "dist/index.d.ts", "dist/server/index.js", "dist/server/index.d.ts", "dist/browser-forbidden.js",
       "scripts/export-snapshot.mjs", "examples/area-kit-provider.ts", "examples/next/app/page.tsx", "examples/next/data/area-snapshot.demo.json",
-      "README.md", "DATABASE.md", "AI-USAGE.md",
+      "README.md", "DATABASE.md", "AI-USAGE.md", "licenses/address-smart-parse.LICENSE.txt",
     ]) assert(evidence.packedFiles.includes(required), `tgz 缺少 ${required}`);
+    // 第三方许可声明必须逐字保留（ISC 要求版权声明与许可原文随副本一起分发）。
+    const sdkPackage = createRequire(join(root, "package.json")).resolve("address-smart-parse/package.json");
+    assert.equal(
+      await readFile(join(root, "licenses/address-smart-parse.LICENSE.txt"), "utf8"),
+      await readFile(join(dirname(sdkPackage), "LICENSE"), "utf8"),
+      "本包保留的许可原文与上游 LICENSE 不一致",
+    );
     assert(!evidence.packedFiles.some((path) => /(^|\/)(test|artifacts|node_modules|\.npmrc|\.env)(\/|$)/.test(path)), "tgz 混入了测试/构建/凭据目录");
     assert(!evidence.packedFiles.some((path) => /\.(csv|jsonl|pem|key)$/.test(path)), "tgz 混入了源数据或密钥文件");
     assert(!evidence.packedFiles.some((path) => path.startsWith("dist/") && path.endsWith(".map")), "tgz 混入了 sourcemap");

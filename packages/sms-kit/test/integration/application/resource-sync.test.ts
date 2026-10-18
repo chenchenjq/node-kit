@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import { ResourceSyncService } from "../../../src/application/resource-sync-service.js";
 import type { AuthorizationActor } from "../../../src/ports/security.js";
 import { SmsKitError } from "../../../src/core/errors.js";
+import { SYSTEM_SCOPE } from "../../../src/core/types.js";
 import { createResourceSyncCandidate, hasTemplateResourceSelection } from "../../../src/ports/store.js";
 import { migrateSmsKit } from "../../../src/postgres/migrator.js";
 import { PgSmsStore } from "../../../src/postgres/store.js";
@@ -16,7 +17,9 @@ describe("ResourceSyncService", () => {
   it("rejects two new provider templates selected with the same stable local key", async () => {
     const sync = new ResourceSyncService({
       store: {
-        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: true, lastTestStatus: "succeeded", version: 1 }) },
+        // Discovery happens before the first service enablement, so a
+        // successfully tested but disabled configuration must be usable.
+        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: false, lastTestStatus: "succeeded", version: 1 }) },
         resources: {
           listSignatures: async () => ({ items: [], total: 0 }),
           listTemplates: async () => ({ items: [], total: 0 }),
@@ -90,11 +93,11 @@ describe("ResourceSyncService", () => {
     })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 
-  it("requires exact candidate checksums at commit", async () => {
+  it("discovers from a tested disabled configuration and requires exact candidate checksums at commit", async () => {
     const resources = new Map<string, { id: string; expiresAt: Date; candidates: readonly { id: string; checksum: string }[] }>();
     const sync = new ResourceSyncService({
       store: {
-        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: true, lastTestStatus: "succeeded", version: 1 }) },
+        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: false, lastTestStatus: "succeeded", version: 1 }) },
         resources: {
           listSignatures: async () => ({ items: [], total: 0 }),
           listTemplates: async () => ({ items: [], total: 0 }),
@@ -209,7 +212,7 @@ describe("ResourceSyncService with PostgreSQL", () => {
 
     expect(committed.status).toBe("succeeded");
     expect((await store.resources.listSignatures({ page: 1, pageSize: 10 })).items).toHaveLength(1);
-    expect((await store.audits.list({ tenantId: "__system__" as AuthorizationActor["tenantId"], page: 1, pageSize: 10 })).items).toEqual(expect.arrayContaining([
+    expect((await store.audits.list({ scope: SYSTEM_SCOPE, page: 1, pageSize: 10 })).items).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "resource.sync.commit", targetId: preview.id, result: "succeeded" }),
     ]));
   });

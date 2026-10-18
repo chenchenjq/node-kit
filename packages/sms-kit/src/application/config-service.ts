@@ -5,13 +5,18 @@ import { withProviderTimeout } from "../ports/provider-timeout.js";
 import { projectSafeEventMetadata, type Clock, type EventSink, type IdGenerator, type SafeEventMetadata } from "../ports/runtime.js";
 import type { Authorizer, AuthorizationActor, SecretResolver } from "../ports/security.js";
 import type { ConfiguredProviderConfig, ProviderConfig, SmsStore, UpdateProviderConfigInput } from "../ports/store.js";
-import type { TenantId } from "../core/types.js";
+import { SYSTEM_SCOPE } from "../core/types.js";
 import { executeAdminOperation, findAdminOperationReplay } from "./admin-operation.js";
 
-const SYSTEM_TENANT_ID = "__system__" as TenantId;
 const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 10_000;
 
-export type ConfigServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+/**
+ * Configuration authorization is actor-shape agnostic: ConfigService only
+ * passes the actor to its injected Authorizer.  In particular this permits a
+ * host's SYSTEM actor to retain its required null tenant boundary instead of
+ * manufacturing a tenant identifier merely to configure a global provider.
+ */
+export type ConfigServiceDependencies<Actor extends Readonly<{ id: string }> = AuthorizationActor> = Readonly<{
   store: SmsStore;
   provider: SmsProvider;
   secretResolver: SecretResolver;
@@ -194,7 +199,7 @@ function safeConnectionFailure(error: unknown): SmsKitError {
 }
 
 /** Manages the singleton provider configuration; it never returns resolved secret values. */
-export class ConfigService<Actor extends AuthorizationActor = AuthorizationActor> {
+export class ConfigService<Actor extends Readonly<{ id: string }> = AuthorizationActor> {
   private readonly connectionTestTimeoutMs: number;
 
   constructor(private readonly dependencies: ConfigServiceDependencies<Actor>) {
@@ -244,7 +249,7 @@ export class ConfigService<Actor extends AuthorizationActor = AuthorizationActor
     };
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "config.patch",
       idempotencyKey: input.idempotencyKey,
       request,
@@ -305,7 +310,7 @@ export class ConfigService<Actor extends AuthorizationActor = AuthorizationActor
     const request = { expectedVersion: input.expectedVersion };
     const replay = await findAdminOperationReplay({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "config.test_connection",
       idempotencyKey: input.idempotencyKey,
       request,
@@ -318,7 +323,7 @@ export class ConfigService<Actor extends AuthorizationActor = AuthorizationActor
 
     const execution = await executeAdminOperation({
       store: this.dependencies.store,
-      tenantId: actor.tenantId,
+      scope: SYSTEM_SCOPE,
       operation: "config.test_connection",
       idempotencyKey: input.idempotencyKey,
       request,
@@ -428,7 +433,7 @@ export class ConfigService<Actor extends AuthorizationActor = AuthorizationActor
     tx: Parameters<SmsStore["audits"]["append"]>[1], result: "succeeded" | "failed" = "succeeded",
   ): Promise<void> {
     await this.dependencies.store.audits.append({
-      id: this.dependencies.ids.next(), tenantId: SYSTEM_TENANT_ID, actorId: actor.id,
+      id: this.dependencies.ids.next(), ...SYSTEM_SCOPE, actorId: actor.id,
       action, targetType, result, ...(errorCode === undefined ? {} : { errorCode }), occurredAt: this.dependencies.clock.now(),
     }, tx);
   }

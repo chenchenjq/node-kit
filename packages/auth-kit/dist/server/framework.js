@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { betterAuth } from "better-auth";
-import { phoneNumber } from "better-auth/plugins";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
+import { setSessionCookie } from "better-auth/cookies";
+import { z } from "zod";
 import { credentialAdapter } from "./database.js";
 import { hashPassword, verifyPassword } from "./password.js";
 /** Package-private: no raw auth instance/options/context is exported by auth-kit. */
-export function createFramework(options, client, send) {
+export function createFramework(options, client) {
     const gate = new AsyncLocalStorage();
     const auth = betterAuth({
         appName: options.appId,
@@ -13,7 +14,7 @@ export function createFramework(options, client, send) {
         basePath: "/api/auth-kit-internal",
         secret: options.secret,
         database: credentialAdapter(client, options.schema),
-        trustedOrigins: [options.baseURL],
+        trustedOrigins: [options.baseURL, ...(options.developmentOrigins ?? [])],
         logger: { disabled: true },
         emailAndPassword: {
             enabled: true,
@@ -43,14 +44,30 @@ export function createFramework(options, client, send) {
             disableOriginCheck: false,
         },
         plugins: [
-            phoneNumber({
-                otpLength: 6,
-                expiresIn: 300,
-                allowedAttempts: 3,
-                requireVerification: false,
-                sendOTP: async ({ phoneNumber, code }) => send(phoneNumber, code, "sms-login"),
-                sendPasswordResetOTP: async ({ phoneNumber, code }) => send(phoneNumber, code, "password-reset"),
-            }),
+            {
+                id: "auth-kit-system-session",
+                endpoints: {
+                    createSessionForUser: createAuthEndpoint("/create-session-for-user", {
+                        method: "POST",
+                        body: z.object({ userId: z.string() }),
+                    }, async (ctx) => {
+                        const user = (await ctx.context.internalAdapter.findUserById(ctx.body.userId));
+                        if (!user)
+                            throw new APIError("NOT_FOUND", {
+                                code: "NOT_FOUND",
+                                message: "User not found",
+                            });
+                        const session = await ctx.context.internalAdapter.createSession(user.id);
+                        if (!session)
+                            throw new APIError("INTERNAL_SERVER_ERROR", {
+                                code: "INTERNAL_SERVER_ERROR",
+                                message: "Failed to create session",
+                            });
+                        await setSessionCookie(ctx, { session, user });
+                        return ctx.json({ status: true, session, user });
+                    }),
+                },
+            },
         ],
         hooks: {
             before: createAuthMiddleware(async (ctx) => {

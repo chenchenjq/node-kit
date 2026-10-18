@@ -7,3 +7,7 @@ Status: done
 ## Comments
 
 - 完成证据：`toWithoutStreet/toWithStreet` 往返幂等且深拷贝复原（宿主内 `deepEqual(restored, first)`）；`formatAddress`/`formatRecipientLine`/`validateAddressIntegrity` 由单测与文档示例编译共同验证。
+- 2026-09-22 浏览器验收时发现一处文档欠精确并补齐：并回会在街道原文与明细之间插入一个分隔空格（`src/transform.ts:25` 的 `` `${text} ${original}` ``），
+  因此 `withoutStreet` 与 `withStreet` 两种模式的 `formatAddress` 输出可能只差这个空格，复原依赖 `streetFolded.restoredDetail` 而非重新解析。
+  README 模式转换段与 AI-USAGE 行为规则已写明「不要用拼接结果逐字比对判断地址没变」，并在 `test/core.test.ts` 的并回用例里固化两条断言
+  （`detailedAddress === "粤海街道 " + 原明细`；两种模式拼接去空白后逐字相等）。行为本身未改动。

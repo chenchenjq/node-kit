@@ -16,6 +16,7 @@ import { PgReceiptRepository } from "./repositories/receipt-repository.js";
 import { PgResourceRepository } from "./repositories/resource-repository.js";
 import { PgRateLimitRepository } from "./repositories/rate-limit-repository.js";
 import { PgStatsRepository } from "./repositories/stats-repository.js";
+import { PgSystemAuthRepository } from "./repositories/system-auth-repository.js";
 import { asSmsTransaction } from "./transaction.js";
 
 /** The repository subset backed by the first PostgreSQL persistence release. */
@@ -34,6 +35,7 @@ export class PgSmsStore {
   readonly stats: PgStatsRepository;
   readonly maintenance: PgMaintenanceRepository;
   readonly health: PgHealthRepository;
+  readonly systemAuth: PgSystemAuthRepository;
 
   constructor(private readonly pool: Pool) {
     this.adminOperations = new PgAdminOperationRepository(pool);
@@ -50,6 +52,7 @@ export class PgSmsStore {
     this.stats = new PgStatsRepository(pool);
     this.maintenance = new PgMaintenanceRepository(pool);
     this.health = new PgHealthRepository(pool);
+    this.systemAuth = new PgSystemAuthRepository(pool);
   }
 
   async transaction<T>(work: (tx: SmsTransaction) => Promise<T>, options?: SmsTransactionOptions): Promise<T> {

@@ -2,6 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import svgCaptcha from "svg-captcha";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, and } from "drizzle-orm";
+import { asSmsTransaction } from "sms-kit/postgres";
 import { AuthKitError, errorResponse } from "./errors.js";
 import { SecurityState } from "./state.js";
 import { validatePassword, hashPassword, verifyPassword } from "./password.js";
@@ -22,6 +23,13 @@ function validateOptions(options) {
         typeof options.secret !== "string" ||
         options.secret.length < 32)
         throw new Error("appId and an auth secret of at least 32 characters are required");
+    for (const origin of options.developmentOrigins ?? []) {
+        const candidate = new URL(origin), host = candidate.hostname;
+        const privateIPv4 = /^(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)$/.test(host);
+        if (process.env.NODE_ENV === "production" || candidate.origin !== origin || candidate.protocol !== "http:" ||
+            !(privateIPv4 || ["localhost", "127.0.0.1", "[::1]"].includes(host)))
+            throw new Error("Development origins must be explicit private-network HTTP origins outside production");
+    }
     const url = new URL(options.baseURL);
     if (url.origin !== options.baseURL ||
         !(url.protocol === "https:" ||
@@ -31,8 +39,11 @@ function validateOptions(options) {
     if (!/^\/[a-zA-Z0-9/_-]+$/.test(options.basePath ?? "/api/auth-kit") ||
         (options.basePath ?? "").endsWith("/"))
         throw new Error("Invalid basePath");
-    if (!options.sms.tenantId ||
+    if (!options.sms?.service ||
+        typeof options.sms.service.issue !== "function" ||
+        typeof options.sms.service.verifyAndConsume !== "function" ||
         typeof options.resolveClientIp !== "function" ||
+        (options.resolveUsername !== undefined && typeof options.resolveUsername !== "function") ||
         options.wechat?.enabled)
         throw new Error("Invalid host configuration");
 }
@@ -91,12 +102,25 @@ export function createAuthKit(options) {
                 await state.saveCaptcha(challenge.context, body.purpose, id, captcha.text, now);
                 const headers = new Headers();
                 headers.append("set-cookie", challenge.cookie);
-                return json({ id, image: captcha.data, expiresAt: now + 120000, serverTime: now }, headers);
+                return json({
+                    id,
+                    image: captcha.data,
+                    expiresAt: now + 120000,
+                    serverTime: now,
+                }, headers);
             }
             const phone = body.phoneNumber;
             if (path === "/sign-in/password") {
                 await enforce("password-ip", ip, now, 300000, 100);
-                await enforce("password-phone", phone, now, 300000, 10);
+                if (body.email) {
+                    await enforce("password-email", body.email, now, 300000, 10);
+                }
+                else if (body.username) {
+                    await enforce("password-username", body.username, now, 300000, 10);
+                }
+                else {
+                    await enforce("password-phone", phone, now, 300000, 10);
+                }
             }
             if (path === "/sign-in/sms" || path === "/password/reset") {
                 await enforce("otp-ip", ip, now, 300000, 100);
@@ -105,12 +129,10 @@ export function createAuthKit(options) {
             if (path === "/password/change")
                 await enforce("password-change-ip", ip, now, 300000, 30);
             if (path === "/sms/send")
-                await enforce("send-ip", ip, now, 300000, 30);
-            if (path === "/sms/send" || path === "/sign-in/password") {
-                const purpose = path === "/sms/send"
-                    ? body.purpose
-                    : "password-login";
-                if (!(await state.consumeCaptcha(challenge.context, purpose, body.captchaId, body.captchaAnswer, now)))
+                await enforce("send-ip", ip, now, 3600000, 20);
+            if (path === "/sign-in/password" || path === "/sms/send") {
+                const purpose = path === "/sign-in/password" ? "password-login" : body.purpose;
+                if (!body.captchaId || !body.captchaAnswer || !(await state.consumeCaptcha(challenge.context, purpose, body.captchaId, body.captchaAnswer, now)))
                     throw new AuthKitError("CAPTCHA_INVALID", 400);
             }
             if (path === "/password/reset" || path === "/password/change") {
@@ -121,99 +143,107 @@ export function createAuthKit(options) {
                     throw new AuthKitError("INVALID_INPUT", 400);
                 }
             }
-            return await withClient(request, path, body, now, json, refreshSession);
+            return await withClient(request, path, body, now, ip, json, refreshSession);
         }
         catch (error) {
             return errorResponse(error, now);
         }
     }
-    async function withClient(request, path, body, now, json, refreshSession) {
+    async function withClient(request, path, body, now, ip, json, refreshSession) {
         const client = await options.pool.connect();
         let heldKey;
         let broken = false;
+        let transactionOpen = false;
+        const begin = async () => {
+            await client.query("BEGIN");
+            transactionOpen = true;
+        };
+        const commit = async () => {
+            await client.query("COMMIT");
+            transactionOpen = false;
+        };
         try {
             const db = drizzle(client);
-            const { user, verification } = options.schema;
-            let activePhone = body.phoneNumber;
-            let sendAllowed = false;
-            const framework = createFramework(options, client, async (phone, code, purpose) => {
-                if (!sendAllowed)
-                    return;
-                const issuance = (await db
-                    .select()
-                    .from(verification)
-                    .where(eq(verification.identifier, identifier(phone, purpose))))[0];
-                if (!issuance || issuance.expiresAt.getTime() <= (await state.now()))
-                    throw new Error("Missing framework issuance");
-                const message = await options.sms.sendService.sendOtpNow({
-                    tenantId: options.sms.tenantId,
-                    phone,
-                    variables: { code },
-                    purpose: purpose === "sms-login"
-                        ? "better-auth:login"
-                        : "better-auth:passwordReset",
-                    templateKey: purpose === "sms-login"
-                        ? (options.sms.templates?.login ?? "auth.login_otp")
-                        : (options.sms.templates?.passwordReset ??
-                            "auth.password_reset"),
-                    idempotencyKey: `auth-kit:${options.appId}:${randomUUID()}`,
-                });
-                if (message.acceptanceStatus !== "accepted")
-                    throw new Error("SMS not accepted");
-                await state.acceptDelivery(identifier(phone, purpose), issuance.expiresAt.getTime());
-            });
+            const { user, session, account } = options.schema;
+            let userId;
+            if (path === "/sign-in/password" && body.username) {
+                userId = await options.resolveUsername?.(body.username) ?? undefined;
+                if (!userId) {
+                    await verifyPassword({ hash: await dummyHash, password: body.password });
+                    throw new AuthKitError("INVALID_CREDENTIALS", 401);
+                }
+            }
+            if (path === "/sign-in/password" && body.email) {
+                const matches = await db.select().from(user).where(eq(user.email, body.email));
+                userId = matches[0]?.id;
+                if (!userId) {
+                    await verifyPassword({ hash: await dummyHash, password: body.password });
+                    throw new AuthKitError("INVALID_CREDENTIALS", 401);
+                }
+            }
+            const framework = createFramework(options, client);
             const headers = new Headers(request.headers);
-            // Supply only the host-verified IP to the framework; caller forwarded headers are discarded.
             headers.delete("x-forwarded-for");
             headers.delete("x-real-ip");
-            headers.set("x-forwarded-for", await options.resolveClientIp(request));
+            headers.set("x-forwarded-for", ip);
             const { auth, run } = framework;
-            const readSession = () => run("/get-session", () => auth.api.getSession({ headers, query: { disableRefresh: true } }));
-            if (!activePhone) {
-                const session = await readSession();
-                if (!session) {
-                    if (path === "/sign-out")
-                        return json({ status: true });
+            const api = auth.api;
+            const readSession = () => run("/get-session", () => api.getSession({ headers, query: { disableRefresh: true } }));
+            if (!body.phoneNumber && !userId) {
+                const currentSession = await readSession();
+                if (!currentSession) {
+                    if (path === "/sign-out") {
+                        const result = await run("/sign-out", () => api.signOut({ headers, asResponse: true }));
+                        const responseHeaders = new Headers();
+                        for (const cookie of result.headers.getSetCookie())
+                            responseHeaders.append("set-cookie", cookie);
+                        return json({ status: true }, responseHeaders);
+                    }
                     throw new AuthKitError("UNAUTHENTICATED", 401);
                 }
-                const rows = await db
-                    .select()
-                    .from(user)
-                    .where(eq(user.id, session.user.id));
-                activePhone = rows[0]?.phoneNumber;
-                if (!activePhone || (!(await allowed(rows[0])) && path !== "/sign-out"))
-                    throw new AuthKitError("UNAUTHENTICATED", 401);
+                userId = currentSession.user.id;
             }
-            heldKey = lockKey(options.appId, activePhone);
-            // Session-level PostgreSQL locks do not expire mid-request. OTP failures persist; no rollback of attempt counts.
+            const matches = await db.select().from(user).where(userId ? eq(user.id, userId) : eq(user.phoneNumber, body.phoneNumber));
+            const identity = matches[0];
+            // Every alias and account-management operation serializes on the stable user ID.
+            heldKey = lockKey(options.appId, identity ? `user:${identity.id}` : `phone:${body.phoneNumber}`);
             await client.query("SELECT pg_advisory_lock($1::bigint)", [heldKey]);
-            const rows = await db
-                .select()
-                .from(user)
-                .where(eq(user.phoneNumber, activePhone));
-            const current = rows[0];
-            const canLogin = await allowed(current);
+            const current = identity ? (await db.select().from(user).where(eq(user.id, identity.id)))[0] : undefined;
+            const activePhone = current?.phoneNumber ?? body.phoneNumber ?? null;
+            const canLogin = (!body.phoneNumber || current?.phoneNumber === body.phoneNumber) && await allowed(current);
+            if (path === "/sign-in/password" && current)
+                await enforce("password-user", current.id, now, 300000, 10);
             if (path === "/session") {
-                const result = await run("/get-session", () => auth.api.getSession({
+                const result = await run("/get-session", () => api.getSession({
                     headers,
                     query: { disableRefresh: !refreshSession },
                     returnHeaders: true,
                 }));
-                const session = result.response;
-                if (!session || !canLogin)
+                const currentSession = result.response;
+                if (!currentSession || !canLogin)
                     throw new AuthKitError("UNAUTHENTICATED", 401);
                 return json({
                     user: {
-                        id: session.user.id,
-                        name: session.user.name,
+                        id: currentSession.user.id,
+                        name: currentSession.user.name,
                         phoneNumber: activePhone,
                     },
-                    expiresAt: session.session.expiresAt.toISOString(),
+                    expiresAt: currentSession.session.expiresAt.toISOString(),
                 }, result.headers);
             }
             if (path === "/sign-out") {
-                const r = await run("/sign-out", () => auth.api.signOut({ headers, asResponse: true }));
-                return forward(r, json, "UNAUTHENTICATED");
+                const currentSession = await readSession();
+                if (currentSession?.session?.id) {
+                    await db
+                        .delete(session)
+                        .where(eq(session.id, currentSession.session.id));
+                }
+                const signOutRes = await run("/sign-out", () => api.signOut({ headers, asResponse: true }));
+                const responseHeaders = new Headers();
+                for (const cookie of signOutRes.headers.getSetCookie()) {
+                    responseHeaders.append("set-cookie", cookie);
+                }
+                return json({ status: true }, responseHeaders);
             }
             if (path === "/sms/send") {
                 now = await state.now();
@@ -221,35 +251,39 @@ export function createAuthKit(options) {
                 if (!quota.allowed)
                     throw new AuthKitError("RATE_LIMITED", 429, quota.retryAt);
                 const purpose = body.purpose;
-                const id = identifier(activePhone, purpose);
-                await state.clearDelivery(id);
-                await db.delete(verification).where(eq(verification.identifier, id));
-                sendAllowed = canLogin;
-                let delivered = false;
+                const action = purpose === "sms-login" ? "login.authenticate" : "password.reset";
+                if (!canLogin || !current) {
+                    // Anonymous uniform response: do not disclose account presence or status
+                    const retryAt = await state.finishSend(activePhone, now);
+                    return json({ status: true, retryAt, serverTime: now });
+                }
                 try {
-                    const r = purpose === "sms-login"
-                        ? await run("/phone-number/send-otp", () => auth.api.sendPhoneNumberOTP({
-                            headers,
-                            body: { phoneNumber: activePhone },
-                            asResponse: true,
-                        }))
-                        : await run("/phone-number/request-password-reset", () => auth.api.requestPasswordResetPhoneNumber({
-                            headers,
-                            body: { phoneNumber: activePhone },
-                            asResponse: true,
-                        }));
-                    delivered = canLogin && r.ok;
+                    const result = await options.sms.service.issue({
+                        subjectId: current.id,
+                        action,
+                        phone: activePhone,
+                        ipAddress: ip,
+                        idempotencyKey: `auth-kit:${options.appId}:${current.id}:${action}:${randomUUID()}`,
+                    });
+                    await state.setActiveChallenge(current.id, action, result.id, 300_000);
                 }
-                catch {
-                    /* Same public receipt for absent/disabled accounts and delivery rejection/timeout. */
+                catch (error) {
+                    if (error instanceof AuthKitError)
+                        throw error;
+                    const code = error?.code || error?.name;
+                    if (code === "RATE_LIMITED" ||
+                        code === "PROVIDER_THROTTLED" ||
+                        code === "PHONE_THROTTLED" ||
+                        code === "IP_THROTTLED") {
+                        throw new AuthKitError("RATE_LIMITED", 429);
+                    }
+                    throw new AuthKitError("UNAVAILABLE", 503);
                 }
-                if (!delivered)
-                    await db.delete(verification).where(eq(verification.identifier, id));
                 now = await state.now();
                 const retryAt = await state.finishSend(activePhone, now);
                 return json({ status: true, retryAt, serverTime: now });
             }
-            if (!canLogin) {
+            if (!canLogin || !current) {
                 if (path === "/sign-in/password")
                     await verifyPassword({
                         hash: await dummyHash,
@@ -263,59 +297,158 @@ export function createAuthKit(options) {
                     ? 401
                     : 400);
             }
-            if (path === "/sign-in/password")
-                return forward(await run("/sign-in/phone-number", () => auth.api.signInPhoneNumber({
+            if (path === "/sign-in/password") {
+                const accountRows = await db
+                    .select()
+                    .from(account)
+                    .where(and(eq(account.userId, current.id), eq(account.providerId, "credential")));
+                const cred = accountRows[0];
+                if (!cred?.password) {
+                    await verifyPassword({
+                        hash: await dummyHash,
+                        password: body.password,
+                    });
+                    throw new AuthKitError("INVALID_CREDENTIALS", 401);
+                }
+                const valid = (await verifyPassword({
+                    hash: cred.password,
+                    password: body.password,
+                })) ||
+                    (options.verifyLegacyPassword
+                        ? await options.verifyLegacyPassword({
+                            hash: cred.password,
+                            password: body.password,
+                        })
+                        : false);
+                if (!valid) {
+                    throw new AuthKitError("INVALID_CREDENTIALS", 401);
+                }
+                const r = await run("/create-session-for-user", () => api.createSessionForUser({
                     headers,
-                    body: { phoneNumber: activePhone, password: body.password },
+                    body: { userId: current.id },
                     asResponse: true,
-                })), json, "INVALID_CREDENTIALS");
+                }));
+                return forward(r, json, "INVALID_CREDENTIALS");
+            }
             if (path === "/password/change") {
-                // Re-read after the phone lock: a reset/sign-out may have revoked this session while waiting.
-                const s = await readSession();
-                if (!s || s.user.id !== current.id)
+                const currentSession = await readSession();
+                if (!currentSession || currentSession.user.id !== current.id)
                     throw new AuthKitError("UNAUTHENTICATED", 401);
-                return forward(await run("/change-password", () => auth.api.changePassword({
-                    headers,
-                    body: {
-                        currentPassword: body.currentPassword,
-                        newPassword: body.newPassword,
-                        revokeOtherSessions: true,
-                    },
-                    asResponse: true,
-                })), json, "INVALID_CREDENTIALS");
+                const accountRows = await db
+                    .select()
+                    .from(account)
+                    .where(and(eq(account.userId, current.id), eq(account.providerId, "credential")));
+                const cred = accountRows[0];
+                if (!cred?.password)
+                    throw new AuthKitError("UNAUTHENTICATED", 401);
+                const currentValid = (await verifyPassword({
+                    hash: cred.password,
+                    password: body.currentPassword,
+                })) ||
+                    (options.verifyLegacyPassword
+                        ? await options.verifyLegacyPassword({
+                            hash: cred.password,
+                            password: body.currentPassword,
+                        })
+                        : false);
+                if (!currentValid)
+                    throw new AuthKitError("INVALID_CREDENTIALS", 401);
+                const newHash = await hashPassword(body.newPassword);
+                await begin();
+                await db
+                    .update(account)
+                    .set({ password: newHash, updatedAt: new Date() })
+                    .where(eq(account.id, cred.id));
+                // Revoke ALL sessions for this user (both current and other devices)
+                await db.delete(session).where(eq(session.userId, current.id));
+                // Return expired session cookie headers
+                const signOutRes = await run("/sign-out", () => api.signOut({ headers, asResponse: true }));
+                if (!signOutRes.ok)
+                    throw new AuthKitError("UNAVAILABLE", 503);
+                await commit();
+                const responseHeaders = new Headers();
+                for (const cookie of signOutRes.headers.getSetCookie()) {
+                    responseHeaders.append("set-cookie", cookie);
+                }
+                return json({ status: true }, responseHeaders);
             }
             const purpose = path === "/sign-in/sms" ? "sms-login" : "password-reset";
-            const existing = await db
-                .select()
-                .from(verification)
-                .where(and(eq(verification.identifier, identifier(activePhone, purpose))));
-            now = await state.now();
-            if (!existing[0] ||
-                existing[0].expiresAt.getTime() <= now ||
-                !(await state.deliveryAccepted(identifier(activePhone, purpose), existing[0].expiresAt.getTime())))
+            const action = purpose === "sms-login" ? "login.authenticate" : "password.reset";
+            let challengeId = await state.getActiveChallenge(current.id, action);
+            if (!challengeId) {
+                try {
+                    const res = await client.query("SELECT id FROM sms_kit.otp_challenge WHERE scope_type='SYSTEM' AND tenant_id IS NULL AND subject_id=$1 AND action=$2 AND invalidated_at IS NULL AND verified_at IS NULL AND expires_at > now() ORDER BY created_at DESC LIMIT 1", [current.id, action]);
+                    challengeId = res.rows[0]?.id;
+                }
+                catch { }
+            }
+            if (!challengeId)
                 throw new AuthKitError("OTP_INVALID", 400);
-            if (path === "/sign-in/sms")
-                return forward(await run("/phone-number/verify", () => auth.api.verifyPhoneNumber({
+            const newHash = path === "/password/reset" ? await hashPassword(body.newPassword) : undefined;
+            await begin();
+            const verified = await options.sms.service.verifyAndConsume({
+                subjectId: current.id, action, challengeId, code: body.code,
+                consumptionKey: `auth-kit:${purpose}:${randomUUID()}`,
+            }, asSmsTransaction(client));
+            if (!verified) {
+                // No credential writes yet: retain failed-code attempts in the same transaction.
+                await commit();
+                throw new AuthKitError("OTP_INVALID", 400);
+            }
+            if (path === "/sign-in/sms") {
+                const r = await run("/create-session-for-user", () => api.createSessionForUser({
                     headers,
-                    body: {
-                        phoneNumber: activePhone,
-                        code: body.code,
-                        disableSession: false,
-                        updatePhoneNumber: false,
-                    },
+                    body: { userId: current.id },
                     asResponse: true,
-                })), json, "OTP_INVALID");
-            return forward(await run("/phone-number/reset-password", () => auth.api.resetPasswordPhoneNumber({
-                headers,
-                body: {
-                    phoneNumber: activePhone,
-                    otp: body.code,
-                    newPassword: body.newPassword,
-                },
-                asResponse: true,
-            })), json, "OTP_INVALID");
+                }));
+                const response = forward(r, json, "OTP_INVALID");
+                await commit();
+                return response;
+            }
+            // /password/reset
+            const accountRows = await db
+                .select()
+                .from(account)
+                .where(and(eq(account.userId, current.id), eq(account.providerId, "credential")));
+            const cred = accountRows[0];
+            if (cred) {
+                await db
+                    .update(account)
+                    .set({ password: newHash, updatedAt: new Date() })
+                    .where(eq(account.id, cred.id));
+            }
+            else {
+                await db.insert(account).values({
+                    id: randomUUID(),
+                    userId: current.id,
+                    accountId: current.id,
+                    providerId: "credential",
+                    password: newHash,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                });
+            }
+            // Revoke ALL sessions for this user; do not auto sign-in
+            await db.delete(session).where(eq(session.userId, current.id));
+            const signOutRes = await run("/sign-out", () => api.signOut({ headers, asResponse: true }));
+            if (!signOutRes.ok)
+                throw new AuthKitError("UNAVAILABLE", 503);
+            await commit();
+            const responseHeaders = new Headers();
+            for (const cookie of signOutRes.headers.getSetCookie()) {
+                responseHeaders.append("set-cookie", cookie);
+            }
+            return json({ status: true }, responseHeaders);
         }
         finally {
+            if (transactionOpen) {
+                try {
+                    await client.query("ROLLBACK");
+                }
+                catch {
+                    broken = true;
+                }
+            }
             if (heldKey)
                 try {
                     await client.query("SELECT pg_advisory_unlock($1::bigint)", [
@@ -353,6 +486,5 @@ function forward(response, json, code) {
     const headers = new Headers();
     for (const cookie of response.headers.getSetCookie())
         headers.append("set-cookie", cookie);
-    // Session tokens remain in HttpOnly cookies, never in public response JSON.
     return json({ status: true }, headers);
 }

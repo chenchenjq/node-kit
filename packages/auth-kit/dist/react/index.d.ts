@@ -1,4 +1,2 @@
-export { AuthClientError, createAuthClient } from "./client.js";
-export type { AuthClient, AuthClientOptions } from "./client.js";
-export { AuthForms } from "./forms.js";
-export type { AuthFormSuccess, AuthFormView, AuthFormsProps } from "./forms.js";
+export { AuthClientError, createAuthClient, type AuthClient, type AuthClientOptions, } from "./client.js";
+export { AuthForms, type AuthFormsProps, type AuthFormView, type AuthFormSuccess, } from "./forms.js";

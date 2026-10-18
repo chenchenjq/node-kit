@@ -1,7 +1,10 @@
 {
   "name": "auth-kit",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.3.5",
+  "private": false,
+  "publishConfig": {
+    "registry": "http://127.0.0.1:4873"
+  },
   "type": "module",
   "engines": {
     "node": ">=20.19"
@@ -15,28 +18,33 @@
   "exports": {
     ".": {
       "types": "./dist/types.d.ts",
-      "import": "./dist/types.js"
+      "import": "./dist/types.js",
+      "default": "./dist/types.js"
     },
     "./server": {
       "types": "./dist/server/index.d.ts",
       "browser": "./dist/browser-forbidden.js",
-      "import": "./dist/server/index.js"
+      "import": "./dist/server/index.js",
+      "default": "./dist/server/index.js"
     },
     "./react": {
       "types": "./dist/react/index.d.ts",
-      "import": "./dist/react/index.js"
+      "import": "./dist/react/index.js",
+      "default": "./dist/react/index.js"
     },
     "./schema": {
       "types": "./dist/server/schema.d.ts",
       "browser": "./dist/browser-forbidden.js",
-      "import": "./dist/server/schema.js"
+      "import": "./dist/server/schema.js",
+      "default": "./dist/server/schema.js"
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:pack": "node scripts/verify-pack.mjs"
+    "test:pack": "node scripts/verify-pack.mjs",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "better-auth": "1.7.4",
@@ -49,9 +57,9 @@
     "@better-auth/core": "1.7.4"
   },
   "peerDependencies": {
-    "sms-kit": "0.0.0",
+    "sms-kit": "0.0.19 || 0.0.20",
     "pg": "8.23.0",
-    "react": "19.3.0"
+    "react": ">=19.1.0 <20"
   },
   "devDependencies": {
     "@types/node": "20.19.43",

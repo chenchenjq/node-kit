@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { SmsKitError } from "../../core/errors.js";
-import type { TenantId } from "../../core/types.js";
+import { scopeTenantId, type SmsScope, type TenantId } from "../../core/types.js";
 import type {
   AdminOperationClaim,
   AdminOperationName,
@@ -33,7 +33,7 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
   constructor(private readonly pool: Pool) {}
 
   async find(input: Readonly<{
-    tenantId: TenantId;
+    scope: SmsScope;
     operation: AdminOperationName;
     idempotencyKey: string;
     requestChecksum: string;
@@ -41,14 +41,14 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
     const { rows } = await executor(this.pool, tx).query<AdminOperationRow>(
       `select request_checksum, result_snapshot
          from sms_kit.admin_operation
-        where tenant_id = $1 and operation = $2 and idempotency_key = $3`,
-      [input.tenantId, input.operation, input.idempotencyKey],
+        where scope_type = $1 and tenant_id is not distinct from $2 and operation = $3 and idempotency_key = $4`,
+      [input.scope.scopeType, scopeTenantId(input.scope), input.operation, input.idempotencyKey],
     );
     return rows[0] === undefined ? undefined : replay(rows[0], input.requestChecksum);
   }
 
   async claim(input: Readonly<{
-    tenantId: TenantId;
+    scope: SmsScope;
     operation: AdminOperationName;
     idempotencyKey: string;
     requestChecksum: string;
@@ -56,20 +56,20 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
     const db = executor(this.pool, tx);
     const inserted = await db.query(
       `insert into sms_kit.admin_operation (
-         tenant_id, operation, idempotency_key, request_checksum, created_at, updated_at
-       ) values ($1, $2, $3, $4, now(), now())
-       on conflict (tenant_id, operation, idempotency_key) do nothing
-       returning tenant_id`,
-      [input.tenantId, input.operation, input.idempotencyKey, input.requestChecksum],
+         scope_type, tenant_id, operation, idempotency_key, request_checksum, created_at, updated_at
+       ) values ($1, $2, $3, $4, $5, now(), now())
+       on conflict do nothing
+       returning scope_type`,
+      [input.scope.scopeType, scopeTenantId(input.scope), input.operation, input.idempotencyKey, input.requestChecksum],
     );
     if (inserted.rowCount === 1) return { kind: "claimed" };
 
     const { rows } = await db.query<AdminOperationRow>(
       `select request_checksum, result_snapshot
          from sms_kit.admin_operation
-        where tenant_id = $1 and operation = $2 and idempotency_key = $3
+        where scope_type = $1 and tenant_id is not distinct from $2 and operation = $3 and idempotency_key = $4
         for update`,
-      [input.tenantId, input.operation, input.idempotencyKey],
+      [input.scope.scopeType, scopeTenantId(input.scope), input.operation, input.idempotencyKey],
     );
     if (rows[0] === undefined) {
       throw new SmsKitError("STORAGE_FAILURE", "admin operation claim could not be read", true);
@@ -78,7 +78,7 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
   }
 
   async complete(input: Readonly<{
-    tenantId: TenantId;
+    scope: SmsScope;
     operation: AdminOperationName;
     idempotencyKey: string;
     requestChecksum: string;
@@ -90,10 +90,10 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
     }
     const updated = await executor(this.pool, tx).query(
       `update sms_kit.admin_operation
-          set result_snapshot = $5::jsonb, completed_at = now(), updated_at = now()
-        where tenant_id = $1 and operation = $2 and idempotency_key = $3
-          and request_checksum = $4 and result_snapshot is null`,
-      [input.tenantId, input.operation, input.idempotencyKey, input.requestChecksum, serialized],
+          set result_snapshot = $6::jsonb, completed_at = now(), updated_at = now()
+        where scope_type = $1 and tenant_id is not distinct from $2 and operation = $3 and idempotency_key = $4
+          and request_checksum = $5 and result_snapshot is null`,
+      [input.scope.scopeType, scopeTenantId(input.scope), input.operation, input.idempotencyKey, input.requestChecksum, serialized],
     );
     if (updated.rowCount !== 1) {
       throw new SmsKitError("CONCURRENT_MODIFICATION", "admin operation is no longer claimable");
@@ -110,9 +110,9 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
     const db = executor(this.pool, tx);
     const inserted = await db.query(
       `insert into sms_kit.admin_job_authorization (
-         tenant_id, job_id, operation, idempotency_key, required_permission, created_at
+         scope_type, tenant_id, job_id, operation, idempotency_key, required_permission, created_at
        )
-       select job.tenant_id, job.id, operation.operation,
+       select 'TENANT', job.tenant_id, job.id, operation.operation,
               operation.idempotency_key, $5, now()
          from sms_kit.send_job job
          join sms_kit.admin_operation operation
@@ -121,7 +121,7 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
           and operation.idempotency_key = $3
         where job.tenant_id = $1 and job.id = $4
           and job.job_type = 'reconcile' and job.origin_action is null
-       on conflict (tenant_id, job_id, required_permission) do nothing
+       on conflict do nothing
        returning job_id`,
       [input.tenantId, input.operation, input.idempotencyKey, input.jobId, input.requiredPermission],
     );

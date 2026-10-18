@@ -83,7 +83,7 @@ export async function runLiveDeliveryScenario(dependencies: Readonly<{
     const message = await new SendService({ ...common, ...protectors, providerTimeoutMs: 10_000 }).enqueueNotification({ tenantId, templateKey: "live.test", phone: configuration.phone, variables: configuration.templateParams, purpose: "notification", idempotencyKey: randomUUID() });
     await new SendWorker({ store, provider, ...protectors, clock }).runBatch({ workerId: "live-test", limit: 1, leaseMs: 30_000, providerTimeoutMs: 10_000 });
     const completed = await store.messages.get({ tenantId, id: message.id });
-    await store.audits.append({ id: ids.next(), tenantId, actorId: actor.id, action: "sms.test", targetType: "message", targetId: message.id, result: completed?.acceptanceStatus === "accepted" ? "succeeded" : "failed", occurredAt: clock.now() });
+    await store.audits.append({ id: ids.next(), scopeType: "TENANT", tenantId, actorId: actor.id, action: "sms.test", targetType: "message", targetId: message.id, result: completed?.acceptanceStatus === "accepted" ? "succeeded" : "failed", occurredAt: clock.now() });
     await new MaintenanceService({ store, clock }).rollupDirtyDates({ limit: 10 });
     const facts = await postgres.pool.query<{ attempts: string; held: string; reconcile: string; accepted: string }>(`select
       (select count(*) from sms_kit.send_attempt where message_id = $1)::text as attempts,

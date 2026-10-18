@@ -54,7 +54,7 @@ describe("PolicyService", () => {
     expect(updates).toBe(0);
   });
 
-  it("audits a global policy update under the system tenant while preserving the actor", async () => {
+  it("audits a global policy update in SYSTEM scope while preserving the actor", async () => {
     const audits: unknown[] = [];
     const service = new PolicyService({
       store: {
@@ -68,7 +68,7 @@ describe("PolicyService", () => {
     await service.update(actor, { ...defaultPolicy, expectedVersion: 1 });
 
     expect(audits).toEqual([expect.objectContaining({
-      tenantId: "__system__", actorId: "operator", action: "policy.update", result: "succeeded",
+      scopeType: "SYSTEM", actorId: "operator", action: "policy.update", result: "succeeded",
     })]);
   });
 });
