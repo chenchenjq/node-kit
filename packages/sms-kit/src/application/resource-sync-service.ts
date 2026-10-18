@@ -37,7 +37,7 @@ export type ResourceSyncCommitInput = Readonly<{
   idempotencyKey?: string;
 }>;
 
-export type ResourceSyncServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+export type ResourceSyncServiceDependencies<Actor extends Readonly<{ id: string }> = AuthorizationActor> = Readonly<{
   store: SmsStore;
   provider: SmsProvider;
   authorizer: Authorizer<Actor>;
@@ -51,8 +51,11 @@ const DEFAULT_PAGE_SIZE = 50;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function providerConfig(config: Awaited<ReturnType<SmsStore["config"]["get"]>>): ConfiguredProviderConfig {
-  if (config.status === "unconfigured" || config.status !== "ready" || !config.enabled) {
-    throw new SmsKitError("CONFIG_INVALID", "provider configuration is not ready");
+  // Resource discovery establishes the signature/template prerequisites for
+  // enabling delivery. Requiring enabled=true here would make first setup
+  // impossible; actual delivery paths still require the enabled readiness gate.
+  if (config.status === "unconfigured" || config.status !== "ready") {
+    throw new SmsKitError("CONFIG_INVALID", "provider configuration has not passed its connection test");
   }
   return config;
 }
@@ -230,7 +233,7 @@ function syncFromSnapshot(value: Readonly<Record<string, unknown>>): ResourceSyn
 }
 
 /** Discovers complete provider snapshots, then commits only persisted, checksummed selections. */
-export class ResourceSyncService<Actor extends AuthorizationActor = AuthorizationActor> {
+export class ResourceSyncService<Actor extends Readonly<{ id: string }> = AuthorizationActor> {
   constructor(private readonly dependencies: ResourceSyncServiceDependencies<Actor>) {}
 
   async preview(actor: Actor, input: ResourceSyncPreviewInput = {}): Promise<ResourceSyncPreview> {

@@ -368,3 +368,9 @@ The scenario performs read-only connection/resource checks first, then sends at 
 The send scenario requires Docker and creates a disposable PostgreSQL 17 test database. It exercises configuration, checksummed resource import, encrypted notification enqueue, worker dispatch, budget reservation, Attempt persistence, audit and daily statistics through the normal services. The database and ephemeral encryption keys are discarded afterward. Acceptance also schedules the normal reconciliation job; this test does not wait for final delivery.
 
 Health snapshots accept an injected `clock`. By default, pending jobs older than five minutes, waiting messages with no fresh callback for one hour, unavailable resources, and a daily budget with at most 10% remaining degrade readiness. The backlog and callback windows can be set with `backlogStaleMs` and `receiptStaleMs`.
+
+## SYSTEM authentication lifecycle (0.0.20)
+
+`sms-kit/postgres` exports `PgSystemSmsLifecycle` for singleton login/reset messages. Supply `pool`, `provider`, `phoneProtector`, and `config: store.config`. `recover()` fences abandoned SYSTEM pending messages as acceptance-unknown and invalidates their challenges without sending; `reconcile()` queries delivery by the stored opaque OutId; `ingest()` atomically records authenticated callback batches with a host deadline/signal. A host must authenticate the callback token before calling `ingest()` (for example with `createAliyunReceiptHandler`). Tenant messages remain in their existing job pipeline. If cloud details omit OutId, the query result is non-authoritative and remains waiting until callback or final-unknown expiry.
+
+Callbacks deduplicate on provider identity/status/time, require the stored OutId/BizId pair, do not overwrite terminal delivery, and never persist callback phone/provider text. Poll on a host-owned, cross-replica fenced scheduler; keep the existing retention service enabled. This adapter adds no database migration.

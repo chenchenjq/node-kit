@@ -1,13 +1,13 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { normalizeMainlandPhone } from "sms-kit/core";
+import { normalizeMainlandNationalPhone } from "sms-kit/core";
 import { AuthKitError } from "./errors.js";
 const phone = z
     .string()
     .max(64)
     .transform((value, ctx) => {
     try {
-        return normalizeMainlandPhone(value);
+        return normalizeMainlandNationalPhone(value);
     }
     catch {
         ctx.addIssue({ code: "custom", message: "Invalid phone" });
@@ -15,10 +15,35 @@ const phone = z
     }
 });
 const graphic = {
-    captchaId: z.string().min(16).max(128),
-    captchaAnswer: z.string().min(1).max(16),
+    captchaId: z.string().min(16).max(128).optional(),
+    captchaAnswer: z.string().min(1).max(16).optional(),
 };
 const password = z.string().min(1).max(1024); // old passwords are not subject to the NEW password policy
+const passwordLogin = z.object({
+    loginId: z.string().trim().min(1).max(255).optional(),
+    phoneNumber: phone.optional(),
+    password,
+    ...graphic,
+}).refine((body) => (body.loginId === undefined) !== (body.phoneNumber === undefined))
+    .transform((body, ctx) => {
+    if (body.loginId === undefined)
+        return { ...body, username: undefined };
+    try {
+        return { ...body, phoneNumber: normalizeMainlandNationalPhone(body.loginId), username: undefined };
+    }
+    catch {
+        if (body.loginId.includes("@")) {
+            const email = z.string().email().safeParse(body.loginId.toLowerCase());
+            if (email.success)
+                return { ...body, email: email.data, username: undefined, phoneNumber: undefined };
+        }
+        if (body.loginId.length > 100 || !/^[^\s@\p{Cc}]+$/u.test(body.loginId)) {
+            ctx.addIssue({ code: "custom", message: "Invalid login identifier" });
+            return z.NEVER;
+        }
+        return { ...body, username: body.loginId, phoneNumber: undefined };
+    }
+});
 export const bodies = {
     "/captcha": z.object({
         purpose: z.enum(["password-login", "sms-login", "password-reset"]),
@@ -28,7 +53,7 @@ export const bodies = {
         purpose: z.enum(["sms-login", "password-reset"]),
         ...graphic,
     }),
-    "/sign-in/password": z.object({ phoneNumber: phone, password, ...graphic }),
+    "/sign-in/password": passwordLogin,
     "/sign-in/sms": z.object({
         phoneNumber: phone,
         code: z.string().regex(/^\d{6}$/),
@@ -82,7 +107,7 @@ export async function parseBody(request, path) {
     return result.data;
 }
 export function assertOrigin(request, options) {
-    if (request.headers.get("origin") !== options.baseURL)
+    if (![options.baseURL, ...(options.developmentOrigins ?? [])].includes(request.headers.get("origin") ?? ""))
         throw new AuthKitError("FORBIDDEN", 403);
     if (request.headers.get("sec-fetch-site") === "cross-site")
         throw new AuthKitError("FORBIDDEN", 403);

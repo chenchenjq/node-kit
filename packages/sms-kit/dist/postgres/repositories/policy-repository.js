@@ -1,0 +1,80 @@
+import { randomUUID } from "node:crypto";
+import { SmsKitError } from "../../core/errors.js";
+import { scopeTenantId, tenantScope } from "../../core/types.js";
+function db(pool, tx) { return tx === undefined ? pool : tx.client; }
+function policy(row) { return { version: Number(row.version), otpLength: row.otp_length, otpTtlSeconds: row.otp_ttl_seconds, otpMaxAttempts: row.otp_max_attempts, proofTtlSeconds: row.proof_ttl_seconds, phoneMinIntervalSeconds: row.phone_min_interval_seconds, phoneHourlyLimit: row.phone_hourly_limit, phoneDailyLimit: row.phone_daily_limit, ipWindowSeconds: row.ip_window_seconds, ipWindowLimit: row.ip_window_limit, systemDailyBudget: row.system_daily_budget, circuitOpen: row.circuit_open, ...(row.circuit_reason === null ? {} : { circuitReason: row.circuit_reason }) }; }
+const fields = "version, otp_length, otp_ttl_seconds, otp_max_attempts, proof_ttl_seconds, phone_min_interval_seconds, phone_hourly_limit, phone_daily_limit, ip_window_seconds, ip_window_limit, system_daily_budget, circuit_open, circuit_reason";
+function ownership(input) {
+    if (input.ownership !== undefined) {
+        if (input.tenantId !== undefined)
+            throw new SmsKitError("CONFIG_INVALID", "ambiguous budget ownership");
+        const scope = input.ownership;
+        if (scope.scopeType === "SYSTEM" && !("tenantId" in scope))
+            return scope;
+        if (scope.scopeType === "TENANT" && typeof scope.tenantId === "string" && scope.tenantId.length > 0)
+            return scope;
+    }
+    else if (typeof input.tenantId === "string" && input.tenantId.length > 0) {
+        return tenantScope(input.tenantId);
+    }
+    throw new SmsKitError("CONFIG_INVALID", "invalid budget ownership");
+}
+export class PgPolicyStore {
+    pool;
+    constructor(pool) {
+        this.pool = pool;
+    }
+    async get(tx) {
+        const client = db(this.pool, tx);
+        await client.query("insert into sms_kit.policy_config (id, created_at, updated_at) values (1, now(), now()) on conflict (id) do nothing");
+        const { rows } = await client.query(`select ${fields} from sms_kit.policy_config where id = 1`);
+        if (rows[0] === undefined)
+            throw new SmsKitError("STORAGE_FAILURE", "policy configuration is not initialized", true);
+        return policy(rows[0]);
+    }
+    async update(input, tx) {
+        const { rows } = await db(this.pool, tx).query(`update sms_kit.policy_config set otp_length = $1, otp_ttl_seconds = $2, otp_max_attempts = $3, proof_ttl_seconds = $4,
+       phone_min_interval_seconds = $5, phone_hourly_limit = $6, phone_daily_limit = $7, ip_window_seconds = $8, ip_window_limit = $9,
+       system_daily_budget = $10, circuit_open = $11, circuit_reason = $12, circuit_opened_at = case when $11 then now() else null end,
+       version = version + 1, updated_at = now() where id = 1 and version = $13 returning ${fields}`, [input.otpLength, input.otpTtlSeconds, input.otpMaxAttempts, input.proofTtlSeconds, input.phoneMinIntervalSeconds, input.phoneHourlyLimit, input.phoneDailyLimit, input.ipWindowSeconds, input.ipWindowLimit, input.systemDailyBudget, input.circuitOpen, input.circuitReason ?? null, input.expectedVersion]);
+        if (rows[0] === undefined)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "policy configuration changed concurrently");
+        return policy(rows[0]);
+    }
+    async holdBudget(input, tx) {
+        const client = db(this.pool, tx);
+        const scope = ownership(input);
+        await this.get(tx);
+        const settings = await client.query(`select ${fields} from sms_kit.policy_config where id = 1 for update`);
+        if (settings.rows[0] === undefined)
+            throw new SmsKitError("STORAGE_FAILURE", "policy configuration is not initialized", true);
+        const current = policy(settings.rows[0]);
+        if (current.circuitOpen)
+            throw new SmsKitError("CIRCUIT_OPEN", "sending circuit is open");
+        const owned = await client.query("select id from sms_kit.send_message where id = $1 and tenant_id is not distinct from $2 and scope_type = $3 for update", [input.messageId, scopeTenantId(scope), scope.scopeType]);
+        if (owned.rows[0] === undefined)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "message is outside the trusted scope");
+        const existing = await client.query("select budget_date::text, state from sms_kit.send_budget_reservation where message_id = $1", [input.messageId]);
+        if (existing.rows[0] !== undefined)
+            return { messageId: input.messageId, budgetDate: existing.rows[0].budget_date, state: existing.rows[0].state };
+        const budgetDate = input.now.toISOString().slice(0, 10);
+        await client.query("insert into sms_kit.daily_send_budget (budget_date, held_count, updated_at) values ($1::date, 0, now()) on conflict (budget_date) do nothing", [budgetDate]);
+        const budget = await client.query("select held_count::text from sms_kit.daily_send_budget where budget_date = $1::date for update", [budgetDate]);
+        if (budget.rows[0] === undefined)
+            throw new SmsKitError("STORAGE_FAILURE", "daily budget is not initialized", true);
+        if (current.systemDailyBudget !== null && Number(budget.rows[0].held_count) >= current.systemDailyBudget)
+            throw new SmsKitError("BUDGET_EXCEEDED", "system daily budget is exhausted");
+        await client.query("insert into sms_kit.send_budget_reservation (id, message_id, budget_date, state, held_at) values ($1, $2, $3::date, 'held', now())", [randomUUID(), input.messageId, budgetDate]);
+        await client.query("update sms_kit.daily_send_budget set held_count = held_count + 1, version = version + 1, updated_at = now() where budget_date = $1::date", [budgetDate]);
+        return { messageId: input.messageId, budgetDate, state: "held" };
+    }
+    async releaseBudget(input, tx) {
+        const client = db(this.pool, tx);
+        const scope = ownership(input);
+        const released = await client.query(`update sms_kit.send_budget_reservation r set state = 'released', released_at = now() from sms_kit.send_message m where r.message_id = m.id and r.message_id = $1 and m.tenant_id is not distinct from $2 and m.scope_type = $3 and r.state = 'held' returning r.budget_date::text`, [input.messageId, scopeTenantId(scope), scope.scopeType]);
+        if (released.rows[0] === undefined)
+            return false;
+        await client.query("update sms_kit.daily_send_budget set held_count = held_count - 1, version = version + 1, updated_at = now() where budget_date = $1::date and held_count > 0", [released.rows[0].budget_date]);
+        return true;
+    }
+}

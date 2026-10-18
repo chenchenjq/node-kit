@@ -20,19 +20,28 @@ export type CaptchaAnswer = {
     captchaId: string;
     captchaAnswer: string;
 };
-export type SendSmsInput = CaptchaAnswer & {
+export type SendSmsInput = {
     phoneNumber: string;
     purpose: SmsPurpose;
+    captchaId: string;
+    captchaAnswer: string;
 };
 export type SendSmsResult = {
     status: true;
     retryAt: number;
     serverTime: number;
 };
-export type PasswordLoginInput = CaptchaAnswer & {
-    phoneNumber: string;
+export type PasswordLoginInput = {
     password: string;
-};
+    captchaId: string;
+    captchaAnswer: string;
+} & ({
+    loginId: string;
+    phoneNumber?: never;
+} | {
+    phoneNumber: string;
+    loginId?: never;
+});
 export type SmsLoginInput = {
     phoneNumber: string;
     code: string;
@@ -50,7 +59,7 @@ export type AuthSession = {
     user: {
         id: string;
         name: string;
-        phoneNumber: string;
+        phoneNumber: string | null;
     };
     expiresAt: string;
 };

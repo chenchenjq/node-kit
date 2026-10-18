@@ -54,7 +54,7 @@ export class SecurityState {
         return { allowed: result[0] === 1, retryAt: result[1] };
     }
     reserveSend(phone, now, pending = false) {
-        return this.limit("sms", phone, now, 300000, 3, 60000, pending);
+        return this.limit("sms-hour", phone, now, 3600000, 5, 60000, pending);
     }
     /** Conservative completion-time fence: provider/database latency cannot shorten the next cooldown. */
     async finishSend(phone, now) {
@@ -62,15 +62,25 @@ export class SecurityState {
       redis.call('ZREM',KEYS[1],'pending')
       local last=redis.call('ZRANGE',KEYS[1],-1,-1)
       local member=last[1] or ARGV[2]
-      redis.call('ZADD',KEYS[1],ARGV[1],member); redis.call('PEXPIRE',KEYS[1],300000)
+      redis.call('ZADD',KEYS[1],ARGV[1],member); redis.call('PEXPIRE',KEYS[1],3600000)
       local retry=tonumber(ARGV[1])+60000
-      if redis.call('ZCARD',KEYS[1])>=3 then
-        local first=redis.call('ZRANGE',KEYS[1],0,0,'WITHSCORES'); retry=math.max(retry,tonumber(first[2])+300000)
+      if redis.call('ZCARD',KEYS[1])>=5 then
+        local first=redis.call('ZRANGE',KEYS[1],0,0,'WITHSCORES'); retry=math.max(retry,tonumber(first[2])+3600000)
       end
-      return retry`, 1, this.key("sms", phone), now, randomUUID());
+      return retry`, 1, this.key("sms-hour", phone), now, randomUUID());
         if (typeof result !== "number")
             throw new Error("Invalid Redis response");
         return result;
+    }
+    async setActiveChallenge(subjectId, action, challengeId, ttlMs) {
+        await this.redis.eval("return redis.call('SET',KEYS[1],ARGV[1],'PX',ARGV[2])", 1, this.key("challenge", `${subjectId}:${action}`), challengeId, ttlMs);
+    }
+    async getActiveChallenge(subjectId, action) {
+        const res = await this.redis.eval("return redis.call('GET',KEYS[1])", 1, this.key("challenge", `${subjectId}:${action}`));
+        return typeof res === "string" ? res : null;
+    }
+    async clearActiveChallenge(subjectId, action) {
+        await this.redis.eval("return redis.call('DEL',KEYS[1])", 1, this.key("challenge", `${subjectId}:${action}`));
     }
     async clearDelivery(identifier) {
         await this.redis.eval("return redis.call('DEL',KEYS[1])", 1, this.key("delivery", identifier));

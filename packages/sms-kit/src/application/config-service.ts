@@ -10,7 +10,13 @@ import { executeAdminOperation, findAdminOperationReplay } from "./admin-operati
 
 const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 10_000;
 
-export type ConfigServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+/**
+ * Configuration authorization is actor-shape agnostic: ConfigService only
+ * passes the actor to its injected Authorizer.  In particular this permits a
+ * host's SYSTEM actor to retain its required null tenant boundary instead of
+ * manufacturing a tenant identifier merely to configure a global provider.
+ */
+export type ConfigServiceDependencies<Actor extends Readonly<{ id: string }> = AuthorizationActor> = Readonly<{
   store: SmsStore;
   provider: SmsProvider;
   secretResolver: SecretResolver;
@@ -193,7 +199,7 @@ function safeConnectionFailure(error: unknown): SmsKitError {
 }
 
 /** Manages the singleton provider configuration; it never returns resolved secret values. */
-export class ConfigService<Actor extends AuthorizationActor = AuthorizationActor> {
+export class ConfigService<Actor extends Readonly<{ id: string }> = AuthorizationActor> {
   private readonly connectionTestTimeoutMs: number;
 
   constructor(private readonly dependencies: ConfigServiceDependencies<Actor>) {

@@ -4,6 +4,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Pool } from "pg";
 
 import { SendService } from "../../../src/application/send-service.js";
+import { SendWorker } from "../../../src/application/send-worker.js";
+import { AesGcmMessagePayloadProtector, AesGcmPhoneNumberProtector } from "../../../src/security/aes-gcm-protector.js";
 import { SmsKitError } from "../../../src/core/errors.js";
 import type { MessageId, TenantId } from "../../../src/core/types.js";
 import { HmacHasher } from "../../../src/security/hmac-hasher.js";
@@ -106,8 +108,7 @@ describe("SendService administrative test send with PostgreSQL", () => {
       purpose: "notification",
     };
     const first = await service().enqueueTestNotification(actorA, input);
-    // The recipient policy is deliberately consulted only on a cache miss:
-    // an already committed tenant-scoped operation remains safely replayable.
+    // The system operation remains replayable only for the same trusted tenant fingerprint.
     const replay = await service(false).enqueueTestNotification(actorA, input);
 
     expect(replay).toEqual(first);
@@ -120,7 +121,7 @@ describe("SendService administrative test send with PostgreSQL", () => {
       .resolves.toMatchObject({ rows: [{ origin_action: "sms.test" }] });
     await expect(pool.query("select count(*)::integer as count from sms_kit.audit_event where tenant_id = $1 and action = 'sms.test.send'", [actorA.tenantId]))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
-    await expect(pool.query("select count(*)::integer as count from sms_kit.admin_operation where tenant_id = $1 and operation = 'sms.test.send'", [actorA.tenantId]))
+    await expect(pool.query("select count(*)::integer as count from sms_kit.admin_operation where scope_type = 'SYSTEM' and tenant_id is null and operation = 'sms.test.send'"))
       .resolves.toMatchObject({ rows: [{ count: 1 }] });
 
     const persisted = await pool.query(`select
@@ -154,7 +155,7 @@ describe("SendService administrative test send with PostgreSQL", () => {
       .resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
-  it("isolates a repeated administrative idempotency key by trusted tenant", async () => {
+  it("rejects reuse of a global operation key with another tenant fingerprint while keeping messages tenant-owned", async () => {
     const input = {
       expectedVersion: configurationVersion,
       idempotencyKey: "test-send:tenant-scope",
@@ -165,11 +166,55 @@ describe("SendService administrative test send with PostgreSQL", () => {
     };
     const first = await service().enqueueTestNotification(actorA, input);
     const sameTenantReplay = await service(false).enqueueTestNotification(actorSameTenant, input);
-    const second = await service().enqueueTestNotification(actorB, input);
+    await expect(service().enqueueTestNotification(actorB, input)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const second = await service().enqueueTestNotification(actorB, { ...input, idempotencyKey: "test-send:other-operation" });
 
     expect(sameTenantReplay).toEqual(first);
     expect(second.id).not.toBe(first.id);
     await expect(pool.query("select tenant_id, count(*)::integer as count from sms_kit.send_message group by tenant_id order by tenant_id"))
       .resolves.toMatchObject({ rows: [{ tenant_id: actorA.tenantId, count: 1 }, { tenant_id: actorB.tenantId, count: 1 }] });
+  });
+
+  it("dispatches an allowlisted verification test through the durable pipeline without an authentication proof", async () => {
+    await pool.query(`update sms_kit.template set template_key = 'auth.login_otp', purpose = 'auth.login_otp',
+      template_type = 'verification', variable_schema = '["code"]' where template_key = 'notice.test-send'`);
+    const key = Buffer.alloc(32, 7);
+    const keyring = { activeKey: async () => ({ id: "test-key", bytes: key }), keyById: async () => key };
+    const phoneProtector = new AesGcmPhoneNumberProtector(keyring, new HmacHasher(Buffer.alloc(32, 8)));
+    const payloadProtector = new AesGcmMessagePayloadProtector(keyring);
+    const calls: unknown[] = [];
+    const provider = { send: async (input: unknown) => {
+      calls.push(input);
+      return { kind: "accepted", bizId: "test-biz", requestId: "test-request" };
+    } } as never;
+    const clock = { now: () => now };
+    const fingerprinter = new HmacHasher(Buffer.alloc(32, 23));
+    const sender = new SendService({
+      store, provider, phoneProtector, payloadProtector, clock,
+      ids: { next: randomUUID, messageId: () => randomUUID() as MessageId },
+      events: { emit: () => undefined }, providerTimeoutMs: 1_000,
+      testRecipientAllowlist: { allows: async () => true },
+      testAuthorizer: { assert: () => undefined },
+      testRequestFingerprinter: { fingerprint: (value) => fingerprinter.hash(value) },
+    });
+    const input = { expectedVersion: configurationVersion, idempotencyKey: "verification-test", phone: "13800138000", templateKey: "auth.login_otp", purpose: "auth.login_otp", variables: { code: "123456" } };
+    const message = await sender.enqueueTestNotification(actorA, input);
+    const worker = new SendWorker({ store, provider, phoneProtector, payloadProtector, clock });
+    expect(await worker.runBatch({ workerId: "test-worker", limit: 1, leaseMs: 30_000, providerTimeoutMs: 1_000 })).toBe(1);
+    await expect(sender.enqueueTestNotification(actorA, input)).resolves.toMatchObject({ id: message.id });
+    expect(await worker.runBatch({ workerId: "test-worker", limit: 1, leaseMs: 30_000, providerTimeoutMs: 1_000 })).toBe(0);
+    expect(calls).toEqual([expect.objectContaining({ phoneNumber: "+8613800138000", templateParams: { code: "123456" }, outId: message.id })]);
+    expect((await pool.query("select count(*)::int as count from sms_kit.otp_challenge")).rows).toEqual([{ count: 0 }]);
+    expect((await pool.query("select status from sms_kit.send_attempt where message_id = $1", [message.id])).rows).toEqual([{ status: "accepted" }]);
+    expect((await pool.query("select acceptance_status from sms_kit.send_message where id = $1", [message.id])).rows).toEqual([{ acceptance_status: "accepted" }]);
+  });
+
+  it("keeps verification tests behind the recipient guard and rejects them as ordinary notification jobs", async () => {
+    await pool.query(`update sms_kit.template set template_key = 'auth.login_otp', purpose = 'auth.login_otp',
+      template_type = 'verification', variable_schema = '["code"]' where template_key = 'notice.test-send'`);
+    const input = { expectedVersion: configurationVersion, idempotencyKey: "verification-guard", phone: "13800138000", templateKey: "auth.login_otp", purpose: "auth.login_otp", variables: { code: "123456" } };
+    await expect(service(false).enqueueTestNotification(actorA, input)).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+    await expect(service().enqueueNotification({ ...input, tenantId: actorA.tenantId })).rejects.toMatchObject({ code: "TEMPLATE_UNAVAILABLE" });
+    expect((await pool.query("select count(*)::int as count from sms_kit.send_message")).rows).toEqual([{ count: 0 }]);
   });
 });

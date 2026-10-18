@@ -3,11 +3,15 @@ import { access } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 describe("sms-kit package metadata", () => {
-  it("cannot be published and declares supported exports", async () => {
+  it("declares published package metadata and supported exports", async () => {
     const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-    expect(pkg.private).toBe(true);
+    expect(pkg.name).toBe("sms-kit");
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
+    expect(pkg.private).toBe(false);
     expect(pkg.type).toBe("module");
     expect(pkg.engines.node).toBe(">=20");
+    expect(pkg.peerDependencies.vitest).toBe(">=3 <5");
+    expect(pkg.peerDependenciesMeta.vitest.optional).toBe(true);
     expect(Object.keys(pkg.exports)).toEqual([
       ".", "./core", "./application", "./ports", "./security", "./postgres",
       "./aliyun", "./better-auth", "./next", "./next/types", "./testing",

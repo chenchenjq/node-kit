@@ -262,7 +262,7 @@ export class SendService {
     if (replay !== undefined) return replay;
 
     // The allowlist guards only a new external-effecting request. A completed
-    // operation is tenant-scoped and must replay its committed safe snapshot
+    // operation is bound to its trusted tenant fingerprint and must replay its safe snapshot
     // even if a host policy later changes or is temporarily unavailable.
     const allowlist = this.dependencies.testRecipientAllowlist;
     if (allowlist === undefined) {
@@ -298,7 +298,7 @@ export class SendService {
         requireTestConfigVersion(lockedConfig, input.expectedVersion);
         // This lookup obtains the template and then parent signature shared
         // locks, held through the message insert just like ordinary sends.
-        const target = await this.requireUsableTemplate(sendInput, "notification", tx);
+        const target = await this.requireUsableTemplate(sendInput, "test", tx);
         const created = await this.dependencies.store.messages.createWithSendJob({
           id,
           ...tenantScope(actor.tenantId),
@@ -411,11 +411,14 @@ export class SendService {
 
   private async requireUsableTemplate(
     input: SendInput,
-    templateType: Template["templateType"],
+    templateType: Template["templateType"] | "test",
     tx: SmsTransaction,
   ): Promise<SendTarget> {
     const template = await this.dependencies.store.resources.findTemplateByKey({ templateKey: input.templateKey }, tx);
-    if (template === undefined || template.templateType !== templateType || !template.enabled || !isCloudApproved(template.externalStatus) || template.purpose !== input.purpose) {
+    const typeMatches = template !== undefined && (templateType === "test"
+      ? template.templateType === "notification" || template.templateType === "verification"
+      : template.templateType === templateType);
+    if (template === undefined || !typeMatches || !template.enabled || !isCloudApproved(template.externalStatus) || template.purpose !== input.purpose) {
       throw new SmsKitError("TEMPLATE_UNAVAILABLE", "template is not usable");
     }
     validateTemplateVariables(template.variables.map((variable) => variable.name), input.variables);

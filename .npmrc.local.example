@@ -1,0 +1,7 @@
+# 本地私有 npm Registry 配置示例
+# 复制此文件为 .npmrc (在 node-kit 根目录或使用本私有库的宿主项目中):
+# cp .npmrc.local.example .npmrc
+
+registry=http://127.0.0.1:4873/
+always-auth=false
+

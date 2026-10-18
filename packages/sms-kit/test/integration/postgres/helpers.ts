@@ -65,7 +65,7 @@ export async function allRequiredConstraintsExist(pool: Pool): Promise<boolean> 
   ].every((name) => constraints.has(name)) && (await pool.query<{ indexname: string }>(
     `select indexname from pg_indexes
       where schemaname = 'sms_kit' and indexname = any($1::text[])`,
-    [
+    [[
       "otp_challenge_proof_hash_key",
       "otp_challenge_scope_idempotency_key_key",
       "send_message_scope_idempotency_key_key",
@@ -75,6 +75,6 @@ export async function allRequiredConstraintsExist(pool: Pool): Promise<boolean> 
       "stat_dirty_date_scope_key",
       "admin_operation_scope_key",
       "admin_job_authorization_scope_key",
-    ],
+    ]],
   )).rows.length === 9;
 }

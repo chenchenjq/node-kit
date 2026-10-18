@@ -17,7 +17,9 @@ describe("ResourceSyncService", () => {
   it("rejects two new provider templates selected with the same stable local key", async () => {
     const sync = new ResourceSyncService({
       store: {
-        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: true, lastTestStatus: "succeeded", version: 1 }) },
+        // Discovery happens before the first service enablement, so a
+        // successfully tested but disabled configuration must be usable.
+        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: false, lastTestStatus: "succeeded", version: 1 }) },
         resources: {
           listSignatures: async () => ({ items: [], total: 0 }),
           listTemplates: async () => ({ items: [], total: 0 }),
@@ -91,11 +93,11 @@ describe("ResourceSyncService", () => {
     })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 
-  it("requires exact candidate checksums at commit", async () => {
+  it("discovers from a tested disabled configuration and requires exact candidate checksums at commit", async () => {
     const resources = new Map<string, { id: string; expiresAt: Date; candidates: readonly { id: string; checksum: string }[] }>();
     const sync = new ResourceSyncService({
       store: {
-        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: true, lastTestStatus: "succeeded", version: 1 }) },
+        config: { get: async () => ({ provider: "aliyun", region: "cn-shanghai", accessKeyIdRef: "env://ID", accessKeySecretRef: "env://SECRET", receiptCallbackTokenRef: "env://TOKEN", status: "ready", enabled: false, lastTestStatus: "succeeded", version: 1 }) },
         resources: {
           listSignatures: async () => ({ items: [], total: 0 }),
           listTemplates: async () => ({ items: [], total: 0 }),

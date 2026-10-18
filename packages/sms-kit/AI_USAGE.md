@@ -1,9 +1,16 @@
+## 0.0.19 认证持久化与事务补充
+
+- `normalizeMainlandNationalPhone`（core）接受大陆 11 位、+86/+086/0086 输入，返回 11 位；旧 `normalizeMainlandPhone` 保持 E.164。
+- `AesGcmPhoneNumberProtector(keys, hasher, { storageFormat: "national" })` 加密 11 位原文；默认 E.164 保持兼容。unprotect 返回规范 E.164，HMAC 仍使用 E.164，历史密文不会自动改写。
+- `SystemAuthSmsService.verifyAndConsume(input, transaction)` 在宿主传入的同一个 PostgreSQL 事务中校验并消费 OTP。false 表示校验失败：调用方提交失败次数，但不可写凭据；true 后可写密码/撤销会话再一并提交。异常整体回滚。
+- 与 auth-kit 0.2.0 同库装配使用以上能力，不能把独立 verify/consumeProof 的已提交操作包装成假原子事务。旧 verify/consumeProof API 保留供其他宿主使用。
+
 ---
 title: sms-kit AI usage guide
 package: sms-kit
-package_version: 0.0.0
+package_version: 0.0.18
 runtime: Node.js >=20, ESM
-status: private workspace package; not published by this repository
+status: published to the local private npm registry at http://127.0.0.1:4873/
 source_of_truth:
   - package.json
   - src/*/index.ts
@@ -43,7 +50,7 @@ source_of_truth:
 
 当前不包含：
 
-- 公共 npm registry 发布配置；`package.json` 设置了 `"private": true`；
+- 公共 npm registry 发布配置；`sms-kit@0.0.18` 发布在本地私有 npm registry（`http://127.0.0.1:4873/`），不代表已发布到公共 npm registry；
 - 内置 Vault、HTTP 或云密钥管理器客户端；只有 `EnvSecretResolver` 是内置解析器；
 - 自动创建或迁移 Better Auth 用户手机号字段；
 - 浏览器端 SDK 或 UI。
@@ -62,13 +69,21 @@ source_of_truth:
 
 上面的 `*` 由根目录 npm workspace 解析为当前本地包；不要把它理解为允许从公共 registry 获取任意版本。
 
-只有在组织已经把包发布到私有 registry 或配置为 Git/文件依赖后，才可使用对应的远端安装方式。当前仓库本身未配置可发布的私有 registry，因此不要假设下面的命令现在能从网络安装：
+如果使用本地私有 npm registry，请先在工作区或宿主项目配置 `.npmrc`：
 
-```sh
-npm install sms-kit
+```ini
+registry=http://127.0.0.1:4873/
 ```
 
-宿主启用 Better Auth 适配时安装兼容版本的 `better-auth`。宿主还负责提供 PostgreSQL 连接、运行时密钥和调度设施。
+配置后可安装该私有源中的版本：
+
+```sh
+npm install sms-kit@0.0.18
+```
+
+此本地地址不表示包已发布到公共 npm registry。宿主还负责提供 PostgreSQL 连接、运行时密钥和调度设施。
+
+宿主启用 Better Auth 适配时安装兼容版本的 `better-auth`。
 
 ## 4. 入口选择
 
@@ -84,6 +99,8 @@ npm install sms-kit
 | Next.js handlers | `sms-kit/next` | 否 |
 | Next.js 管理 DTO/Zod schema | `sms-kit/next/types` | 是，优先 `import type` |
 | 测试 fixture 和 store contract | `sms-kit/testing` | 否 |
+
+使用 `sms-kit/testing` 的宿主需自行安装兼容的 Vitest（`>=3 <5`）。`runSmsStoreContract` 只可在 Vitest runner 上下文中调用，不能从普通 Node 脚本执行。
 
 正确：
 
@@ -352,3 +369,5 @@ Next.js 服务端实现从 sms-kit/next 导入，前端 DTO 从 sms-kit/next/typ
 4. 本文：AI 工作流和快速选择指南。
 
 不要导入未由 `package.json#exports` 暴露的 `src/` 或 `dist/` 深层路径。
+
+SYSTEM login/reset lifecycle: use `PgSystemSmsLifecycle` from `sms-kit/postgres`, not the tenant SendWorker/ReconcileService. Authenticate callback tokens in the host; never resend acceptance-unknown dispatches. See README section SYSTEM authentication lifecycle.

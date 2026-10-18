@@ -4,6 +4,15 @@ import { SmsKitError } from "./errors.js";
 
 export type MainlandPhone = string & { readonly __brand: "MainlandPhone" };
 
+/** Strict national storage representation; E.164 remains the provider/lookup contract. */
+export function normalizeMainlandNationalPhone(input: string): string {
+  const value = input.trim().replace(/[ -]/g, "");
+  if (!/^(?:(?:\+86|\+086|0086))?1[3-9]\d{9}$/.test(value)) {
+    throw new SmsKitError("CONFIG_INVALID", "phone number must be valid for mainland China");
+  }
+  return normalizeMainlandPhone(value.replace(/^\+086/, "+86")).slice(3);
+}
+
 export function normalizeMainlandPhone(input: string): MainlandPhone {
   const parsed = parsePhoneNumberFromString(input, "CN");
   const nationalNumber = parsed?.nationalNumber;

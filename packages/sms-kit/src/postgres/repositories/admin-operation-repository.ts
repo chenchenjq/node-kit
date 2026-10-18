@@ -90,7 +90,7 @@ export class PgAdminOperationRepository implements AdminOperationRepository {
     }
     const updated = await executor(this.pool, tx).query(
       `update sms_kit.admin_operation
-          set result_snapshot = $5::jsonb, completed_at = now(), updated_at = now()
+          set result_snapshot = $6::jsonb, completed_at = now(), updated_at = now()
         where scope_type = $1 and tenant_id is not distinct from $2 and operation = $3 and idempotency_key = $4
           and request_checksum = $5 and result_snapshot is null`,
       [input.scope.scopeType, scopeTenantId(input.scope), input.operation, input.idempotencyKey, input.requestChecksum, serialized],

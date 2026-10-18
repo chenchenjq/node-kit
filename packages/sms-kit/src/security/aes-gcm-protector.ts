@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 import { SmsKitError } from "../core/errors.js";
-import { maskMainlandPhone, normalizeMainlandPhone, type MainlandPhone } from "../core/phone.js";
+import { maskMainlandPhone, normalizeMainlandPhone, normalizeMainlandNationalPhone, type MainlandPhone } from "../core/phone.js";
 import type {
   MessagePayloadProtector,
   PhoneLookupHasher,
@@ -221,6 +221,7 @@ export class AesGcmPhoneNumberProtector implements PhoneNumberProtector, PhoneLo
   constructor(
     private readonly keyring: AesKeyring,
     private readonly hasher: HmacHasher,
+    private readonly options: { storageFormat?: "e164" | "national" } = {},
   ) {}
 
   async lookupHash(phone: MainlandPhone): Promise<string> {
@@ -233,7 +234,10 @@ export class AesGcmPhoneNumberProtector implements PhoneNumberProtector, PhoneLo
   ): Promise<{ ciphertext: string; keyId: string; lookupHash: string; masked: string; last4: string }> {
     const key = await activeKey(this.keyring);
     return {
-      ciphertext: sealBytes(key.bytes, key.id, Buffer.from(phone, "utf8"), context),
+      ciphertext: sealBytes(key.bytes, key.id, Buffer.from(
+        this.options.storageFormat === "national" ? normalizeMainlandNationalPhone(phone) : phone,
+        "utf8",
+      ), context),
       keyId: key.id,
       lookupHash: await this.lookupHash(phone),
       masked: maskMainlandPhone(phone),

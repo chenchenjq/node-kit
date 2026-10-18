@@ -1,7 +1,7 @@
 "use client";
 import { Fragment as _Fragment, jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, } from "react";
-import { AuthClientError, createAuthClient, } from "./client.js";
+import { AuthClientError, createAuthClient } from "./client.js";
 const styles = `
 .auth-kit {
   --auth-kit-bg: #ffffff;
@@ -41,8 +41,8 @@ const styles = `
 .auth-kit__input:focus-visible, .auth-kit__button:focus-visible {
   outline: 3px solid rgba(33, 91, 143, 0.24); outline-offset: 2px;
 }
-.auth-kit__captcha { display: grid; grid-template-columns: minmax(0, 1fr) 7.5rem; gap: 0.625rem; align-items: end; }
-.auth-kit__captcha-refresh { grid-column: 2; }
+.auth-kit__captcha { display: grid; grid-template-columns: minmax(0, 1fr) 7.5rem 2.65rem; gap: 0.625rem; align-items: end; }
+.auth-kit__button.auth-kit__captcha-refresh { display: grid; place-items: center; width: 2.65rem; height: 2.65rem; min-height: 0; padding: 0; }
 .auth-kit__captcha-visual {
   position: relative; display: grid; place-items: center; height: 2.65rem; overflow: hidden;
   border: 1px solid var(--auth-kit-line); border-radius: 0.5rem; background: var(--auth-kit-soft);
@@ -69,7 +69,8 @@ const styles = `
 .auth-kit__switches { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 0.1rem; }
 @media (max-width: 24rem) {
   .auth-kit { padding: 1.15rem; border-radius: 0.625rem; }
-  .auth-kit__captcha, .auth-kit__send-row { grid-template-columns: minmax(0, 1fr) 6.8rem; }
+  .auth-kit__captcha { grid-template-columns: minmax(0, 1fr) 6rem 2.65rem; gap: 0.375rem; }
+  .auth-kit__send-row { grid-template-columns: minmax(0, 1fr) 6.8rem; }
 }
 @media (prefers-reduced-motion: reduce) { .auth-kit * { scroll-behavior: auto !important; } }
 `;
@@ -126,18 +127,21 @@ export function AuthForms({ client: providedClient, basePath, fetch: requestFetc
     const [cooldowns, setCooldowns] = useState({});
     const [now, setNow] = useState(() => Date.now());
     const captchaRequest = useRef(0);
+    const captchaQueue = useRef(Promise.resolve());
     const purpose = purposeFor(view, method);
     const phone = phoneNumber.trim();
     const cooldownKey = phoneCooldownKey(phone);
     const retryAt = cooldowns[cooldownKey];
-    const remainingSeconds = retryAt === undefined ? 0 : Math.max(0, Math.ceil((retryAt - now) / 1_000));
+    const remainingSeconds = retryAt === undefined ? 0 : Math.max(0, Math.ceil((retryAt - now) / 1000));
     const loadCaptcha = useCallback(async (targetPurpose) => {
         const requestId = ++captchaRequest.current;
         setCaptchaLoading(true);
         setCaptcha(null);
         setCaptchaAnswer("");
         try {
-            const nextCaptcha = await client.captcha(targetPurpose);
+            const pending = captchaQueue.current.then(() => client.captcha(targetPurpose));
+            captchaQueue.current = pending.then(() => undefined, () => undefined);
+            const nextCaptcha = await pending;
             if (captchaRequest.current === requestId)
                 setCaptcha(nextCaptcha);
         }
@@ -257,9 +261,11 @@ export function AuthForms({ client: providedClient, basePath, fetch: requestFetc
             }
             return;
         }
-        if (!validatePhone())
-            return;
         if (view === "login" && method === "password") {
+            if (!phone || phone.length > 255) {
+                setError("请输入邮箱或手机号");
+                return;
+            }
             if (password.length === 0) {
                 setError("请输入密码");
                 return;
@@ -270,7 +276,7 @@ export function AuthForms({ client: providedClient, basePath, fetch: requestFetc
             setBusy("authenticate");
             try {
                 await client.signInPassword({
-                    phoneNumber: phone,
+                    loginId: phone,
                     password,
                     captchaId: activeCaptcha.id,
                     captchaAnswer: captchaAnswer.trim(),
@@ -290,6 +296,8 @@ export function AuthForms({ client: providedClient, basePath, fetch: requestFetc
             }
             return;
         }
+        if (!validatePhone())
+            return;
         if (!/^\d{6}$/.test(code)) {
             setError("请输入 6 位短信验证码");
             return;
@@ -361,7 +369,7 @@ export function AuthForms({ client: providedClient, basePath, fetch: requestFetc
             : "修改密码";
     const subtitle = view === "login"
         ? method === "password"
-            ? "使用手机号和密码登录"
+            ? "使用邮箱或手机号和密码登录"
             : "使用短信验证码登录"
         : view === "reset-password"
             ? "验证手机号后设置新密码"
@@ -378,14 +386,16 @@ export function AuthForms({ client: providedClient, basePath, fetch: requestFetc
                 ? "重置密码"
                 : "更新密码";
     const rootClassName = ["auth-kit", className].filter(Boolean).join(" ");
-    return (_jsxs("section", { className: rootClassName, "aria-labelledby": titleId, "aria-busy": isBusy, children: [_jsx("style", { children: styles }), _jsxs("header", { className: "auth-kit__header", children: [_jsx("h2", { className: "auth-kit__title", id: titleId, children: title }), _jsx("p", { className: "auth-kit__subtitle", children: subtitle })] }), _jsxs("form", { className: "auth-kit__form", onSubmit: (event) => void submit(event), noValidate: true, children: [view !== "change-password" ? (_jsxs("div", { className: "auth-kit__field", children: [_jsx("label", { className: "auth-kit__label", htmlFor: phoneId, children: "\u624B\u673A\u53F7" }), _jsx("input", { id: phoneId, className: "auth-kit__input", type: "tel", name: "phoneNumber", autoComplete: "username", inputMode: "tel", "aria-describedby": phoneHintId, value: phoneNumber, onChange: (event) => setPhoneNumber(event.currentTarget.value), disabled: isBusy }), _jsx("span", { className: "auth-kit__hint", id: phoneHintId, children: "\u4F8B\u5982 13800138000 \u6216 +8613800138000" })] })) : null, view === "login" && method === "password" ? (_jsxs("label", { className: "auth-kit__field", children: [_jsx("span", { className: "auth-kit__label", children: "\u5BC6\u7801" }), _jsx("input", { className: "auth-kit__input", type: "password", name: "password", autoComplete: "current-password", value: password, onChange: (event) => setPassword(event.currentTarget.value), disabled: isBusy })] })) : null, purpose !== null ? (_jsx(CaptchaField, { captcha: captcha, loading: captchaLoading, answer: captchaAnswer, disabled: isBusy, onAnswer: setCaptchaAnswer, onRefresh: () => void loadCaptcha(purpose) })) : null, view === "reset-password" || (view === "login" && method === "sms") ? (_jsxs("div", { className: "auth-kit__send-row", children: [_jsxs("label", { className: "auth-kit__field", children: [_jsx("span", { className: "auth-kit__label", children: "\u77ED\u4FE1\u9A8C\u8BC1\u7801\uFF086 \u4F4D\uFF09" }), _jsx("input", { className: "auth-kit__input", type: "text", name: "code", autoComplete: "one-time-code", inputMode: "numeric", pattern: "[0-9]*", maxLength: 6, value: code, onChange: (event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6)), disabled: isBusy })] }), _jsx("button", { className: "auth-kit__button auth-kit__button--secondary", type: "button", onClick: () => void sendCode(), disabled: isBusy || captchaLoading || remainingSeconds > 0, children: busy === "send-sms"
+    return (_jsxs("section", { className: rootClassName, "aria-labelledby": titleId, "aria-busy": isBusy, children: [_jsx("style", { children: styles }), _jsxs("header", { className: "auth-kit__header", children: [_jsx("h2", { className: "auth-kit__title", id: titleId, children: title }), _jsx("p", { className: "auth-kit__subtitle", children: subtitle })] }), _jsxs("form", { className: "auth-kit__form", onSubmit: (event) => void submit(event), noValidate: true, children: [view !== "change-password" ? (_jsxs("div", { className: "auth-kit__field", children: [_jsx("label", { className: "auth-kit__label", htmlFor: phoneId, children: view === "login" && method === "password" ? "邮箱 / 手机号" : "手机号" }), _jsx("input", { id: phoneId, className: "auth-kit__input", type: view === "login" && method === "password" ? "text" : "tel", name: view === "login" && method === "password" ? "loginId" : "phoneNumber", autoComplete: "username", inputMode: view === "login" && method === "password" ? "text" : "tel", "aria-describedby": phoneHintId, value: phoneNumber, onChange: (event) => setPhoneNumber(event.currentTarget.value), disabled: isBusy }), _jsx("span", { className: "auth-kit__hint", id: phoneHintId, children: view === "login" && method === "password"
+                                    ? "请输入邮箱或已绑定的手机号"
+                                    : "例如 13800138000 或 +8613800138000" })] })) : null, view === "login" && method === "password" ? (_jsxs("label", { className: "auth-kit__field", children: [_jsx("span", { className: "auth-kit__label", children: "\u5BC6\u7801" }), _jsx("input", { className: "auth-kit__input", type: "password", name: "password", autoComplete: "current-password", value: password, onChange: (event) => setPassword(event.currentTarget.value), disabled: isBusy })] })) : null, purpose !== null ? (_jsx(CaptchaField, { captcha: captcha, loading: captchaLoading, answer: captchaAnswer, disabled: isBusy, onAnswer: setCaptchaAnswer, onRefresh: () => void loadCaptcha(purpose) })) : null, view === "reset-password" || (view === "login" && method === "sms") ? (_jsxs("div", { className: "auth-kit__send-row", children: [_jsxs("label", { className: "auth-kit__field", children: [_jsx("span", { className: "auth-kit__label", children: "\u77ED\u4FE1\u9A8C\u8BC1\u7801\uFF086 \u4F4D\uFF09" }), _jsx("input", { className: "auth-kit__input", type: "text", name: "code", autoComplete: "one-time-code", inputMode: "numeric", pattern: "[0-9]*", maxLength: 6, value: code, onChange: (event) => setCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6)), disabled: isBusy })] }), _jsx("button", { className: "auth-kit__button auth-kit__button--secondary", type: "button", onClick: () => void sendCode(), disabled: isBusy || captchaLoading || remainingSeconds > 0, children: busy === "send-sms"
                                     ? "正在发送"
                                     : remainingSeconds > 0
                                         ? `已发送(${remainingSeconds})`
                                         : "发送验证码" })] })) : null, view === "change-password" ? (_jsxs(_Fragment, { children: [_jsx(PasswordField, { label: "\u5F53\u524D\u5BC6\u7801", name: "currentPassword", autoComplete: "current-password", value: currentPassword, disabled: isBusy, onChange: setCurrentPassword }), _jsx(PasswordField, { label: "\u65B0\u5BC6\u7801", name: "newPassword", autoComplete: "new-password", value: newPassword, disabled: isBusy, onChange: setNewPassword, hint: "8\u2013128 \u4E2A\u5B57\u7B26\uFF0C\u987B\u5305\u542B\u82F1\u6587\u5B57\u6BCD\u548C\u6570\u5B57" }), _jsx(PasswordField, { label: "\u786E\u8BA4\u65B0\u5BC6\u7801", name: "confirmPassword", autoComplete: "new-password", value: confirmPassword, disabled: isBusy, onChange: setConfirmPassword })] })) : null, view === "reset-password" ? (_jsxs(_Fragment, { children: [_jsx(PasswordField, { label: "\u65B0\u5BC6\u7801", name: "newPassword", autoComplete: "new-password", value: newPassword, disabled: isBusy, onChange: setNewPassword, hint: "8\u2013128 \u4E2A\u5B57\u7B26\uFF0C\u987B\u5305\u542B\u82F1\u6587\u5B57\u6BCD\u548C\u6570\u5B57" }), _jsx(PasswordField, { label: "\u786E\u8BA4\u65B0\u5BC6\u7801", name: "confirmPassword", autoComplete: "new-password", value: confirmPassword, disabled: isBusy, onChange: setConfirmPassword })] })) : null, _jsx("div", { "aria-live": "assertive", "aria-atomic": "true", children: _jsx("p", { className: "auth-kit__message auth-kit__message--error", role: error ? "alert" : undefined, children: error }) }), status ? (_jsx("p", { className: "auth-kit__message auth-kit__message--success", role: "status", children: status })) : null, _jsxs("div", { className: "auth-kit__actions", children: [view === "reset-password" ? (_jsx("button", { className: "auth-kit__button auth-kit__button--link", type: "button", onClick: () => showLogin("password"), disabled: isBusy, children: "\u8FD4\u56DE\u767B\u5F55" })) : null, _jsx("button", { className: "auth-kit__button auth-kit__button--primary", type: "submit", disabled: isBusy, children: primaryLabel })] }), view === "login" ? (_jsxs("div", { className: "auth-kit__switches", children: [_jsx("button", { className: "auth-kit__button auth-kit__button--link", type: "button", onClick: () => showLogin(method === "password" ? "sms" : "password"), disabled: isBusy, children: method === "password" ? "验证码登录" : "密码登录" }), _jsx("button", { className: "auth-kit__button auth-kit__button--link", type: "button", onClick: showReset, disabled: isBusy, children: "\u5FD8\u8BB0\u5BC6\u7801\uFF1F" })] })) : null] })] }));
 }
 function CaptchaField({ captcha, loading, answer, disabled, onAnswer, onRefresh, }) {
-    return (_jsxs("div", { className: "auth-kit__captcha", children: [_jsxs("label", { className: "auth-kit__field", children: [_jsx("span", { className: "auth-kit__label", children: "\u56FE\u5F62\u9A8C\u8BC1\u7801\uFF084 \u4F4D\uFF09" }), _jsx("input", { className: "auth-kit__input", type: "text", name: "captchaAnswer", autoComplete: "off", maxLength: 4, value: answer, onChange: (event) => onAnswer(event.currentTarget.value.slice(0, 4)), disabled: disabled || loading })] }), _jsxs("div", { className: "auth-kit__field", children: [_jsx("span", { className: "auth-kit__label", "aria-hidden": "true", children: "\u9A8C\u8BC1\u7801\u56FE\u7247" }), _jsx("div", { className: "auth-kit__captcha-visual", children: captcha === null ? (_jsx("span", { className: "auth-kit__captcha-loading", role: "status", children: loading ? "正在加载" : "加载失败" })) : (_jsx("img", { className: "auth-kit__captcha-image", src: captchaDataUrl(captcha.image), alt: "\u56FE\u5F62\u9A8C\u8BC1\u7801", width: "120", height: "42" })) })] }), _jsx("button", { className: "auth-kit__button auth-kit__button--link auth-kit__captcha-refresh", type: "button", onClick: onRefresh, disabled: disabled || loading, children: "\u6362\u4E00\u5F20" })] }));
+    return (_jsxs("div", { className: "auth-kit__captcha", children: [_jsxs("label", { className: "auth-kit__field", children: [_jsx("span", { className: "auth-kit__label", children: "\u9A8C\u8BC1\u7801" }), _jsx("input", { className: "auth-kit__input", type: "text", name: "captchaAnswer", autoComplete: "off", maxLength: 4, value: answer, onChange: (event) => onAnswer(event.currentTarget.value.slice(0, 4)), disabled: disabled || loading })] }), _jsx("div", { className: "auth-kit__field", children: _jsx("div", { className: "auth-kit__captcha-visual", children: captcha === null ? (_jsx("span", { className: "auth-kit__captcha-loading", role: "status", children: loading ? "正在加载" : "加载失败" })) : (_jsx("img", { className: "auth-kit__captcha-image", src: captchaDataUrl(captcha.image), alt: "\u56FE\u5F62\u9A8C\u8BC1\u7801", width: "120", height: "42" })) }) }), _jsx("button", { className: "auth-kit__button auth-kit__button--link auth-kit__captcha-refresh", type: "button", onClick: onRefresh, disabled: disabled || loading, "aria-label": "\u5237\u65B0\u9A8C\u8BC1\u7801", title: "\u5237\u65B0\u9A8C\u8BC1\u7801", children: _jsxs("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: [_jsx("path", { d: "M20 7v5h-5" }), _jsx("path", { d: "M4 17v-5h5" }), _jsx("path", { d: "M6.1 7a7 7 0 0 1 11.55-2L20 8M4 16l2.35 3A7 7 0 0 0 17.9 17" })] }) })] }));
 }
 function PasswordField({ label, name, autoComplete, value, disabled, onChange, hint, }) {
     const inputId = useId();

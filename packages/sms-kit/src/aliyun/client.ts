@@ -1,4 +1,4 @@
-import * as DysmsapiSdk from "@alicloud/dysmsapi20170525";
+import { createRequire } from "node:module";
 import { RuntimeOptions } from "@alicloud/tea-util";
 import {
   QuerySendDetailsRequest,
@@ -16,6 +16,12 @@ import type {
   AliyunTemplatePage,
 } from "./api.js";
 import { aliyunSdkEndpointAuthority } from "../core/provider-endpoint.js";
+
+// The Aliyun SDK is CommonJS.  A stable require shape is required because
+// OMS runs TypeScript through tsx, whose namespace-import interop differs
+// from Node's native ESM wrapper.
+const require = createRequire(import.meta.url);
+const DysmsapiSdk = require("@alicloud/dysmsapi20170525") as typeof import("@alicloud/dysmsapi20170525");
 
 export type AliyunClientCredentials = Readonly<{
   region: string;
@@ -37,8 +43,8 @@ export class AliyunSdkClientFactory implements AliyunClientFactory {
       accessKeySecret: credentials.accessKeySecret,
       ...(credentials.endpoint === undefined ? {} : { endpoint: aliyunSdkEndpointAuthority(credentials.endpoint) }),
     };
-    const client = new DysmsapiSdk.default.default(
-      config as ConstructorParameters<typeof DysmsapiSdk.default.default>[0],
+    const client = new DysmsapiSdk.default(
+      config as ConstructorParameters<typeof DysmsapiSdk.default>[0],
     );
 
     return new AliyunSdkApi(client);
@@ -46,7 +52,7 @@ export class AliyunSdkClientFactory implements AliyunClientFactory {
 }
 
 class AliyunSdkApi implements AliyunApi {
-  constructor(private readonly client: InstanceType<typeof DysmsapiSdk.default.default>) {}
+  constructor(private readonly client: InstanceType<typeof DysmsapiSdk.default>) {}
 
   async querySmsSignList(input: { pageIndex: number; pageSize: number }): Promise<AliyunSignPage> {
     const response = await this.client.querySmsSignList(new QuerySmsSignListRequest(input));

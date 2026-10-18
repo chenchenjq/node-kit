@@ -180,6 +180,13 @@ export const createSkuService = (options) => {
                 if (input.expectedStructureVersion !== undefined && input.expectedStructureVersion !== document.structureVersion.toString()) {
                     return { document, result: fail("VERSION_CONFLICT", "规格结构已被其他编辑修改") };
                 }
+                for (const dimension of input.dimensions) {
+                    const previous = dimension.id === undefined ? undefined : document.dimensions.find((candidate) => candidate.id === dimension.id);
+                    if (dimension.id !== undefined && previous === undefined)
+                        return { document, result: fail("VALIDATION_FAILED", "新规格维度必须使用 draftKey") };
+                    if (previous !== undefined && dimension.values.some((value) => value.id !== undefined && !previous.values.some((candidate) => candidate.id === value.id)))
+                        return { document, result: fail("VALIDATION_FAILED", "新规格值必须使用 draftKey") };
+                }
                 const from = document.skus.some((sku) => !sku.archived && sku.pairs.length === 0) ? "default" : "multi";
                 const to = input.dimensions.length === 0 ? "default" : "multi";
                 if (existing !== null && from !== to) {

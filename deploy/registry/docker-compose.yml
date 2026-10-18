@@ -1,0 +1,19 @@
+services:
+  verdaccio:
+    image: verdaccio/verdaccio:5
+    container_name: node-kit-verdaccio
+    restart: unless-stopped
+    ports:
+      - "4873:4873"
+    environment:
+      - VERDACCIO_PORT=4873
+    volumes:
+      - ./conf/config.yaml:/verdaccio/conf/config.yaml:ro
+      - ./storage:/verdaccio/storage
+    # 可选健康检查
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4873/-/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+

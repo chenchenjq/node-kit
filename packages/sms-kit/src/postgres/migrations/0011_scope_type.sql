@@ -3,13 +3,58 @@
 -- Existing package versions represented SYSTEM with the private sentinel
 -- `__system__`; normalize it during the forward-only upgrade.
 
--- The old authorization table has composite tenant foreign keys.  Convert it
--- before normalizing system jobs, otherwise the nullable SYSTEM identity
--- would be rejected by the legacy foreign key.
+-- PostgreSQL derives unnamed constraint names and may truncate them at its
+-- identifier limit.  Locate the legacy keys by table and type rather than
+-- relying on their generated physical names.
+DO $$
+DECLARE
+  target_table regclass;
+  legacy_constraint name;
+BEGIN
+  FOR legacy_constraint IN
+    SELECT conname
+      FROM pg_constraint
+     WHERE conrelid = 'sms_kit.admin_job_authorization'::regclass
+       AND contype = 'f'
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE sms_kit.admin_job_authorization DROP CONSTRAINT %I',
+      legacy_constraint
+    );
+  END LOOP;
+
+  FOR target_table, legacy_constraint IN
+    SELECT conrelid, conname
+      FROM pg_constraint
+     WHERE (
+       conrelid = ANY (ARRAY[
+       'sms_kit.admin_job_authorization'::regclass,
+       'sms_kit.admin_operation'::regclass,
+       'sms_kit.rate_limit_bucket'::regclass,
+       'sms_kit.daily_stat'::regclass,
+       'sms_kit.stat_dirty_date'::regclass
+       ])
+       AND contype = 'p'
+     ) OR (
+       conrelid = ANY (ARRAY[
+         'sms_kit.send_message'::regclass,
+         'sms_kit.otp_challenge'::regclass
+       ])
+       AND contype = 'u'
+     ) OR (
+       conrelid = 'sms_kit.send_job'::regclass
+       AND contype = 'u'
+       AND cardinality(conkey) = 3
+     )
+  LOOP
+    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', target_table, legacy_constraint);
+  END LOOP;
+
+END $$;
+
+-- Convert before normalizing system jobs, otherwise the nullable SYSTEM
+-- identity would be rejected by the remaining legacy foreign key.
 ALTER TABLE sms_kit.admin_job_authorization
-  DROP CONSTRAINT admin_job_authorization_tenant_id_job_id_fkey,
-  DROP CONSTRAINT admin_job_authorization_tenant_id_operation_idempotency_key_fkey,
-  DROP CONSTRAINT admin_job_authorization_pkey,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 
@@ -27,7 +72,6 @@ CREATE UNIQUE INDEX admin_job_authorization_scope_key
   ON sms_kit.admin_job_authorization (scope_type, coalesce(tenant_id, ''), job_id, required_permission);
 
 ALTER TABLE sms_kit.admin_operation
-  DROP CONSTRAINT admin_operation_pkey,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 
@@ -45,7 +89,6 @@ CREATE UNIQUE INDEX admin_operation_scope_key
   ON sms_kit.admin_operation (scope_type, coalesce(tenant_id, ''), operation, idempotency_key);
 
 ALTER TABLE sms_kit.send_message
-  DROP CONSTRAINT send_message_tenant_idempotency_key_key,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 
@@ -65,7 +108,6 @@ CREATE INDEX send_message_scope_submitted_idx
   ON sms_kit.send_message (scope_type, tenant_id, submitted_at DESC);
 
 ALTER TABLE sms_kit.otp_challenge
-  DROP CONSTRAINT otp_challenge_tenant_idempotency_key,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 
@@ -85,7 +127,6 @@ CREATE INDEX otp_challenge_scope_subject_action_created_idx
   ON sms_kit.otp_challenge (scope_type, tenant_id, subject_id, action, created_at DESC);
 
 ALTER TABLE sms_kit.send_job
-  DROP CONSTRAINT send_job_tenant_id_job_type_dedupe_key_key,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 
@@ -105,7 +146,6 @@ CREATE INDEX send_job_scope_state_available_idx
   ON sms_kit.send_job (scope_type, tenant_id, state, available_at);
 
 ALTER TABLE sms_kit.rate_limit_bucket
-  DROP CONSTRAINT rate_limit_bucket_pkey,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 
@@ -142,7 +182,6 @@ CREATE INDEX audit_event_scope_occurred_idx
   ON sms_kit.audit_event (scope_type, tenant_id, occurred_at DESC);
 
 ALTER TABLE sms_kit.daily_stat
-  DROP CONSTRAINT daily_stat_pkey,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 
@@ -160,7 +199,6 @@ CREATE UNIQUE INDEX daily_stat_scope_key
   ON sms_kit.daily_stat (scope_type, coalesce(tenant_id, ''), stat_date, template_key, purpose);
 
 ALTER TABLE sms_kit.stat_dirty_date
-  DROP CONSTRAINT stat_dirty_date_pkey,
   ADD COLUMN scope_type text NOT NULL DEFAULT 'TENANT',
   ALTER COLUMN tenant_id DROP NOT NULL;
 

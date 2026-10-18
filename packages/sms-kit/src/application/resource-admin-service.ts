@@ -8,7 +8,7 @@ import { executeAdminOperation } from "./admin-operation.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export type ResourceAdminServiceDependencies<Actor extends AuthorizationActor = AuthorizationActor> = Readonly<{
+export type ResourceAdminServiceDependencies<Actor extends Readonly<{ id: string }> = AuthorizationActor> = Readonly<{
   store: SmsStore;
   authorizer: Authorizer<Actor>;
   clock: Clock;
@@ -148,7 +148,7 @@ function uuid(value: unknown): value is string {
 }
 
 /** Owns all administrator reads/writes for the system-global signature/template catalog. */
-export class ResourceAdminService<Actor extends AuthorizationActor = AuthorizationActor> {
+export class ResourceAdminService<Actor extends Readonly<{ id: string }> = AuthorizationActor> {
   constructor(private readonly dependencies: ResourceAdminServiceDependencies<Actor>) {}
 
   async listSignatures(actor: Actor, input: Readonly<{ page: number; pageSize: number }>) {

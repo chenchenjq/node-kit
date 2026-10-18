@@ -3,8 +3,8 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { SmsKitError } from "../../core/errors.js";
-import type { TenantId } from "../../core/types.js";
-import type { BudgetReservation, PolicyStore, VerificationPolicy, VerificationPolicyUpdate } from "../../ports/policy.js";
+import { scopeTenantId, tenantScope, type SmsScope } from "../../core/types.js";
+import type { BudgetOwnership, BudgetReservation, HoldBudgetInput, PolicyStore, ReleaseBudgetInput, VerificationPolicy, VerificationPolicyUpdate } from "../../ports/policy.js";
 import type { SmsTransaction } from "../../ports/store.js";
 import type { PgSmsTransaction } from "../transaction.js";
 
@@ -12,6 +12,18 @@ type PolicyRow = { version: string; otp_length: number; otp_ttl_seconds: number;
 function db(pool: Pool, tx?: SmsTransaction): Pool | PoolClient { return tx === undefined ? pool : (tx as PgSmsTransaction).client; }
 function policy(row: PolicyRow): VerificationPolicy { return { version: Number(row.version), otpLength: row.otp_length, otpTtlSeconds: row.otp_ttl_seconds, otpMaxAttempts: row.otp_max_attempts, proofTtlSeconds: row.proof_ttl_seconds, phoneMinIntervalSeconds: row.phone_min_interval_seconds, phoneHourlyLimit: row.phone_hourly_limit, phoneDailyLimit: row.phone_daily_limit, ipWindowSeconds: row.ip_window_seconds, ipWindowLimit: row.ip_window_limit, systemDailyBudget: row.system_daily_budget, circuitOpen: row.circuit_open, ...(row.circuit_reason === null ? {} : { circuitReason: row.circuit_reason }) }; }
 const fields = "version, otp_length, otp_ttl_seconds, otp_max_attempts, proof_ttl_seconds, phone_min_interval_seconds, phone_hourly_limit, phone_daily_limit, ip_window_seconds, ip_window_limit, system_daily_budget, circuit_open, circuit_reason";
+
+function ownership(input: BudgetOwnership): SmsScope {
+  if (input.ownership !== undefined) {
+    if (input.tenantId !== undefined) throw new SmsKitError("CONFIG_INVALID", "ambiguous budget ownership");
+    const scope = input.ownership;
+    if (scope.scopeType === "SYSTEM" && !("tenantId" in scope)) return scope;
+    if (scope.scopeType === "TENANT" && typeof scope.tenantId === "string" && scope.tenantId.length > 0) return scope;
+  } else if (typeof input.tenantId === "string" && input.tenantId.length > 0) {
+    return tenantScope(input.tenantId);
+  }
+  throw new SmsKitError("CONFIG_INVALID", "invalid budget ownership");
+}
 
 export class PgPolicyStore implements PolicyStore {
   constructor(private readonly pool: Pool) {}
@@ -36,14 +48,16 @@ export class PgPolicyStore implements PolicyStore {
     return policy(rows[0]);
   }
 
-  async holdBudget(input: Readonly<{ tenantId: TenantId; messageId: BudgetReservation["messageId"]; now: Date }>, tx: SmsTransaction): Promise<BudgetReservation> {
+  async holdBudget(input: HoldBudgetInput, tx: SmsTransaction): Promise<BudgetReservation> {
     const client = db(this.pool, tx);
+    const scope = ownership(input);
+    await this.get(tx);
     const settings = await client.query<PolicyRow>(`select ${fields} from sms_kit.policy_config where id = 1 for update`);
     if (settings.rows[0] === undefined) throw new SmsKitError("STORAGE_FAILURE", "policy configuration is not initialized", true);
     const current = policy(settings.rows[0]);
     if (current.circuitOpen) throw new SmsKitError("CIRCUIT_OPEN", "sending circuit is open");
-    const owned = await client.query<{ id: string }>("select id from sms_kit.send_message where id = $1 and tenant_id = $2 for update", [input.messageId, input.tenantId]);
-    if (owned.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message is outside the trusted tenant");
+    const owned = await client.query<{ id: string }>("select id from sms_kit.send_message where id = $1 and tenant_id is not distinct from $2 and scope_type = $3 for update", [input.messageId, scopeTenantId(scope), scope.scopeType]);
+    if (owned.rows[0] === undefined) throw new SmsKitError("CONCURRENT_MODIFICATION", "message is outside the trusted scope");
     const existing = await client.query<{ budget_date: string; state: "held" | "released" }>("select budget_date::text, state from sms_kit.send_budget_reservation where message_id = $1", [input.messageId]);
     if (existing.rows[0] !== undefined) return { messageId: input.messageId, budgetDate: existing.rows[0].budget_date, state: existing.rows[0].state };
     const budgetDate = input.now.toISOString().slice(0, 10);
@@ -56,9 +70,10 @@ export class PgPolicyStore implements PolicyStore {
     return { messageId: input.messageId, budgetDate, state: "held" };
   }
 
-  async releaseBudget(input: Readonly<{ tenantId: TenantId; messageId: BudgetReservation["messageId"] }>, tx: SmsTransaction): Promise<boolean> {
+  async releaseBudget(input: ReleaseBudgetInput, tx: SmsTransaction): Promise<boolean> {
     const client = db(this.pool, tx);
-    const released = await client.query<{ budget_date: string }>(`update sms_kit.send_budget_reservation r set state = 'released', released_at = now() from sms_kit.send_message m where r.message_id = m.id and r.message_id = $1 and m.tenant_id = $2 and r.state = 'held' returning r.budget_date::text`, [input.messageId, input.tenantId]);
+    const scope = ownership(input);
+    const released = await client.query<{ budget_date: string }>(`update sms_kit.send_budget_reservation r set state = 'released', released_at = now() from sms_kit.send_message m where r.message_id = m.id and r.message_id = $1 and m.tenant_id is not distinct from $2 and m.scope_type = $3 and r.state = 'held' returning r.budget_date::text`, [input.messageId, scopeTenantId(scope), scope.scopeType]);
     if (released.rows[0] === undefined) return false;
     await client.query("update sms_kit.daily_send_budget set held_count = held_count - 1, version = version + 1, updated_at = now() where budget_date = $1::date and held_count > 0", [released.rows[0].budget_date]);
     return true;

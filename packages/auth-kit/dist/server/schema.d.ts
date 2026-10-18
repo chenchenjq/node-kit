@@ -1,3 +1,4 @@
+export type AuthSchema = ReturnType<typeof createAuthSchema>;
 /** Host owns these table instances and executes reviewed migrations. No SQL runs here. */
 export declare function createAuthSchema(namespace?: string): {
     user: import("drizzle-orm/pg-core").PgTableWithColumns<{
@@ -130,7 +131,7 @@ export declare function createAuthSchema(namespace?: string): {
                 columnType: "PgText";
                 data: string;
                 driverParam: string;
-                notNull: true;
+                notNull: false;
                 hasDefault: false;
                 isPrimaryKey: false;
                 isAutoincrement: false;
@@ -658,6 +659,5 @@ export declare function createAuthSchema(namespace?: string): {
         dialect: 'pg';
     }>;
 };
-export type AuthSchema = ReturnType<typeof createAuthSchema>;
 /** Review then execute on an empty dedicated namespace; never called by createAuthKit. */
 export declare function authSchemaSql(namespace?: string): string;
