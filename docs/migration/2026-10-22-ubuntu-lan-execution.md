@@ -1,6 +1,6 @@
 # node-kit 迁移执行与新机开发验收
 
-执行日期：2026-10-22（Asia/Shanghai）。目标 `meteor@192.168.0.66:/www/node-kit`。依据 [迁移方案](./2026-10-22-ubuntu-lan.md) 执行，代码与 Verdaccio 数据已经迁移；五个有源码包的开发环境验收通过。源机继续保留用于回滚。
+执行日期：2026-10-22（Asia/Shanghai）。目标 `meteor@192.168.0.66:/www/node-kit`。依据 [迁移方案](./2026-10-22-ubuntu-lan.md) 执行，代码与 Verdaccio 数据已经迁移；初次验收五个有源码包，随后已恢复 ai-kit / oss-kit 源码并补齐两包验收，详见 [源码恢复记录](./2026-10-22-ai-oss-source-recovery.md)。源机继续保留用于回滚。
 
 ## 1. 已交付环境
 
@@ -81,9 +81,9 @@ git status --short
 # 已完成首次安装。后续需要重新安装时：
 npm ci --prefer-offline --no-audit --no-fund
 
-# 目前可进行源码开发的五个包，按依赖顺序构建。
-npm run build --workspace area-kit --workspace addr-parse-kit --workspace sms-kit --workspace auth-kit --workspace sku-kit
-npm run typecheck --workspace area-kit --workspace addr-parse-kit --workspace sms-kit --workspace auth-kit --workspace sku-kit
+# 七个包现均可源码开发，按当前改动选择 workspace。
+npm run build --workspace ai-kit --workspace oss-kit
+npm run typecheck --workspace ai-kit --workspace oss-kit
 
 # 按本次改动范围选择相应 workspace 测试，不必每次全跑。
 npm test --workspace auth-kit
@@ -121,9 +121,9 @@ npm run registry:logs
 
 ## 7. 明确边界
 
-- **ai-kit、oss-kit 缺 src / test / scripts**：已迁移现有 dist 和 Registry 包并通过入口加载；完整源码开发验收仍需找回原源码。因此不把根级全量 build/typecheck 当作已通过。
+- **ai-kit / oss-kit 源码缺失已解决**：从 Git 未引用目录树恢复 99 个原文件，重建 64 个 dist 文件与原产物一致；新机补验两包 build/typecheck、179 项默认测试、PostgreSQL 18.6、真实 tarball 消费及 ai-kit 浏览器流程。此前第 4 节是初次迁移测试快照，最新补充见源码恢复记录；没有重复跑根级全仓回归。
 - 源机全部附加工作树及临时分支已完成授权清理，恢复归档保留在两端；源项目主目录及运行数据继续保留用于回滚。
 - 五级地区完整 CSV 不在仓库；本次 PostgreSQL 测试使用既有测试数据，未宣称完成全国数据导入或完整地区浏览器业务验收。
 - 未执行真实短信、OSS、AI 供应商调用；未修改其他宿主项目、共享业务数据或 GitHub 分支。
 
-结论限定为：**代码与 Registry 迁移完成；五个有源码包的新机开发环境通过上述验收；两个缺源码包保持可消费产物状态。**
+结论限定为：**代码与 Registry 迁移完成；七个包均已具备源码与开发工具，新机通过初次迁移及源码恢复阶段记录的验收。真实云服务调用未纳入验收。**

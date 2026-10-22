@@ -20,11 +20,12 @@ Node.js >=20.19（当前实测 22.22.1），ESM。锁定 `ali-oss 6.23.0`（SDK 
 
 ## .tgz 安装
 
-在仓库中的包目录执行：
+从 node-kit 根目录安装依赖，再进入包目录执行：
 
 ```bash
+# 在 node-kit 根目录安装工作区依赖，使用根 package-lock.json。
+npm ci
 cd packages/oss-kit
-npm ci --workspaces=false
 npm run typecheck
 npm test
 npm run build

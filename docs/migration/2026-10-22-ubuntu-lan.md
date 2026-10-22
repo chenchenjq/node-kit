@@ -12,7 +12,7 @@
 - [x] 通过指定密钥连接目标机，确认 `/www` 可写、项目目录尚不存在、4873 端口未占用。
 - [x] 盘点 PostgreSQL、Redis、Testcontainers、Verdaccio 及持久化目录。
 - [x] 权限恢复后，核验备份并清理最后的 auth 工作树及关联分支，见第 3 节与执行记录。
-- [ ] 找回 ai-kit、oss-kit 的源码、测试和构建脚本；当前仅有编译产物，无法完成这两个包的源码开发验收。
+- [x] 后续从 Git 未引用目录树找回 ai-kit、oss-kit 源码、测试和构建脚本，并完成新机开发验收，见 [源码恢复记录](./2026-10-22-ai-oss-source-recovery.md)。
 - [ ] 在迁移窗口暂停包发布，备份并恢复约 1.8 GiB 的 Verdaccio storage，核对版本、标签及认证。
 - [ ] 在目标目录重新安装依赖，验证五个有源码的包及实际消费项目。
 - [ ] 完成 PostgreSQL 18.6 / Redis 8.2.10 的隔离兼容性验收。源机 PostgreSQL 17 测试通过不能代替该项。
@@ -29,8 +29,8 @@
 | area-kit | 0.0.4 | 五级地区数据与配送地区适配器；有源码、迁移 SQL 和固定 MCA JSON 快照 |
 | addr-parse-kit | 0.0.0 | 地址解析；有源码、测试，集成测试依赖 area-kit 构建产物 |
 | sku-kit | 0.0.0 | SKU 配置及 PostgreSQL 存储；有源码、测试和迁移 SQL |
-| ai-kit | 0.0.0 | 只有 package.json、dist 和 artifacts；缺源码、测试、scripts |
-| oss-kit | 0.0.0 | 只有 package.json、dist 和 artifacts；缺源码、测试、scripts；本次保留许可证改动 |
+| ai-kit | 0.0.0 | 初次盘点仅有产物；后续已恢复源码、测试、scripts、文档及示例 |
+| oss-kit | 0.0.0 | 初次盘点仅有产物；后续已恢复源码、测试、scripts、文档及示例，保留许可证改动 |
 
 应一并保留 `docs/`、`.scratch/`、迁移 SQL、快照和锁文件。`CONTEXT-MAP.md` 中 ai-kit、auth-kit、oss-kit、area-kit、sms-kit 的 CONTEXT.md 链接当前缺少对应文件；此处如实记录，不用迁移任务重建领域文档。
 
@@ -240,6 +240,6 @@ npm view area-kit dist-tags --json --registry http://127.0.0.1:4873
 | npm pack dry-run | area-kit 112 文件，oss-kit 28 文件，sms-kit 202 文件；许可证、快照与新增 JS 入口存在；未发布 |
 | 完整性 / 清理 | bundle verify、归档逐文件 hash、删除前复查、分支祖先检查；git diff --check 通过 |
 
-以上为准备阶段测试记录，原始日志、退出结果与 agy 输出存于恢复目录 evidence。后续目标机安装、构建、数据库兼容性、Registry 恢复及旧工作树清理结果见执行记录；缺源码问题仍存在，未执行 live 供应商测试。
+以上为准备阶段测试记录，原始日志、退出结果与 agy 输出存于恢复目录 evidence。后续目标机安装、构建、数据库兼容性、Registry 恢复、旧工作树清理及缺源码恢复结果见执行记录；未执行 live 供应商测试。
 
 模型选择依据 [OpenAI 官方指南](https://developers.openai.com/api/docs/guides/model-selection) 与本机 model-selection.md：常规盘点／整合建议 Sol；本次主执行使用现有 Codex 会话，没有声称切换模型；部分测试实际通过 agy 指定 gemini-3.8-flash。所有“通过”均限定于上表实际执行范围。

@@ -9,8 +9,9 @@ Node.js >=22.19（本地 22.22.1），ESM、TypeScript strict。参考宿主使�
 依赖精确锁定：ai 7.0.105、@ai-sdk/openai 4.0.69、@ai-sdk/anthropic 4.0.56、@ai-sdk/openai-compatible 3.0.51、undici 8.10.2。包设置 private:true，不得自动发布。
 
 ```sh
+# 在 node-kit 根目录安装工作区依赖，使用根 package-lock.json。
+npm ci
 cd packages/ai-kit
-npm ci --workspaces=false
 npm run typecheck
 npm run build
 npm test
