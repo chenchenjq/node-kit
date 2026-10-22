@@ -22,6 +22,8 @@ export type { DispatchRecoveryRunInput, DispatchRecoveryServiceDependencies, } f
 export { ReceiptService } from "./receipt-service.js";
 export type { ReceiptIngestInput, ReceiptIngestResult, ReceiptServiceDependencies, } from "./receipt-service.js";
 export { ReconcileService } from "./reconcile-service.js";
+export { SystemAuthReconcileService } from "./system-auth-reconcile-service.js";
+export type { SystemAuthReconcileServiceDependencies } from "./system-auth-reconcile-service.js";
 export type { ReconcileRunInput, ReconcileServiceDependencies, } from "./reconcile-service.js";
 export { ReconcileAdminService } from "./reconcile-admin-service.js";
 export type { EnqueueReconciliationInput, EnqueueReconciliationResult, ReconcileAdminServiceDependencies, ReconciliationJob, } from "./reconcile-admin-service.js";

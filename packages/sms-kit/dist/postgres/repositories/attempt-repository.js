@@ -73,7 +73,8 @@ export class PgAttemptRepository {
     async listExpiredStarted(input, tx) {
         const { rows } = await db(this.pool, tx).query(`select ${fields} from sms_kit.send_attempt a
         join sms_kit.send_message m on m.id = a.message_id
-       where ($1::text is null or m.tenant_id = $1) and a.status = 'started'
+       where m.scope_type = 'TENANT' and m.tenant_id is not null
+         and ($1::text is null or m.tenant_id = $1) and a.status = 'started'
          and a.dispatch_mode = 'direct' and a.dispatch_marked_at < $2
        order by a.dispatch_marked_at, a.id for update of a skip locked limit $3`, [input.tenantId ?? null, input.before, input.limit]);
         return rows.map(attempt);

@@ -1,12 +1,14 @@
 import type { Clock, EventSink } from "../ports/runtime.js";
 import type { SecretResolver } from "../ports/security.js";
 import type { SmsStore } from "../ports/store.js";
+import type { SystemAuthRepository } from "../ports/system-auth.js";
 declare const acknowledgement: Readonly<{
     code: 0;
     msg: "成功";
 }>;
 export type ReceiptServiceDependencies = Readonly<{
     store: SmsStore;
+    systemAuth?: SystemAuthRepository;
     secrets: SecretResolver;
     clock: Clock;
     events: EventSink;

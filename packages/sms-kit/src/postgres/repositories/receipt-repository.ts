@@ -23,7 +23,7 @@ export class PgReceiptRepository implements ReceiptRepository {
     const inserted = input.messageId === undefined
       ? await client.query<Row>(`insert into sms_kit.delivery_receipt (id, tenant_id, message_id, match_status, dedupe_key, provider_biz_id, provider_out_id, delivery_status, provider_code, provider_message, occurred_at, received_at, source, redacted_payload) values ($1, null, null, 'unmatched', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb) on conflict (dedupe_key) do nothing returning ${fields}`,
         [randomUUID(), input.dedupeKey, input.providerBizId ?? null, input.providerOutId ?? null, input.deliveryStatus, input.providerCode ?? null, input.providerMessage ?? null, input.occurredAt, input.receivedAt, input.source, redactedPayload])
-      : await client.query<Row>(`insert into sms_kit.delivery_receipt (id, tenant_id, message_id, match_status, dedupe_key, provider_biz_id, provider_out_id, delivery_status, provider_code, provider_message, occurred_at, received_at, source, redacted_payload) select $1, m.tenant_id, m.id, 'matched', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb from sms_kit.send_message m where m.id = $12 and m.tenant_id = $13 on conflict (dedupe_key) do nothing returning ${fields}`,
+      : await client.query<Row>(`insert into sms_kit.delivery_receipt (id, scope_type, tenant_id, message_id, match_status, dedupe_key, provider_biz_id, provider_out_id, delivery_status, provider_code, provider_message, occurred_at, received_at, source, redacted_payload) select $1, 'TENANT', m.tenant_id, m.id, 'matched', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb from sms_kit.send_message m where m.id = $12 and m.tenant_id = $13 and m.scope_type = 'TENANT' on conflict (dedupe_key) do nothing returning ${fields}`,
         [randomUUID(), input.dedupeKey, input.providerBizId ?? null, input.providerOutId ?? null, input.deliveryStatus, input.providerCode ?? null, input.providerMessage ?? null, input.occurredAt, input.receivedAt, input.source, redactedPayload, input.messageId, input.tenantId]);
     if (inserted.rows[0] !== undefined) return { receipt: receipt(inserted.rows[0]), created: true };
     if (input.messageId === undefined) return { receipt: unmatchedReceipt(input), created: false };
@@ -32,10 +32,10 @@ export class PgReceiptRepository implements ReceiptRepository {
     // promote the system-owned row atomically instead of treating the shared
     // provider dedupe identity as a cross-tenant conflict.
     const promoted = await client.query<Row>(`update sms_kit.delivery_receipt receipt
-      set tenant_id = message.tenant_id, message_id = message.id, match_status = 'matched'
+      set scope_type = 'TENANT', tenant_id = message.tenant_id, message_id = message.id, match_status = 'matched'
       from sms_kit.send_message message
       where receipt.dedupe_key = $1 and receipt.match_status = 'unmatched'
-        and message.id = $2 and message.tenant_id = $3
+        and message.id = $2 and message.tenant_id = $3 and message.scope_type = 'TENANT'
         and receipt.provider_biz_id = $4 and message.provider_biz_id = $4
       returning receipt.id, receipt.tenant_id, receipt.message_id, receipt.match_status, receipt.dedupe_key, receipt.provider_biz_id, receipt.provider_out_id, receipt.delivery_status, receipt.provider_code, receipt.provider_message, receipt.occurred_at, receipt.received_at, receipt.source, receipt.redacted_payload`,
     [input.dedupeKey, input.messageId, input.tenantId, input.providerBizId]);

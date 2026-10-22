@@ -1,13 +1,15 @@
 # area-kit
 
-`area-kit` stores and serves a pinned five-level Chinese statistical-area snapshot. It exposes five public entry points only: `area-kit`, `area-kit/server`, `area-kit/postgres`, `area-kit/client`, and `area-kit/react`. The package does not ship the nationwide CSV files; a host prepares and imports them into PostgreSQL.
+`area-kit` stores and serves a pinned five-level Chinese statistical-area snapshot. It exposes the public entry points `area-kit`, `area-kit/server`, `area-kit/postgres`, `area-kit/client`, `area-kit/react`, and `area-kit/delivery-regions`. The package does not ship the nationwide CSV files; a host prepares and imports them into PostgreSQL.
+
+The separate `area-kit/delivery-regions` entry point fetches the Ministry of Civil Affairs' current county-level administrative-region query and maps its six-digit administrative codes for mainland shipping-address validation. It does not read or silently substitute the older five-level statistical snapshot. The endpoint has no dataset version tag, so callers must retain the returned response date, retrieval time, checksum, and serialized rows as an immutable input to their own reviewed database migration/import.
 
 ## Install and wire the host
 
 Install the packed tarball with its peer dependencies in the consuming application. The host owns its database connection, migrations, authentication, authorization, request protection, and persistence.
 
 ```sh
-npm install ./area-kit-0.0.0.tgz pg drizzle-orm react
+npm install ./area-kit-0.0.4.tgz pg drizzle-orm react
 ```
 
 The server factory is dependency injection only: it neither opens a connection nor executes a migration. Replace the sample context rule with the host's real permission rule.

@@ -80,13 +80,32 @@ export class ReceiptService {
             const result = { unmatched: 0, terminalConflicts: 0 };
             for (const report of reports) {
                 assertActive(input, this.dependencies.clock, this.safetyMarginMs);
+                const dedupeKey = receiptDedupeKey(report);
+                if (this.dependencies.systemAuth !== undefined) {
+                    const systemResult = await this.dependencies.systemAuth.applyReceipt({
+                        outId: report.outId,
+                        bizId: report.bizId,
+                        dedupeKey,
+                        status: report.deliveryStatus,
+                        providerCode: report.providerCode,
+                        occurredAt: report.occurredAt,
+                        receivedAt: this.dependencies.clock.now(),
+                    }, tx);
+                    assertActive(input, this.dependencies.clock, this.safetyMarginMs);
+                    if (systemResult.matched) {
+                        if (systemResult.terminalConflict)
+                            result.terminalConflicts += 1;
+                        continue;
+                    }
+                }
                 const message = await this.dependencies.store.messages.lockByReceiptReference({ outId: report.outId, bizId: report.bizId }, tx);
                 assertActive(input, this.dependencies.clock, this.safetyMarginMs);
                 const recorded = await this.dependencies.store.receipts.record({
                     tenantId: message?.tenantId ?? unmatchedTenant,
                     ...(message === undefined ? {} : { messageId: message.id }),
-                    dedupeKey: receiptDedupeKey(report),
+                    dedupeKey,
                     providerBizId: report.bizId,
+                    providerOutId: report.outId,
                     deliveryStatus: report.deliveryStatus,
                     providerCode: report.providerCode,
                     occurredAt: report.occurredAt,

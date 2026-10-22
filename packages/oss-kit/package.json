@@ -7,6 +7,7 @@
     "node": ">=20.19"
   },
   "files": [
+    "LICENSE",
     "dist",
     "README.md",
     "AI-USAGE.md",
@@ -74,5 +75,6 @@
     "jsdom": "26.1.0",
     "esbuild": "0.25.12"
   },
-  "description": "私有对象存储能力包：阿里云 OSS、内容校验、凭据管理及 React 集成。"
+  "description": "私有对象存储能力包：阿里云 OSS、内容校验、凭据管理及 React 集成。",
+  "license": "Apache-2.0"
 }

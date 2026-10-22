@@ -2,6 +2,20 @@
 
 This package's fixed manifest describes the five CSV files from [modood/Administrative-divisions-of-China](https://github.com/modood/Administrative-divisions-of-China) at commit `c49d495b40ac73eb1a66f6eeae5f8fd10696f035`. The snapshot date is 2023-06-30 and the source publication date is 2023-09-11. It is a statistical-source snapshot, not a promise of current administrative status.
 
+## Current county-level delivery-region source
+
+For shipping-region restrictions, use the separate `area-kit/delivery-regions` adapter. Its source is the Ministry of Civil Affairs [Administrative Division Information Query Platform API](https://dmfw.mca.gov.cn/9095/xzqh/getList?code=&maxLevel=3), which returns the current province, prefecture, and county-level administrative tree with 12-digit codes. The adapter keeps the first six digits supplied by that API as the national six-digit code; it does not pad statistical codes or derive codes from names.
+
+The response does not include a dataset tag (`tag` was `null` when checked on 2026-09-23). The adapter therefore pins each retrieval by the exact response SHA-256 and records both the HTTP `Date` header and local retrieval timestamp. For example, the response captured on 2026-09-23 had SHA-256 `a880ff2c2fc76f7e15c42dcef9476bd353fd48a2ce3ea397140358211636700e`, contained 31 mainland province roots and 3,213 descendant nodes, and included the six-digit-prefix records `653132` 岑岭县 and `659013` 草湖市. Treat the HTTP date as response metadata rather than a formal publication/effective date; retain the exact serialized response with every imported snapshot.
+
+The national code baseline is [GB/T 2260-2007](https://std.samr.gov.cn/gb/search/gbDetailed?id=71F772D76EA3D3A7E05397BE0A0AB82A), listed as current by SAMR with a 2023 review conclusion of continued validity. The 2025 Administrative Division Code Management Measures (effective 2025-09-01) require the Ministry of Civil Affairs to publish the nationwide code set through the National Geographical Names Database every January, covering the previous year-end. The query API's response tag is absent, so its checksum proves which API response was captured but does not itself identify the formal nationwide publication. Before production activation, compare the API snapshot and every mapped six-digit code against that official full publication, then verify actual receiving-address representations from the Mall.
+
+That exact 271,004-byte response is retained at [`snapshots/mca-xzqh-2026-09-23.json`](./snapshots/mca-xzqh-2026-09-23.json) and included in this package release so mapping results can be reproduced. Its SHA-256 is the value above; its HTTP `Date` was `Wed, 23 Sep 2026 16:09:41 GMT`.
+
+The adapter excludes all non-mainland regions, including Hong Kong, Macao, and Taiwan. It synthesizes only nonselectable address grouping rows that are absent from the query tree (for example `110100` 北京市 and `469000` 省直辖县级行政区划). Those rows preserve the `city_code` parent expected in structured addresses; actual province, city, district, county, and county-level-city choices retain codes and names from the source response. Every transformed code is unique and six digits, every parent stays within the same province, and unsupported node levels, missing provinces, duplicate codes, malformed codes, or unknown direct-admin node types reject the entire snapshot.
+
+The adapter's presence does not certify the returned data for production. Before activating a new OMS snapshot, review the exact response checksum and source HTTP date, compare changes with the preceding snapshot and the official six-digit-code policy, verify actual mall address fields/names (including municipality and direct-admin province formats), and run the full parent/name/order-address compatibility audit. The pinned five-level modood dataset above remains unchanged and must not be presented as the source for this delivery-region catalog.
+
 ```ts
 import type { DatasetSummary } from "area-kit";
 

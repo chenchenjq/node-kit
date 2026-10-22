@@ -9,6 +9,7 @@ import {
   ReceiptService,
   ReconcileAdminService,
   ReconcileService,
+  SystemAuthReconcileService,
   ResourceAdminService,
   ResourceSyncService,
   SendService,
@@ -263,11 +264,12 @@ export async function createAdminHost(): Promise<AdminHost> {
       testRequestFingerprinter: { fingerprint: (value) => phoneHasher.hash(value) },
     });
     const worker = new SendWorker({ store, provider, phoneProtector, payloadProtector, clock });
-    const dispatchRecovery = new DispatchRecoveryService({ store, clock });
+    const dispatchRecovery = new DispatchRecoveryService({ store, clock, systemAuth: store.systemAuth });
     const reconcile = new ReconcileService({ store, provider, phoneProtector, clock, events: eventSink, workerId: "fixture-reconcile" });
+    const systemReconcile = new SystemAuthReconcileService({ store, repository: store.systemAuth, provider, phoneProtector, clock });
     const reconcileAdmin = new ReconcileAdminService({ store, authorizer, clock, ids });
     const maintenance = new MaintenanceService({ store, clock });
-    const receiptService = new ReceiptService({ store, secrets, clock, events: eventSink });
+    const receiptService = new ReceiptService({ store, systemAuth: store.systemAuth, secrets, clock, events: eventSink });
     const receiptHandler = createAliyunReceiptHandler({
       receiptService,
       clock,
@@ -292,7 +294,13 @@ export async function createAdminHost(): Promise<AdminHost> {
             abandonedBefore: new Date(clock.now().getTime() - 60_000),
           }),
         },
-        "receipt-reconcile": { runBatch: ({ limit }) => reconcile.runBatch({ limit }) },
+        "receipt-reconcile": { runBatch: async ({ limit }) => {
+          const tenantCount = await reconcile.runBatch({ limit });
+          const systemCount = tenantCount < limit
+            ? await systemReconcile.runBatch({ limit: limit - tenantCount })
+            : 0;
+          return tenantCount + systemCount;
+        } },
         "data-retention": { runBatch: ({ limit }) => maintenance.applyRetention({ batchSize: limit }) },
         "daily-rollup": { runBatch: ({ limit }) => maintenance.rollupDirtyDates({ limit }) },
         // Resource synchronization is intentionally manual in this fixture;

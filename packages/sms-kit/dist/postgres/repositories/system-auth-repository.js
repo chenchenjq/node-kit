@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { SmsKitError } from "../../core/errors.js";
 const challengeFields = "id, idempotency_key, subject_id, action, phone_hash, code_hash, max_attempts, attempt_count, expires_at, proof_ttl_seconds, delivery_acceptance_status, invalidated_at, terminal_error_code, verified_at, proof_hash, proof_expires_at";
 function db(pool, tx) {
@@ -156,6 +157,252 @@ export class PgSystemAuthRepository {
             id: existing.rows[0].id,
             created: false,
         };
+    }
+    async startAttempt(input, tx) {
+        const token = randomUUID();
+        const result = await db(this.pool, tx).query(`insert into sms_kit.send_attempt
+        (id, message_id, attempt_no, status, dispatch_mode, dispatch_token, dispatch_marked_at, occurred_at)
+       select $2, m.id, 1, 'started', 'direct', $3, $4, $4
+         from sms_kit.send_message m
+        where m.id = $1 and m.scope_type = 'SYSTEM' and m.tenant_id is null and m.acceptance_status = 'pending'`, [input.messageId, randomUUID(), token, input.occurredAt]);
+        if (result.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system authentication message is no longer pending");
+        return token;
+    }
+    async completeAttempt(input, tx) {
+        const result = await db(this.pool, tx).query(`update sms_kit.send_attempt a
+          set status = $3, provider_request_id = $4, provider_code = $5,
+              error_code = $6, occurred_at = $7
+         from sms_kit.send_message m
+        where a.message_id = m.id and m.id = $1 and m.scope_type = 'SYSTEM'
+          and m.tenant_id is null and a.dispatch_token = $2 and a.status = 'started'`, [
+            input.messageId,
+            input.dispatchToken,
+            input.status,
+            input.providerRequestId ?? null,
+            input.providerCode ?? null,
+            input.errorCode ?? null,
+            input.occurredAt,
+        ]);
+        if (result.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system authentication attempt is no longer current");
+    }
+    async recoverAbandoned(input, tx) {
+        const { rows } = await db(this.pool, tx).query(`select a.message_id, a.dispatch_token, c.id as challenge_id
+         from sms_kit.send_attempt a
+         join sms_kit.send_message m on m.id = a.message_id
+         left join sms_kit.otp_challenge c
+           on m.idempotency_key = 'system-auth:' || c.id::text
+          and c.scope_type = 'SYSTEM' and c.tenant_id is null
+        where m.scope_type = 'SYSTEM' and m.tenant_id is null
+          and a.status = 'started' and a.dispatch_mode = 'direct'
+          and a.dispatch_marked_at < $1
+        order by a.dispatch_marked_at, a.id
+        limit $2 for update of a skip locked`, [input.before, input.limit]);
+        for (const row of rows) {
+            if (row.challenge_id === null)
+                throw new SmsKitError("STORAGE_FAILURE", "system authentication attempt has no challenge", true);
+            const messageId = row.message_id;
+            await this.completeAttempt({
+                messageId,
+                dispatchToken: row.dispatch_token,
+                status: "unknown",
+                occurredAt: input.occurredAt,
+                errorCode: "ACCEPTANCE_UNKNOWN",
+            }, tx);
+            await this.markMessageAcceptance({
+                id: messageId,
+                status: "unknown",
+                occurredAt: input.occurredAt,
+                errorCode: "ACCEPTANCE_UNKNOWN",
+            }, tx);
+            await this.markChallengeDelivery({
+                id: row.challenge_id,
+                status: "unknown",
+                invalidatedAt: input.occurredAt,
+                terminalErrorCode: "ACCEPTANCE_UNKNOWN",
+            }, tx);
+            await this.scheduleReconciliation({ messageId, availableAt: input.occurredAt }, tx);
+            await db(this.pool, tx).query(`insert into sms_kit.audit_event
+          (id, scope_type, tenant_id, actor_id, action, target_type, target_id, result, error_code, metadata, occurred_at)
+         values ($1, 'SYSTEM', null, 'system-auth', 'auth.sms.recover', 'message', $2, 'failed', 'ACCEPTANCE_UNKNOWN', '{}'::jsonb, $3)`, [randomUUID(), messageId, input.occurredAt]);
+        }
+        return rows.length;
+    }
+    async applyReceipt(input, tx) {
+        const client = db(this.pool, tx);
+        const { rows } = await client.query(`select id, acceptance_status, delivery_status from sms_kit.send_message
+        where id::text = $1 and provider_biz_id = $2
+          and scope_type = 'SYSTEM' and tenant_id is null for update`, [input.outId, input.bizId]);
+        const message = rows[0];
+        if (message === undefined)
+            return { matched: false, terminalConflict: false };
+        const inserted = await client.query(`insert into sms_kit.delivery_receipt
+        (id, scope_type, tenant_id, message_id, match_status, dedupe_key, provider_biz_id,
+         provider_out_id, delivery_status, provider_code, occurred_at, received_at, source, redacted_payload)
+       values ($1, 'SYSTEM', null, $2, 'matched', $3, $4, $5, $6, $7, $8, $9, 'callback',
+               '{"redactedFields":["phone"],"reportCount":1}'::jsonb)
+       on conflict (dedupe_key) do nothing returning id`, [randomUUID(), message.id, input.dedupeKey, input.bizId, input.outId,
+            input.status, input.providerCode, input.occurredAt, input.receivedAt]);
+        if (inserted.rowCount === 0) {
+            const promoted = await client.query(`update sms_kit.delivery_receipt
+            set scope_type = 'SYSTEM', tenant_id = null, message_id = $2,
+                match_status = 'matched', provider_out_id = $3
+          where dedupe_key = $1 and match_status = 'unmatched'
+            and provider_biz_id = $4 returning id`, [input.dedupeKey, message.id, input.outId, input.bizId]);
+            if (promoted.rowCount === 0) {
+                const existing = await client.query(`select id from sms_kit.delivery_receipt
+            where dedupe_key = $1 and scope_type = 'SYSTEM' and tenant_id is null
+              and message_id = $2 and match_status = 'matched'`, [input.dedupeKey, message.id]);
+                if (existing.rowCount !== 1)
+                    throw new SmsKitError("CONCURRENT_MODIFICATION", "receipt belongs to another message");
+                return { matched: true, terminalConflict: false };
+            }
+        }
+        if (message.delivery_status !== "waiting" ||
+            (message.acceptance_status !== "accepted" && message.acceptance_status !== "unknown"))
+            return { matched: true, terminalConflict: true };
+        await client.query(`update sms_kit.send_message
+          set acceptance_status = 'accepted',
+              accepted_at = coalesce(accepted_at, $2),
+              delivery_status = $3,
+              delivered_at = case when $3 = 'delivered' then $2 else delivered_at end,
+              finalized_at = $2, version = version + 1, updated_at = now()
+        where id = $1 and scope_type = 'SYSTEM' and tenant_id is null`, [message.id, input.occurredAt, input.status]);
+        return { matched: true, terminalConflict: false };
+    }
+    async scheduleReconciliation(input, tx) {
+        const result = await db(this.pool, tx).query(`insert into sms_kit.send_job
+        (id, scope_type, tenant_id, dedupe_key, job_type, message_id, state,
+         available_at, attempt_count, max_attempts, payload, created_at, updated_at)
+       select $2, 'SYSTEM', null, 'reconcile:' || m.id::text, 'reconcile', m.id,
+              'pending', $3, 0, 1, '{"kind":"reconcile"}'::jsonb, now(), now()
+         from sms_kit.send_message m
+        where m.id = $1 and m.scope_type = 'SYSTEM' and m.tenant_id is null
+          and m.acceptance_status in ('accepted', 'unknown')
+       on conflict (scope_type, (coalesce(tenant_id, '')), job_type, dedupe_key)
+       do nothing`, [input.messageId, randomUUID(), input.availableAt]);
+        if (result.rowCount === 1)
+            return;
+        const existing = await db(this.pool, tx).query(`select id from sms_kit.send_job
+        where scope_type = 'SYSTEM' and tenant_id is null and job_type = 'reconcile'
+          and dedupe_key = 'reconcile:' || $1::text and message_id = $1::uuid`, [input.messageId]);
+        if (existing.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system reconciliation job could not be scheduled");
+    }
+    async leaseReconciliation(input) {
+        const { rows } = await this.pool.query(`with candidate as (
+         select j.id from sms_kit.send_job j
+           join sms_kit.send_message m on m.id = j.message_id
+           join sms_kit.send_attempt a on a.message_id = m.id and a.attempt_no = 1
+          where j.scope_type = 'SYSTEM' and j.tenant_id is null
+            and m.scope_type = 'SYSTEM' and m.tenant_id is null
+            and j.job_type = 'reconcile'
+            and m.delivery_status in ('waiting', 'delivered', 'failed', 'unknown_final')
+            and m.acceptance_status in ('accepted', 'unknown')
+            and a.status in ('accepted', 'unknown')
+            and ((j.state = 'pending' and j.available_at <= $1)
+              or (j.state = 'leased' and j.lease_until < $1))
+          order by j.available_at, j.id
+          limit $2 for update of j, m skip locked
+       )
+       update sms_kit.send_job j
+          set state = 'leased', lease_owner = $3,
+              lease_token = md5(random()::text || clock_timestamp()::text || j.id::text)::uuid,
+              lease_generation = lease_generation + 1,
+              lease_until = $1 + ($4 * interval '1 millisecond'), updated_at = now()
+         from candidate c, sms_kit.send_message m, sms_kit.send_attempt a
+        where j.id = c.id and m.id = j.message_id and a.message_id = m.id and a.attempt_no = 1
+       returning j.id as job_id, j.lease_token, m.id as message_id,
+                 m.phone_ciphertext, m.phone_key_id, m.provider_biz_id,
+                 a.dispatch_marked_at, m.delivery_status`, [input.now, input.limit, input.owner, input.leaseMs]);
+        return rows.map((row) => ({
+            jobId: row.job_id,
+            leaseToken: row.lease_token,
+            messageId: row.message_id,
+            ...(row.phone_ciphertext === null ? {} : { phoneCiphertext: row.phone_ciphertext }),
+            ...(row.phone_key_id === null ? {} : { phoneKeyId: row.phone_key_id }),
+            ...(row.provider_biz_id === null ? {} : { providerBizId: row.provider_biz_id }),
+            dispatchMarkedAt: row.dispatch_marked_at,
+            deliveryStatus: row.delivery_status,
+        }));
+    }
+    async finishTerminalReconciliation(input, tx) {
+        const client = db(this.pool, tx);
+        const completed = await client.query(`update sms_kit.send_job
+          set state = 'succeeded', lease_owner = null, lease_token = null,
+              lease_until = null, updated_at = now()
+        where id = $1 and message_id = $2 and scope_type = 'SYSTEM' and tenant_id is null
+          and job_type = 'reconcile' and state = 'leased' and lease_token = $3
+          and lease_until > $4
+          and exists (select 1 from sms_kit.send_message m where m.id = $2
+            and m.scope_type = 'SYSTEM' and m.tenant_id is null
+            and m.delivery_status in ('delivered', 'failed', 'unknown_final'))`, [input.lease.jobId, input.lease.messageId, input.lease.leaseToken, input.occurredAt]);
+        if (completed.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system reconciliation lease is no longer current");
+    }
+    async completeQueryReconciliation(input, tx) {
+        const client = db(this.pool, tx);
+        const lease = await client.query(`select id from sms_kit.send_job
+        where id = $1 and message_id = $2 and scope_type = 'SYSTEM' and tenant_id is null
+          and job_type = 'reconcile' and state = 'leased' and lease_token = $3
+          and lease_until > $4 for update`, [input.lease.jobId, input.lease.messageId, input.lease.leaseToken, input.receivedAt]);
+        if (lease.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system reconciliation lease is no longer current");
+        const message = await client.query(`select delivery_status, acceptance_status from sms_kit.send_message
+        where id = $1 and scope_type = 'SYSTEM' and tenant_id is null for update`, [input.lease.messageId]);
+        if (message.rows[0]?.delivery_status === "waiting" &&
+            ["accepted", "unknown"].includes(message.rows[0].acceptance_status)) {
+            await client.query(`insert into sms_kit.delivery_receipt
+          (id, scope_type, tenant_id, message_id, match_status, dedupe_key, provider_biz_id,
+           provider_out_id, delivery_status, provider_code, occurred_at, received_at, source, redacted_payload)
+         values ($1, 'SYSTEM', null, $2::uuid, 'matched', $3, $4, $2::text, $5, $6, $7, $8,
+                 'query', '{"redactedFields":["phone"],"reportCount":1}'::jsonb)
+         on conflict (dedupe_key) do nothing`, [randomUUID(), input.lease.messageId, input.dedupeKey,
+                input.lease.providerBizId ?? null, input.status, input.providerCode ?? null,
+                input.occurredAt, input.receivedAt]);
+            await client.query(`update sms_kit.send_message
+            set acceptance_status = 'accepted', accepted_at = coalesce(accepted_at, $2),
+                delivery_status = $3,
+                delivered_at = case when $3 = 'delivered' then $2 else delivered_at end,
+                finalized_at = $2, version = version + 1, updated_at = now()
+          where id = $1 and scope_type = 'SYSTEM' and tenant_id is null`, [input.lease.messageId, input.occurredAt, input.status]);
+        }
+        const completed = await client.query(`update sms_kit.send_job set state = 'succeeded', lease_owner = null,
+          lease_token = null, lease_until = null, updated_at = now()
+        where id = $1 and scope_type = 'SYSTEM' and tenant_id is null
+          and state = 'leased' and lease_token = $2`, [input.lease.jobId, input.lease.leaseToken]);
+        if (completed.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system reconciliation lease changed concurrently");
+    }
+    async rescheduleReconciliation(input) {
+        await this.pool.query(`update sms_kit.send_job
+          set state = 'pending', available_at = $3, lease_owner = null, lease_token = null,
+              lease_until = null, attempt_count = attempt_count + 1,
+              last_error_code = $4, updated_at = now()
+        where id = $1 and scope_type = 'SYSTEM' and tenant_id is null
+          and state = 'leased' and lease_token = $2`, [input.lease.jobId, input.lease.leaseToken, input.availableAt, input.errorCode]);
+    }
+    async finalizeUnknownReconciliation(input, tx) {
+        const client = db(this.pool, tx);
+        const lease = await client.query(`select id from sms_kit.send_job
+        where id = $1 and message_id = $2 and scope_type = 'SYSTEM' and tenant_id is null
+          and job_type = 'reconcile' and state = 'leased' and lease_token = $3
+          and lease_until > $4 for update`, [input.lease.jobId, input.lease.messageId, input.lease.leaseToken, input.occurredAt]);
+        if (lease.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system reconciliation lease is no longer current");
+        await client.query(`update sms_kit.send_message
+          set delivery_status = 'unknown_final', final_error_code = 'DELIVERY_UNKNOWN',
+              finalized_at = $2, version = version + 1, updated_at = now()
+        where id = $1 and scope_type = 'SYSTEM' and tenant_id is null
+          and delivery_status = 'waiting'`, [input.lease.messageId, input.occurredAt]);
+        const completed = await client.query(`update sms_kit.send_job
+          set state = 'succeeded', lease_owner = null, lease_token = null,
+              lease_until = null, updated_at = now()
+        where id = $1 and scope_type = 'SYSTEM' and tenant_id is null
+          and state = 'leased' and lease_token = $2`, [input.lease.jobId, input.lease.leaseToken]);
+        if (completed.rowCount !== 1)
+            throw new SmsKitError("CONCURRENT_MODIFICATION", "system reconciliation lease changed concurrently");
     }
     async markMessageAcceptance(input, tx) {
         const result = await db(this.pool, tx).query(`update sms_kit.send_message set acceptance_status = $2, delivery_status = case when $2 = 'rejected' then 'not_applicable' else 'waiting' end,

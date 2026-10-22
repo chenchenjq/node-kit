@@ -64,7 +64,16 @@ export class DispatchRecoveryService {
                     }, tx);
                 }
             }
-            return returnedToPending + attempts.length;
+            const tenantCount = returnedToPending + attempts.length;
+            const remaining = input.limit - tenantCount;
+            const systemCount = remaining > 0 && this.dependencies.systemAuth !== undefined
+                ? await this.dependencies.systemAuth.recoverAbandoned({
+                    before: input.abandonedBefore,
+                    limit: remaining,
+                    occurredAt: this.dependencies.clock.now(),
+                }, tx)
+                : 0;
+            return tenantCount + systemCount;
         });
     }
 }

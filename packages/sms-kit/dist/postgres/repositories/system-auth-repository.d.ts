@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import type { SystemAuthChallenge, SystemAuthRepository } from "../../ports/system-auth.js";
+import type { SystemAuthChallenge, SystemAuthReconciliationLease, SystemAuthRepository } from "../../ports/system-auth.js";
 import type { SmsTransaction } from "../../ports/store.js";
 /** Persistence boundary for singleton login and password-reset SMS only. */
 export declare class PgSystemAuthRepository implements SystemAuthRepository {
@@ -17,5 +17,18 @@ export declare class PgSystemAuthRepository implements SystemAuthRepository {
         id: import("../../core/types.js").MessageId;
         created: boolean;
     }>;
+    startAttempt(input: Parameters<SystemAuthRepository["startAttempt"]>[0], tx: SmsTransaction): Promise<string>;
+    completeAttempt(input: Parameters<SystemAuthRepository["completeAttempt"]>[0], tx: SmsTransaction): Promise<void>;
+    recoverAbandoned(input: Parameters<SystemAuthRepository["recoverAbandoned"]>[0], tx: SmsTransaction): Promise<number>;
+    applyReceipt(input: Parameters<SystemAuthRepository["applyReceipt"]>[0], tx: SmsTransaction): Promise<Readonly<{
+        matched: boolean;
+        terminalConflict: boolean;
+    }>>;
+    scheduleReconciliation(input: Parameters<SystemAuthRepository["scheduleReconciliation"]>[0], tx: SmsTransaction): Promise<void>;
+    leaseReconciliation(input: Parameters<SystemAuthRepository["leaseReconciliation"]>[0]): Promise<readonly SystemAuthReconciliationLease[]>;
+    finishTerminalReconciliation(input: Parameters<SystemAuthRepository["finishTerminalReconciliation"]>[0], tx: SmsTransaction): Promise<void>;
+    completeQueryReconciliation(input: Parameters<SystemAuthRepository["completeQueryReconciliation"]>[0], tx: SmsTransaction): Promise<void>;
+    rescheduleReconciliation(input: Parameters<SystemAuthRepository["rescheduleReconciliation"]>[0]): Promise<void>;
+    finalizeUnknownReconciliation(input: Parameters<SystemAuthRepository["finalizeUnknownReconciliation"]>[0], tx: SmsTransaction): Promise<void>;
     markMessageAcceptance(input: Parameters<SystemAuthRepository["markMessageAcceptance"]>[0], tx: SmsTransaction): Promise<void>;
 }

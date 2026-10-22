@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { SmsKitError } from "../core/errors.js";
 import { normalizeMainlandPhone } from "../core/phone.js";
 import { isCloudApproved } from "../core/resource-usability.js";
@@ -68,6 +68,7 @@ export class SystemAuthSmsService {
                 return {
                     challenge: existing,
                     messageId: undefined,
+                    dispatchToken: undefined,
                     code: undefined,
                     target: undefined,
                 };
@@ -123,9 +124,11 @@ export class SystemAuthSmsService {
                 submittedAt: now,
             }, tx);
             await this.dependencies.store.policy.holdBudget({ ownership: SYSTEM_SCOPE, messageId: message.id, now }, tx);
-            return { challenge, messageId: message.id, code, target };
+            const dispatchToken = await this.dependencies.repository.startAttempt({ messageId: message.id, occurredAt: now }, tx);
+            return { challenge, messageId: message.id, dispatchToken, code, target };
         });
         if (prepared.messageId === undefined ||
+            prepared.dispatchToken === undefined ||
             prepared.code === undefined ||
             prepared.target === undefined) {
             if (prepared.challenge.deliveryAcceptanceStatus !== "accepted")
@@ -135,7 +138,7 @@ export class SystemAuthSmsService {
                 expiresAt: prepared.challenge.expiresAt,
             };
         }
-        const { messageId, code: otpCode, target } = prepared;
+        const { messageId, dispatchToken, code: otpCode, target } = prepared;
         let outcome;
         try {
             outcome = await withProviderTimeout(() => this.dependencies.provider.send({
@@ -154,6 +157,13 @@ export class SystemAuthSmsService {
         const now = this.dependencies.clock.now();
         if (outcome.kind === "accepted") {
             await this.dependencies.store.transaction(async (tx) => {
+                await this.dependencies.repository.completeAttempt({
+                    messageId,
+                    dispatchToken,
+                    status: "accepted",
+                    occurredAt: now,
+                    providerRequestId: outcome.requestId,
+                }, tx);
                 await this.dependencies.repository.markMessageAcceptance({
                     id: messageId,
                     status: "accepted",
@@ -162,6 +172,17 @@ export class SystemAuthSmsService {
                     providerRequestId: outcome.requestId,
                 }, tx);
                 await this.dependencies.repository.markChallengeDelivery({ id: prepared.challenge.id, status: "accepted" }, tx);
+                await this.dependencies.repository.scheduleReconciliation({ messageId, availableAt: now }, tx);
+                await this.dependencies.store.audits.append({
+                    id: randomUUID(),
+                    ...SYSTEM_SCOPE,
+                    actorId: "system-auth",
+                    action: "auth.sms.send",
+                    targetType: "message",
+                    targetId: messageId,
+                    result: "succeeded",
+                    occurredAt: now,
+                }, tx);
             });
             return {
                 id: prepared.challenge.id,
@@ -170,6 +191,17 @@ export class SystemAuthSmsService {
         }
         const errorCode = outcome.kind === "unknown" ? outcome.code : "PROVIDER_REJECTED";
         await this.dependencies.store.transaction(async (tx) => {
+            await this.dependencies.repository.completeAttempt({
+                messageId,
+                dispatchToken,
+                status: outcome.kind === "unknown" ? "unknown" : "rejected",
+                occurredAt: now,
+                ...(outcome.kind === "rejected" ? { providerCode: outcome.code } : {}),
+                ...(outcome.kind === "rejected" && outcome.requestId !== undefined
+                    ? { providerRequestId: outcome.requestId }
+                    : {}),
+                errorCode,
+            }, tx);
             await this.dependencies.repository.markMessageAcceptance({
                 id: messageId,
                 status: outcome.kind === "unknown" ? "unknown" : "rejected",
@@ -187,6 +219,19 @@ export class SystemAuthSmsService {
                 status: outcome.kind === "unknown" ? "unknown" : "rejected",
                 invalidatedAt: now,
                 terminalErrorCode: errorCode,
+            }, tx);
+            if (outcome.kind === "unknown")
+                await this.dependencies.repository.scheduleReconciliation({ messageId, availableAt: now }, tx);
+            await this.dependencies.store.audits.append({
+                id: randomUUID(),
+                ...SYSTEM_SCOPE,
+                actorId: "system-auth",
+                action: "auth.sms.send",
+                targetType: "message",
+                targetId: messageId,
+                result: "failed",
+                errorCode,
+                occurredAt: now,
             }, tx);
         });
         if (outcome.kind === "unknown")

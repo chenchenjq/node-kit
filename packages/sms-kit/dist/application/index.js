@@ -11,6 +11,7 @@ export { SendWorker } from "./send-worker.js";
 export { DispatchRecoveryService } from "./dispatch-recovery-service.js";
 export { ReceiptService } from "./receipt-service.js";
 export { ReconcileService } from "./reconcile-service.js";
+export { SystemAuthReconcileService } from "./system-auth-reconcile-service.js";
 export { ReconcileAdminService } from "./reconcile-admin-service.js";
 export { MaintenanceService } from "./maintenance-service.js";
 export { HealthService } from "./health-service.js";

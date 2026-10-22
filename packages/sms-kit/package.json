@@ -7,6 +7,7 @@
     "node": ">=20"
   },
   "files": [
+    "LICENSE",
     "dist",
     "README.md",
     "AI_USAGE.md"
@@ -116,5 +117,6 @@
     "typescript": "7.0.2",
     "vite": "6.4.1",
     "vitest": "4.0.18"
-  }
+  },
+  "license": "Apache-2.0"
 }

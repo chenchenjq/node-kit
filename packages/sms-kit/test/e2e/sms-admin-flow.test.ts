@@ -67,9 +67,9 @@ describe.sequential("complete SMS administration flow", () => {
       items: [{ id: enabledTemplate.id, templateKey: "notice.fixture", enabled: true }],
     });
 
-    const sharedIdempotencyKey = "fixture:shared-idempotency-key";
-    const messageA = await tenantA.enqueueFixtureNotification(sharedIdempotencyKey);
-    const messageB = await tenantB.enqueueFixtureNotification(sharedIdempotencyKey);
+    const messageA = await tenantA.enqueueFixtureNotification("fixture:tenant-a-idempotency-key");
+    const messageB = await tenantB.enqueueFixtureNotification("fixture:tenant-b-idempotency-key");
+    await expect(tenantA.enqueueFixtureNotification("fixture:tenant-a-idempotency-key")).resolves.toMatchObject({ id: messageA.id });
     expect(messageA.id).not.toBe(messageB.id);
     expect(messageA).toMatchObject({ acceptanceStatus: "pending", deliveryStatus: "not_applicable" });
     expect(messageB).toMatchObject({ acceptanceStatus: "pending", deliveryStatus: "not_applicable" });

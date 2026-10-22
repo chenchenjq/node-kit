@@ -33,7 +33,7 @@ export type ConsumeSystemAuthProofInput = Readonly<{
     consumptionKey: string;
 }>;
 export type SystemAuthSmsServiceDependencies = Readonly<{
-    store: Pick<SmsStore, "transaction" | "config" | "resources" | "policy" | "rateLimits">;
+    store: Pick<SmsStore, "transaction" | "config" | "resources" | "policy" | "rateLimits" | "audits">;
     repository: SystemAuthRepository;
     provider: SmsProvider;
     phoneProtector: Pick<PhoneNumberProtector, "protect">;

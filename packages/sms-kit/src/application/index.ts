@@ -71,6 +71,8 @@ export type {
   ReceiptServiceDependencies,
 } from "./receipt-service.js";
 export { ReconcileService } from "./reconcile-service.js";
+export { SystemAuthReconcileService } from "./system-auth-reconcile-service.js";
+export type { SystemAuthReconcileServiceDependencies } from "./system-auth-reconcile-service.js";
 export type {
   ReconcileRunInput,
   ReconcileServiceDependencies,

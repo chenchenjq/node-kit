@@ -20,6 +20,16 @@ export type SystemAuthChallenge = Readonly<{
     proofHash?: string;
     proofExpiresAt?: Date;
 }>;
+export type SystemAuthReconciliationLease = Readonly<{
+    jobId: string;
+    leaseToken: string;
+    messageId: MessageId;
+    phoneCiphertext?: string;
+    phoneKeyId?: string;
+    providerBizId?: string;
+    dispatchMarkedAt: Date;
+    deliveryStatus: "waiting" | "delivered" | "failed" | "unknown_final";
+}>;
 export interface SystemAuthRepository {
     getChallengeByIdempotency(input: Readonly<{
         idempotencyKey: string;
@@ -88,6 +98,67 @@ export interface SystemAuthRepository {
         id: MessageId;
         created: boolean;
     }>;
+    startAttempt(input: Readonly<{
+        messageId: MessageId;
+        occurredAt: Date;
+    }>, tx: SmsTransaction): Promise<string>;
+    completeAttempt(input: Readonly<{
+        messageId: MessageId;
+        dispatchToken: string;
+        status: "accepted" | "rejected" | "unknown";
+        occurredAt: Date;
+        providerRequestId?: string;
+        providerCode?: string;
+        errorCode?: string;
+    }>, tx: SmsTransaction): Promise<void>;
+    recoverAbandoned(input: Readonly<{
+        before: Date;
+        limit: number;
+        occurredAt: Date;
+    }>, tx: SmsTransaction): Promise<number>;
+    applyReceipt(input: Readonly<{
+        outId: string;
+        bizId: string;
+        dedupeKey: string;
+        status: "delivered" | "failed";
+        providerCode: string;
+        occurredAt: Date;
+        receivedAt: Date;
+    }>, tx: SmsTransaction): Promise<Readonly<{
+        matched: boolean;
+        terminalConflict: boolean;
+    }>>;
+    scheduleReconciliation(input: Readonly<{
+        messageId: MessageId;
+        availableAt: Date;
+    }>, tx: SmsTransaction): Promise<void>;
+    leaseReconciliation(input: Readonly<{
+        owner: string;
+        now: Date;
+        limit: number;
+        leaseMs: number;
+    }>): Promise<readonly SystemAuthReconciliationLease[]>;
+    completeQueryReconciliation(input: Readonly<{
+        lease: SystemAuthReconciliationLease;
+        status: "delivered" | "failed";
+        occurredAt: Date;
+        receivedAt: Date;
+        dedupeKey: string;
+        providerCode?: string;
+    }>, tx: SmsTransaction): Promise<void>;
+    finishTerminalReconciliation(input: Readonly<{
+        lease: SystemAuthReconciliationLease;
+        occurredAt: Date;
+    }>, tx: SmsTransaction): Promise<void>;
+    rescheduleReconciliation(input: Readonly<{
+        lease: SystemAuthReconciliationLease;
+        availableAt: Date;
+        errorCode: string;
+    }>): Promise<void>;
+    finalizeUnknownReconciliation(input: Readonly<{
+        lease: SystemAuthReconciliationLease;
+        occurredAt: Date;
+    }>, tx: SmsTransaction): Promise<void>;
     markMessageAcceptance(input: Readonly<{
         id: MessageId;
         status: "accepted" | "rejected" | "unknown";

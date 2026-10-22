@@ -1,15 +1,16 @@
 {
   "name": "area-kit",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.0.4",
   "type": "module",
   "engines": {
     "node": ">=22.22.1 <23"
   },
   "files": [
+    "LICENSE",
     "dist",
     "scripts/area-kit.mjs",
     "migrations",
+    "snapshots",
     "examples",
     "licenses",
     "README.md",
@@ -36,6 +37,10 @@
       "browser": "./dist/browser-forbidden.js",
       "react-server": "./dist/postgres/next.js",
       "import": "./dist/postgres/index.js"
+    },
+    "./delivery-regions": {
+      "types": "./dist/source/mca-delivery-regions.d.ts",
+      "import": "./dist/source/mca-delivery-regions.js"
     },
     "./client": {
       "types": "./dist/client/index.d.ts",
@@ -98,5 +103,6 @@
     "tsx": "4.23.13",
     "typescript": "7.0.2",
     "vitest": "4.0.18"
-  }
+  },
+  "license": "Apache-2.0"
 }

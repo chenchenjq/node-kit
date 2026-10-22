@@ -10,6 +10,7 @@
       "area-kit": ["./src/index.ts"],
       "area-kit/server": ["./src/server/index.ts"],
       "area-kit/postgres": ["./src/postgres/index.ts"],
+      "area-kit/delivery-regions": ["./src/source/mca-delivery-regions.ts"],
       "area-kit/client": ["./src/client/index.ts"],
       "area-kit/react": ["./src/react/index.ts"]
     }
