@@ -109,12 +109,20 @@ npm run registry:logs
 
 本次执行备份的 `final-SHA256SUMS` 校验最终 bundle、manifest、执行报告和主要传输归档；`transfer-SHA256SUMS` 保留初始 Registry 快照校验。目标测试日志已复制回源机 `target-evidence/`，不会覆盖源侧同名过程日志。
 
-回滚时先停止新机发布，把开发连接与消费项目 Registry 配置恢复到各自保存的源机值；源 Registry 仍在线。若新机已发布新版本，先单独备份新 storage 并核对增量，不能直接覆盖或丢弃。源码可在新目录从最终 bundle 或整合前 bundle 恢复；旧工作树未提交内容查原归档和 patch，不对源机执行 reset --hard。此次未删除源机数据、测试容器或共享数据库，也未运行 Docker prune。
+回滚时先停止新机发布，把开发连接与消费项目 Registry 配置恢复到各自保存的源机值；源 Registry 仍在线。若新机已发布新版本，先单独备份新 storage 并核对增量，不能直接覆盖或丢弃。源码可在新目录从最终 bundle 或整合前 bundle 恢复；旧工作树未提交内容查原归档和 patch，不对源机执行 reset --hard。源项目主目录、Registry 数据、测试容器和共享数据库均保留，也未运行 Docker prune；已备份的临时工作树按用户授权移除。
+
+### 最后一个工作树的补充清理（2026-10-22）
+
+- ACL 恢复后，逐文件确认 `node-kit-auth-source` 的 790 个文件与原备份一致；新完整归档包含 1073 个文件／目录条目，当前 Git 管理信息和分支 bundle 均已保存。检查期间 Git 索引字节变化，但暂存路径、对象 ID 和模式一致；变化前后的管理快照一并保留。
+- 工作区无未提交内容，`codex/auth-kit-source-restore` 的 `9a1c873e13f1d7d4fcf61cf165a4ad3cc3baff95` 是 master 祖先。备份验证脚本退出 0，并实际通过 agy / gemini-3.8-flash 复核；目标备份副本 SHA-256 全部一致。
+- 顺序执行解锁、普通 worktree remove、branch -d，均退出 0，没有使用 force。已确认旧目录、Git worktree 注册和分支引用均不存在；源机仅保留 `/home/node-kit` 主工作树，master / main 两个本地分支。
+- 证据、完整归档、分支 bundle 位于两端执行备份的 `auth-worktree-retirement/`；`cleanup-journal.json` 记录实际命令与退出码，`backup-SHA256SUMS` 校验删除前备份。旧绝对路径不再可运行，需要恢复时在新目录使用归档／bundle；不要直接覆盖现有 `.git`。
+- 原准备阶段备份不变；更新执行报告、最终 bundle、manifest 和校验清单并同步新主机。本次仅清理已合并资源及修改文档，复用前述应用验收结果，不重复执行应用回归测试。历史重建前丢失的暂存状态仍无法恢复，本次归档完整性限定于当前可读取状态。
 
 ## 7. 明确边界
 
 - **ai-kit、oss-kit 缺 src / test / scripts**：已迁移现有 dist 和 Registry 包并通过入口加载；完整源码开发验收仍需找回原源码。因此不把根级全量 build/typecheck 当作已通过。
-- 源机受权限限制的 `/home/chenjq/.codex/worktrees/node-kit-auth-source` 和对应临时分支仍保留，已有备份且提交已在 master。其他已授权清理结果见原方案；本次保留源机回滚资产。
+- 源机全部附加工作树及临时分支已完成授权清理，恢复归档保留在两端；源项目主目录及运行数据继续保留用于回滚。
 - 五级地区完整 CSV 不在仓库；本次 PostgreSQL 测试使用既有测试数据，未宣称完成全国数据导入或完整地区浏览器业务验收。
 - 未执行真实短信、OSS、AI 供应商调用；未修改其他宿主项目、共享业务数据或 GitHub 分支。
 

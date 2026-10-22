@@ -11,7 +11,7 @@
 - [x] 对合并涉及的 area-kit、sms-kit 做类型检查、构建和测试；核查三个包的打包内容。
 - [x] 通过指定密钥连接目标机，确认 `/www` 可写、项目目录尚不存在、4873 端口未占用。
 - [x] 盘点 PostgreSQL、Redis、Testcontainers、Verdaccio 及持久化目录。
-- [ ] 清理因权限受阻而保留的旧 auth 工作树及关联分支，见第 3 节。
+- [x] 权限恢复后，核验备份并清理最后的 auth 工作树及关联分支，见第 3 节与执行记录。
 - [ ] 找回 ai-kit、oss-kit 的源码、测试和构建脚本；当前仅有编译产物，无法完成这两个包的源码开发验收。
 - [ ] 在迁移窗口暂停包发布，备份并恢复约 1.8 GiB 的 Verdaccio storage，核对版本、标签及认证。
 - [ ] 在目标目录重新安装依赖，验证五个有源码的包及实际消费项目。
@@ -78,20 +78,15 @@
 1. `/home/meteor/.codex/worktrees/node-kit-velox-internal-license`
 2. `/home/node-kit/.worktrees/area-kit`
 3. `/home/node-kit/.worktrees/sms-management-phase1-kit`
+4. `/home/chenjq/.codex/worktrees/node-kit-auth-source`（权限恢复后完成补充清理）
 
-已合并且删除的本地分支：`codex/area-kit`、`codex/auth-kit`、`codex/node-kit-velox-internal-license`、`codex/sms-kit-20260913`、`codex/sms-management-phase1-kit`、`release/sms-kit-v0.1.0`。清理前均确认属于 master 祖先。
+已合并且删除的本地分支：`codex/area-kit`、`codex/auth-kit`、`codex/node-kit-velox-internal-license`、`codex/sms-kit-20260913`、`codex/sms-management-phase1-kit`、`release/sms-kit-v0.1.0`、`codex/auth-kit-source-restore`。清理前均确认属于 master 祖先。
 
 保留 master 和长期分支 main；没有删除远端分支或修改 GitHub 默认分支，也没有推送。因此新机应从本次 bundle 的 **master** 恢复，而不是直接把远端 main 当作整合结果。
 
-**未完成清理：** `/home/chenjq/.codex/worktrees/node-kit-auth-source` 及 `codex/auth-kit-source-restore`。该工作树仍被锁定，当前账号可读但无父目录及工作树写权限，源机 `sudo -n` 要求密码。其提交已进入 master，文件和 Git 管理信息已经备份；保持注册与分支，避免留下不完整删除。由具有源机 sudo 权限的用户核对工作树仍无新增改动后执行：
+**补充清理已完成（2026-10-22）：** ACL 恢复后，确认上述 auth 工作树的 790 个文件与原归档一致、工作区干净、分支提交 `9a1c873e` 已被 master 包含。补存完整工作树、当前 Git 管理信息及分支 bundle，并在新主机校验副本后，依次执行 `git worktree unlock`、`git worktree remove`、`git branch -d`，均成功；未使用 force 或 sudo。源仓库现仅保留主工作树，以及 master / main 两个本地分支。
 
-```bash
-sudo git -c safe.directory=/home/node-kit -C /home/node-kit worktree unlock /home/chenjq/.codex/worktrees/node-kit-auth-source
-sudo git -c safe.directory=/home/node-kit -C /home/node-kit worktree remove /home/chenjq/.codex/worktrees/node-kit-auth-source
-git -C /home/node-kit branch -d codex/auth-kit-source-restore
-```
-
-不要使用 `--force` 绕过这一步可能发现的新改动。引用已移除工作树的历史测试证据应查阅归档；重新测试必须改用 `/home/node-kit` 或新机 `/www/node-kit`。
+补充证据位于 `/home/meteor/node-kit-transfer-20261022/auth-worktree-retirement/`，新机副本位于 `/www/backups/node-kit-transfer-20261022/auth-worktree-retirement/`。原准备阶段备份保持不变。历史重建前的 Git 暂存状态不能凭本次归档恢复；本次保存的是当前可读取的管理状态。引用已移除工作树的历史测试证据应查阅归档；重新测试必须改用 `/home/node-kit` 或新机 `/www/node-kit`。
 
 ## 4. 数据库、隔离环境、容器及数据目录清单
 
@@ -245,6 +240,6 @@ npm view area-kit dist-tags --json --registry http://127.0.0.1:4873
 | npm pack dry-run | area-kit 112 文件，oss-kit 28 文件，sms-kit 202 文件；许可证、快照与新增 JS 入口存在；未发布 |
 | 完整性 / 清理 | bundle verify、归档逐文件 hash、删除前复查、分支祖先检查；git diff --check 通过 |
 
-测试原始日志、退出结果与 agy 输出存于恢复目录 evidence。没有重新跑与整合无关的全仓测试；没有执行目标机 npm ci、源码构建、18.6 / 8.2.10 功能验收、Registry 恢复或 live 供应商测试。缺源码及旧工作树权限问题仍是明确的未完成项。
+以上为准备阶段测试记录，原始日志、退出结果与 agy 输出存于恢复目录 evidence。后续目标机安装、构建、数据库兼容性、Registry 恢复及旧工作树清理结果见执行记录；缺源码问题仍存在，未执行 live 供应商测试。
 
 模型选择依据 [OpenAI 官方指南](https://developers.openai.com/api/docs/guides/model-selection) 与本机 model-selection.md：常规盘点／整合建议 Sol；本次主执行使用现有 Codex 会话，没有声称切换模型；部分测试实际通过 agy 指定 gemini-3.8-flash。所有“通过”均限定于上表实际执行范围。
