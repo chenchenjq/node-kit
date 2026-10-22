@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": { "noEmit": true, "rootDir": ".", "module": "ESNext", "moduleResolution": "Bundler" },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "test/**/*.tsx"],
+  "exclude": ["dist", "node_modules", "examples"]
+}

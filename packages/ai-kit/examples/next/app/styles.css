@@ -1,0 +1,123 @@
+/* Reference styling only; keep your host's established UI and override these classes. */
+:root {
+  color-scheme: light;
+  --ai-kit-ink: #25334b;
+  --ai-kit-border: #cbd5e1;
+  --ai-kit-surface: #f4f7fb;
+  --ai-kit-accent: #2357a6;
+  --ai-kit-paper: #fff;
+  scrollbar-color: #94a3b8 var(--ai-kit-surface);
+  scrollbar-width: thin;
+}
+body {
+  margin: 0;
+  background: var(--ai-kit-surface);
+  color: var(--ai-kit-ink);
+  font:
+    16px/1.6 system-ui,
+    sans-serif;
+}
+main {
+  max-width: 1120px;
+  margin: auto;
+  padding: 24px;
+}
+.ai-kit-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+.ai-kit-form {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--ai-kit-border);
+  background: var(--ai-kit-paper);
+  padding: 20px;
+  border-radius: 8px;
+  margin: 16px 0;
+}
+.ai-kit-field {
+  display: grid;
+  gap: 6px;
+}
+.ai-kit-field label {
+  font-weight: 600;
+}
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+input:not([type="checkbox"]),
+select,
+textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--ai-kit-border);
+  border-radius: 4px;
+  color: inherit;
+  background: var(--ai-kit-paper);
+}
+textarea {
+  resize: none;
+}
+button {
+  min-height: 44px;
+  padding: 8px 14px;
+  margin: 4px 4px 4px 0;
+  border: 1px solid var(--ai-kit-accent);
+  border-radius: 4px;
+  color: var(--ai-kit-accent);
+  background: var(--ai-kit-paper);
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+:focus-visible {
+  outline: 3px solid var(--ai-kit-accent);
+  outline-offset: 3px;
+}
+small {
+  font-size: 14px;
+}
+fieldset {
+  min-width: 0;
+  border: 1px solid var(--ai-kit-border);
+  padding: 14px;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    14px/1.6 ui-monospace,
+    monospace;
+}
+.ai-kit-feedback {
+  min-height: 1.6em;
+  overflow-wrap: anywhere;
+}
+[role="alert"] {
+  color: #a02020;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border: 2px solid var(--ai-kit-surface);
+  border-radius: 6px;
+}
+@media (max-width: 720px) {
+  .ai-kit-columns {
+    grid-template-columns: 1fr;
+  }
+  main {
+    padding: 12px;
+  }
+}

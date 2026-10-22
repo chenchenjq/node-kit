@@ -1,0 +1,25 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "paths": {
+      "ai-kit": ["./src/types.ts"],
+      "ai-kit/server": ["./src/server/index.ts"],
+      "ai-kit/catalog": ["./src/catalog.ts"],
+      "ai-kit/react": ["./src/react/index.ts"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    "test/**/*.tsx",
+    "examples/**/*.ts",
+    "examples/**/*.tsx",
+    "scripts/**/*.ts"
+  ],
+  "exclude": ["dist", "node_modules"]
+}

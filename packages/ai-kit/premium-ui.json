@@ -1,0 +1,6 @@
+{
+  "profile": "reusable-library",
+  "sourceRoots": ["src/react", "examples/next/app"],
+  "canonicalMap": "README.md",
+  "ownership": { "Select/Listbox": "native" }
+}
