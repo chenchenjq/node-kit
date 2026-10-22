@@ -58,9 +58,9 @@ describe("auth-kit PG/Redis security contract", () => {
       if(!new URL(testUrl).pathname.startsWith('/scm_auth_runtime_test_'))throw new Error('Refusing a non-test database');
       pool=new Pool({connectionString:testUrl});redis=new Redis(process.env.SCM_AUTH_TEST_REDIS_URL!);await redis.ping();
     }else{
-      pgContainer = await new GenericContainer("postgres:17-alpine").withEnvironment({POSTGRES_USER:"test",POSTGRES_PASSWORD:"test",POSTGRES_DB:"auth_test"}).withExposedPorts(5432).withTmpFs({"/var/lib/postgresql/data":"rw"}).start();
+      pgContainer = await new GenericContainer("postgres@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6").withEnvironment({POSTGRES_USER:"test",POSTGRES_PASSWORD:"test",POSTGRES_DB:"auth_test"}).withExposedPorts(5432).withTmpFs({"/var/lib/postgresql":"rw"}).start();
       pool=new Pool({host:pgContainer.getHost(),port:pgContainer.getMappedPort(5432),user:"test",password:"test",database:"auth_test"});
-      redisContainer=await new GenericContainer("redis:7-alpine").withExposedPorts(6379).start();redis=new Redis({host:redisContainer.getHost(),port:redisContainer.getMappedPort(6379),maxRetriesPerRequest:1});await redis.ping();
+      redisContainer=await new GenericContainer("redis@sha256:e5f23377739f95a2f530b9c99f93accb4f634577f09d00a7d8e0638f2fdf69e0").withExposedPorts(6379).start();redis=new Redis({host:redisContainer.getHost(),port:redisContainer.getMappedPort(6379),maxRetriesPerRequest:1});await redis.ping();
     }
     await pool.query(authSchemaSql("auth_harden"));
     await migrateSmsKit(pool);

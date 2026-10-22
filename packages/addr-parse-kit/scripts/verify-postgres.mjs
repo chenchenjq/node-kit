@@ -17,7 +17,7 @@ if (!existsSync(AREA_KIT_DIST)) {
   console.error("[verify-postgres] 需要先构建 area-kit：npm run build --workspace packages/area-kit");
   process.exit(1);
 }
-const IMAGE = "postgres@sha256:54451ecb8ab38c24c3ec123f2fd501303a3a1856a5c66e98cecf2460d5e1e9d7";
+const IMAGE = "postgres@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6";
 const DB = "area_parse_kit_ephemeral_test";
 const USER = "isolated-test-only";
 
