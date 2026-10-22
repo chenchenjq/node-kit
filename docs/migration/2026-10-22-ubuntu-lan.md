@@ -2,7 +2,7 @@
 
 盘点日期：2026-10-22（Asia/Shanghai）。源目录 `/home/node-kit`，目标 `meteor@192.168.0.66:/www/node-kit`，SSH 私钥位于源机 `~/.ssh/66_meteor`。
 
-本次已实施本地代码整合、备份、可执行范围内的工作树／临时分支清理；目标机仅做只读检查。**尚未传输项目、恢复数据库、停止旧 Registry、启动新 Registry、切换消费项目或推送 GitHub。** 下列迁移命令属于待执行方案。
+本文保留首次盘点与准备阶段的状态。用户随后授权的迁移已执行，最新结果、实际命令和验收边界见 [迁移执行与验收记录](./2026-10-22-ubuntu-lan-execution.md)。下列准备清单及第 6 节属于执行前记录，不代表目标机的最新状态。
 
 ## 1. 结论与准备清单
 
@@ -145,7 +145,7 @@ node-kit 各包由宿主注入存储、连接、schema 和迁移流程，没有�
 
 Registry 当前标签需要原样保存：sms-kit `latest=0.0.18`、`scm-verified=0.0.20`；auth-kit `latest=0.1.1`、`scm-verified=0.3.5`；area-kit `latest=0.0.4`；其余四包 `latest=0.0.0`。不要为迁移运行 `registry:publish`，该命令会构建并发布，而不是恢复仓库。
 
-## 5. 分阶段迁移步骤（尚未执行）
+## 5. 分阶段迁移步骤（原方案，执行结果见独立记录）
 
 ### A. 传输可恢复的代码与证据
 
@@ -166,10 +166,10 @@ rsync -a --no-owner --no-group \
 set -e
 cd /www/backups/node-kit-migration-20261022
 sha256sum -c SHA256SUMS
-git bundle verify migration.bundle
 test ! -e /www/node-kit
 git clone --branch master /www/backups/node-kit-migration-20261022/migration.bundle /www/node-kit
 cd /www/node-kit
+git bundle verify /www/backups/node-kit-migration-20261022/migration.bundle
 git remote set-url origin https://github.com/chenchenjq/node-kit.git
 git rev-parse HEAD
 git status --short
