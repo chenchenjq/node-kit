@@ -7,6 +7,7 @@
 | 项目 | 实际状态 |
 | --- | --- |
 | 项目 | `/www/node-kit`，master；与源机最终提交一致，最终 SHA 见两端备份目录的 `final-manifest.json` |
+| Git 提交身份 | 沿用源项目 user.name / user.email，仅配置目标仓库 local，已验证可解析提交身份；GitHub 认证未配置 |
 | 系统 | Ubuntu 24.04.4 LTS，x86_64 |
 | Node / npm | 22.23.3 / 10.9.9 |
 | Docker / Compose | 29.9.0 / 5.6.1，meteor 可直接运行测试容器 |
