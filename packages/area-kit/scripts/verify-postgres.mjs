@@ -6,7 +6,7 @@ import { withPostgres } from "./with-postgres.mjs";
 try {
   process.exitCode = await withPostgres((config) => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
-      fileURLToPath(new URL("../node_modules/vitest/vitest.mjs", import.meta.url)),
+      fileURLToPath(new URL("./vitest.mjs", import.meta.resolve("vitest/package.json"))),
       "run", "--config", "vitest.postgres.config.ts", ...process.argv.slice(2),
     ], {
       cwd: fileURLToPath(new URL("../", import.meta.url)),
