@@ -6,7 +6,7 @@
 
 | 项目 | 实际状态 |
 | --- | --- |
-| 项目 | `/www/node-kit`，master；与源机最终提交一致，最终 SHA 见两端备份目录的 `final-manifest.json` |
+| 项目 | `/www/node-kit`，master；源机、新主机与 GitHub master 同步，最终 SHA 见两端备份目录的 `final-manifest.json` 与 `github-finalization/final-verification.json` |
 | Git 提交身份 | 沿用源项目 user.name / user.email，仅配置目标仓库 local，已验证可解析提交身份；GitHub 认证未配置 |
 | 系统 | Ubuntu 24.04.4 LTS，x86_64 |
 | Node / npm | 22.23.3 / 10.9.9 |
@@ -22,7 +22,7 @@
 
 ## 2. 数据与代码完整性
 
-1. 已复制原准备阶段备份，目标目录 `/www/backups/node-kit-migration-20261022`，校验原 SHA256SUMS。主代码由 bundle 的 master 恢复，origin 配置为 `https://github.com/chenchenjq/node-kit.git`。本次未推送 GitHub。
+1. 已复制原准备阶段备份，目标目录 `/www/backups/node-kit-migration-20261022`，校验原 SHA256SUMS。主代码由 bundle 的 master 恢复，origin 配置为 `https://github.com/chenchenjq/node-kit.git`。后续按用户授权将 master 推送 GitHub，三端同步记录见第 8 节。
 2. 源 Verdaccio 短暂停止后生成一致性归档，随后恢复服务。storage 共 **2727 文件、1,885,850,751 bytes**；目标启动前逐文件 SHA-256 校验全部通过。
 3. 源镜像导出并加载到目标。Docker 旧存储与 containerd 显示的 image ID 不同，但 RootFS 层、Config、架构及 OS 完全一致，证据 `image-equivalence.json`；未升级 Verdaccio。
 4. 通过新机 HTTP 下载并校验 **7 个包、40 个版本**的 tarball、完整性、包名与版本。迁移收尾时两端版本集合、标签和 tarball 摘要仍与停写快照一致。
@@ -124,6 +124,18 @@ npm run registry:logs
 - **ai-kit / oss-kit 源码缺失已解决**：从 Git 未引用目录树恢复 99 个原文件，重建 64 个 dist 文件与原产物一致；新机补验两包 build/typecheck、179 项默认测试、PostgreSQL 18.6、真实 tarball 消费及 ai-kit 浏览器流程。此前第 4 节是初次迁移测试快照，最新补充见源码恢复记录；没有重复跑根级全仓回归。
 - 源机全部附加工作树及临时分支已完成授权清理，恢复归档保留在两端；源项目主目录及运行数据继续保留用于回滚。
 - 五级地区完整 CSV 不在仓库；本次 PostgreSQL 测试使用既有测试数据，未宣称完成全国数据导入或完整地区浏览器业务验收。
-- 未执行真实短信、OSS、AI 供应商调用；未修改其他宿主项目、共享业务数据或 GitHub 分支。
+- 未执行真实短信、OSS、AI 供应商调用；未修改其他宿主项目或共享业务数据。GitHub 仅更新用户授权的 master 分支。
 
 结论限定为：**代码与 Registry 迁移完成；七个包均已具备源码与开发工具，新机通过初次迁移及源码恢复阶段记录的验收。真实云服务调用未纳入验收。**
+
+## 8. GitHub 推送与三端一致性收口
+
+2026-10-22，用户授权将当前 master 推送至 [chenchenjq/node-kit](https://github.com/chenchenjq/node-kit/tree/master)。推送前 GitHub master 为 `f18b4341f3df08582b6e9ccb1bfd27c124cbae76`，已确认是本地 master 的祖先；通过源机项目专用 SSH 密钥执行普通快进推送，没有 force。
+
+包含源码恢复的代码基线 `19a3626f7ee418ea5ea6743e12dfef2e156f3f99` 已完成源机、新机和 GitHub master 三端核对。本次最终记录提交随后一并同步、推送；其完整 SHA 由两端备份的 `final-manifest.json` 和 `github-finalization/final-verification.json` 保存，避免在提交内容中填写自身 SHA。
+
+- 三端验收分别读取 `/home/node-kit` master、`192.168.0.66:/www/node-kit` master，以及 GitHub 实时 `refs/heads/master`，要求完全相等；不以缓存的 origin/master 代替远程核验。
+- `main` 保持 `571b745e3ed183c41de3a803e799199ef1380292`，没有修改默认分支、删除远程分支或发布 Registry 包。
+- 源机原有未跟踪 `.tmp/` 保留且未提交；新机工作区干净。SSH 私钥、Registry token、数据库数据及恢复归档未加入此次提交。
+- 更新两端执行／源码恢复备份中的最终 bundle、manifest、报告和 SHA-256 清单；原准备阶段备份保持不变。
+- 此次仅修改迁移记录和同步 Git，复用此前应用测试结果，执行 Git 一致性及备份完整性核验。

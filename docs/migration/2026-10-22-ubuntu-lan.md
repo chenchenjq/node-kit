@@ -82,7 +82,7 @@
 
 已合并且删除的本地分支：`codex/area-kit`、`codex/auth-kit`、`codex/node-kit-velox-internal-license`、`codex/sms-kit-20260913`、`codex/sms-management-phase1-kit`、`release/sms-kit-v0.1.0`、`codex/auth-kit-source-restore`。清理前均确认属于 master 祖先。
 
-保留 master 和长期分支 main；没有删除远端分支或修改 GitHub 默认分支，也没有推送。因此新机应从本次 bundle 的 **master** 恢复，而不是直接把远端 main 当作整合结果。
+保留 master 和长期分支 main；准备阶段没有推送，后续已按用户授权将整合及源码恢复结果推送到 GitHub **master**，详见执行记录第 8 节。没有删除远端分支或修改 GitHub 默认分支；远端 main 保持原提交，不能将其当作本次迁移结果。
 
 **补充清理已完成（2026-10-22）：** ACL 恢复后，确认上述 auth 工作树的 790 个文件与原归档一致、工作区干净、分支提交 `9a1c873e` 已被 master 包含。补存完整工作树、当前 Git 管理信息及分支 bundle，并在新主机校验副本后，依次执行 `git worktree unlock`、`git worktree remove`、`git branch -d`，均成功；未使用 force 或 sudo。源仓库现仅保留主工作树，以及 master / main 两个本地分支。
 
